@@ -1,0 +1,179 @@
+using UnityEngine;
+using Photon.Pun;
+
+/// <summary>
+/// RemoteExpertの視線データをワールド座標に変換し、
+/// SetMode()で指定された方式（Ray / Circle / Frustum）で表示するメインコントローラー。
+/// Start()でRay/Circle/FrustumVisualizerをAddComponentする。
+/// </summary>
+public enum VisualizationMode
+{
+    Ray,
+    Circle,
+    Frustum
+}
+
+public class GazeVisualizer : MonoBehaviour
+{
+    private RayVisualizer rayVisualizer;
+    private CircleVisualizer circleVisualizer;
+    private FrustumVisualizer frustumVisualizer;
+
+    private VisualizationMode currentMode = VisualizationMode.Ray;
+    private GazeHandler targetGazeHandler;
+
+    // Raycast設定（Quest向け最適化済み）
+    private const float MAX_RAY_DISTANCE = 10f;  // 100m→10mに短縮（部屋のスケールで十分）
+    private LayerMask raycastMask = ~0;
+
+    // パフォーマンス最適化用
+    private int frameCounter = 0;
+    private const int RAYCAST_INTERVAL = 3;       // 3フレームに1回だけRaycast実行
+    private const int FIND_HANDLER_INTERVAL = 30;  // Expert検索は30フレームに1回
+    private bool lastHit = false;
+    private RaycastHit lastHitInfo;
+    private Ray lastRay;
+    private Camera cachedCamera;
+
+    /// <summary>各Visualizerを初期化する</summary>
+    public void Initialize()
+    {
+        rayVisualizer = gameObject.AddComponent<RayVisualizer>();
+        circleVisualizer = gameObject.AddComponent<CircleVisualizer>();
+        frustumVisualizer = gameObject.AddComponent<FrustumVisualizer>();
+
+        SetMode(VisualizationMode.Ray);
+        Debug.Log("[GazeVisualizer] Initialized with all sub-visualizers.");
+    }
+
+    /// <summary>表示モードを切り替える</summary>
+    public void SetMode(VisualizationMode mode)
+    {
+        currentMode = mode;
+
+        if (rayVisualizer != null) rayVisualizer.enabled = (mode == VisualizationMode.Ray);
+        if (circleVisualizer != null) circleVisualizer.enabled = (mode == VisualizationMode.Circle);
+        if (frustumVisualizer != null) frustumVisualizer.enabled = (mode == VisualizationMode.Frustum);
+
+        Debug.Log($"[GazeVisualizer] Mode changed to: {mode}");
+    }
+
+    private void Update()
+    {
+        frameCounter++;
+
+        // ExpertのGazeHandlerを探す（重いので30フレームに1回だけ）
+        if (targetGazeHandler == null)
+        {
+            if (frameCounter % FIND_HANDLER_INTERVAL == 0)
+            {
+                FindExpertGazeHandler();
+            }
+            return;
+        }
+
+        Vector3 gazeData = targetGazeHandler.CurrentGazeData; // ReceivedGazeData から CurrentGazeData に変更
+        float x = gazeData.x;
+        float y = gazeData.y;
+        float blink = gazeData.z;
+
+        // モードの同期
+        if (currentMode != targetGazeHandler.CurrentMode)
+        {
+            SetMode(targetGazeHandler.CurrentMode);
+        }
+
+        // blink中は非表示
+        if (blink > 0.5f)
+        {
+            HideAll();
+            return;
+        }
+
+        // Expertの視線を正確に再現するため、ExpertのTransformを持つダミーカメラを使用する
+        if (cachedCamera == null)
+        {
+            cachedCamera = targetGazeHandler.gameObject.AddComponent<Camera>();
+            cachedCamera.enabled = false; // レンダリングはしない
+            cachedCamera.fieldOfView = 60f; // ConnectionHandlerのデフォルトと同じ
+        }
+
+        // 正規化座標をビューポート座標として使用し、Expertの視点からのレイを計算
+        Ray ray = cachedCamera.ViewportPointToRay(new Vector3(x, y, 0));
+
+        // Frustumモードの場合、Raycastは不要（固定長の錐台を描画するだけ）
+        if (currentMode == VisualizationMode.Frustum)
+        {
+            if (frustumVisualizer != null && frustumVisualizer.enabled)
+            {
+                frustumVisualizer.SetCameraParams(cachedCamera.fieldOfView, cachedCamera.aspect);
+                frustumVisualizer.UpdateVisualization(ray.origin, ray.direction, Vector3.zero, false);
+            }
+            return;
+        }
+
+        // RaycastはN フレームに1回だけ実行する（MeshColliderへの衝突判定が非常に重いため）
+        if (frameCounter % RAYCAST_INTERVAL == 0)
+        {
+            lastHit = Physics.Raycast(ray, out lastHitInfo, MAX_RAY_DISTANCE, raycastMask);
+            lastRay = ray;
+        }
+
+        // 各Visualizerに情報を渡す（キャッシュされた結果を使用）
+        switch (currentMode)
+        {
+            case VisualizationMode.Ray:
+                if (rayVisualizer != null && rayVisualizer.enabled)
+                {
+                    Vector3 rayStart = ray.origin + ray.direction * 0.5f;
+                    Vector3 endPoint = lastHit ? lastHitInfo.point : ray.GetPoint(MAX_RAY_DISTANCE);
+                    rayVisualizer.UpdateVisualization(rayStart, endPoint);
+                }
+                break;
+
+            case VisualizationMode.Circle:
+                if (circleVisualizer != null && circleVisualizer.enabled)
+                {
+                    if (lastHit)
+                    {
+                        circleVisualizer.UpdateVisualization(lastHitInfo.point, lastHitInfo.normal);
+                        circleVisualizer.SetVisible(true);
+                    }
+                    else
+                    {
+                        circleVisualizer.SetVisible(false);
+                    }
+                }
+                break;
+        }
+    }
+
+    private void HideAll()
+    {
+        if (rayVisualizer != null) rayVisualizer.SetVisible(false);
+        if (circleVisualizer != null) circleVisualizer.SetVisible(false);
+        if (frustumVisualizer != null) frustumVisualizer.SetVisible(false);
+    }
+
+    /// <summary>シーン内のExpert側GazeHandlerを検索する</summary>
+    private void FindExpertGazeHandler()
+    {
+        GazeHandler[] handlers = FindObjectsByType<GazeHandler>(FindObjectsSortMode.None);
+        foreach (var handler in handlers)
+        {
+            PhotonView pv = handler.GetComponent<PhotonView>();
+            if (pv != null) // !pv.IsMine の制限を解除し、自分自身のGazeHandlerも探せるようにする
+            {
+                // リモートまたはローカルのプレイヤーのGazeHandlerを取得
+                var owner = pv.Owner;
+                string role = RoleManager.GetPlayerRole(owner);
+                if (role == RoleManager.ROLE_EXPERT || role == "expert")
+                {
+                    targetGazeHandler = handler;
+                    Debug.Log("[GazeVisualizer] Found expert's GazeHandler.");
+                    return;
+                }
+            }
+        }
+    }
+}
