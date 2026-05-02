@@ -1,15 +1,6 @@
 using UnityEngine;
 using Photon.Pun;
 
-/// <summary>
-/// 事前配置済みメッシュのTransformをPhoton RPC経由で全プレイヤーに共有するHandler。
-/// LocalWorker (Quest) 側ではコントローラーでメッシュのキャリブレーション（位置合わせ）が可能。
-///
-/// キャリブレーション操作（グリップ押下中のみ有効）:
-///   左スティック   — XZ平面移動（高さ変更なし）
-///   右スティックX  — Y軸回転
-///   Aボタン        — キャリブレーション確定＆送信
-/// </summary>
 public class MeshHandler : MonoBehaviourPun
 {
     [Header("Scene内の事前配置メッシュのオブジェクト名")]
@@ -27,64 +18,43 @@ public class MeshHandler : MonoBehaviourPun
         meshObject = GameObject.Find(meshObjectName);
         if (meshObject == null)
         {
-            Debug.LogWarning(
-                $"[MeshHandler] Pre-placed mesh '{meshObjectName}' not found in scene. " +
-                "Make sure a GameObject with this name exists.");
+            Debug.LogWarning($"[MeshHandler] Pre-placed mesh '{meshObjectName}' not found in scene.");
             return;
         }
-
-        // ==========================================
-        // 自動軽量化処理（Questの負荷を下げるための最適化）
-        // ==========================================
         OptimizeMeshPerformance(meshObject);
     }
 
-    private void OptimizeMeshPerformance(GameObject targetMesh)
+    private void OptimizeMeshPerformance(GameObject target)
     {
-        // 1. 影の無効化（超ハイポリゴンの影描画はGPUを即死させるため）
-        MeshRenderer[] renderers = targetMesh.GetComponentsInChildren<MeshRenderer>(true);
-        foreach (var r in renderers)
+        foreach (var r in target.GetComponentsInChildren<MeshRenderer>(true))
         {
             r.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
             r.receiveShadows = false;
         }
 
-        // 2. MeshColliderの自動付与（コライダーが無いとレイキャストの衝突判定ができないため）
-        MeshFilter[] filters = targetMesh.GetComponentsInChildren<MeshFilter>(true);
-        int addedColliders = 0;
-        foreach (var filter in filters)
+        int added = 0;
+        foreach (var f in target.GetComponentsInChildren<MeshFilter>(true))
         {
-            // すでに何らかのコライダーが付いていればスキップ
-            if (filter.GetComponent<Collider>() == null)
+            if (f.GetComponent<Collider>() == null)
             {
-                filter.gameObject.AddComponent<MeshCollider>();
-                addedColliders++;
+                f.gameObject.AddComponent<MeshCollider>();
+                added++;
             }
         }
-        if (addedColliders > 0)
-        {
-            Debug.Log($"[MeshHandler] Automatically added {addedColliders} MeshColliders to the mesh.");
-        }
+        if (added > 0) Debug.Log($"[MeshHandler] Added {added} MeshColliders.");
 
-        // 3. 物理エンジン（PhysX）の最適化
-        // MeshColliderがついている静的オブジェクトをスクリプトで動かすと、毎フレームBVH（空間ツリー）の再構築が走りCPUが死ぬ。
-        // これを防ぐために「物理演算の影響を受けないが、動かすことはできる」Kinematic Rigidbodyを付与する。
-        MeshCollider[] colliders = targetMesh.GetComponentsInChildren<MeshCollider>(true);
-        if (colliders.Length > 0 && targetMesh.GetComponent<Rigidbody>() == null)
+        var colliders = target.GetComponentsInChildren<MeshCollider>(true);
+        if (colliders.Length > 0 && target.GetComponent<Rigidbody>() == null)
         {
-            Rigidbody rb = targetMesh.AddComponent<Rigidbody>();
+            var rb = target.AddComponent<Rigidbody>();
             rb.isKinematic = true;
             rb.useGravity = false;
-            Debug.Log("[MeshHandler] Added Kinematic Rigidbody to prevent physics spikes.");
         }
-
-        Debug.Log($"[MeshHandler] Optimized {renderers.Length} renderers and prepared colliders for '{targetMesh.name}'.");
     }
 
     private void Update()
     {
         if (!photonView.IsMine || meshObject == null) return;
-
 #if UNITY_ANDROID
         UpdateCalibration();
 #endif
@@ -93,32 +63,22 @@ public class MeshHandler : MonoBehaviourPun
 #if UNITY_ANDROID
     private void UpdateCalibration()
     {
-        // ==========================================
-        // 追加機能：メッシュのON/OFF切り替え（左コンのXボタン）
-        // ==========================================
-        if (OVRInput.GetDown(OVRInput.Button.Three)) // Xボタン
-        {
+        // X button (left controller) — toggle mesh visibility
+        if (OVRInput.GetDown(OVRInput.Button.One, OVRInput.Controller.LTouch))
             ToggleMeshVisibility();
-        }
 
-        // コントローラー動作テスト用（左コンのYボタン）
-        if (OVRInput.GetDown(OVRInput.Button.Four)) // Yボタン
-        {
-            Debug.Log("✅ [Controller Test] Y Button Pressed! コントローラーの入力は正常にUnityに届いています！");
-        }
+        // Y button (left controller) — input test
+        if (OVRInput.GetDown(OVRInput.Button.Two, OVRInput.Controller.LTouch))
+            Debug.Log("[MeshHandler] Y button OK");
 
-        // ==========================================
-        // 既存：キャリブレーション処理
-        // ==========================================
-        // 右コントローラーのグリップを握っている間だけキャリブレーションモード
-        bool gripHeld = OVRInput.Get(OVRInput.Button.SecondaryHandTrigger);
-
-        if (!gripHeld)
+        // Right grip held → calibration mode
+        bool grip = OVRInput.Get(OVRInput.Button.PrimaryHandTrigger, OVRInput.Controller.RTouch);
+        if (!grip)
         {
             if (isCalibrating)
             {
                 isCalibrating = false;
-                Debug.Log("[MeshHandler] Calibration paused (grip released).");
+                Debug.Log("[MeshHandler] Calibration paused.");
             }
             return;
         }
@@ -129,112 +89,64 @@ public class MeshHandler : MonoBehaviourPun
             Debug.Log("[MeshHandler] Calibration active (right grip held).");
         }
 
-        Vector2 stick = OVRInput.Get(OVRInput.Axis2D.SecondaryThumbstick);
-        bool aHeld = OVRInput.Get(OVRInput.Button.One);
-        bool triggerHeld = OVRInput.Get(OVRInput.Button.SecondaryIndexTrigger);
+        Vector2 stick   = OVRInput.Get(OVRInput.Axis2D.PrimaryThumbstick, OVRInput.Controller.RTouch);
+        bool    aHeld   = OVRInput.Get(OVRInput.Button.One,                OVRInput.Controller.RTouch);
+        bool    trigger = OVRInput.Get(OVRInput.Button.PrimaryIndexTrigger, OVRInput.Controller.RTouch);
 
-        if (triggerHeld)
+        if (trigger)
         {
-            // 人差し指トリガーを押しながらスティック上下 → 高さ（Y軸）移動
+            // Trigger + stick Y → height
             if (Mathf.Abs(stick.y) > 0.1f)
-            {
-                Vector3 heightMovement = Vector3.up * stick.y * moveSpeed * Time.deltaTime;
-                meshObject.transform.position += heightMovement;
-            }
+                meshObject.transform.position += Vector3.up * stick.y * moveSpeed * Time.deltaTime;
         }
         else if (aHeld)
         {
-            // A押しながらスティック左右 → Y軸回転
+            // A + stick X → Y-axis rotation
             if (Mathf.Abs(stick.x) > 0.1f)
-            {
                 meshObject.transform.Rotate(Vector3.up, stick.x * rotateSpeed * Time.deltaTime, Space.World);
-            }
         }
-        else
+        else if (stick.sqrMagnitude > 0.01f)
         {
-            // スティックのみ → XZ平面移動
-            if (stick.sqrMagnitude > 0.01f)
-            {
-                Transform hmd = Camera.main != null ? Camera.main.transform : transform;
-                Vector3 forward = hmd.forward;
-                forward.y = 0f;
-                forward.Normalize();
-                Vector3 right = hmd.right;
-                right.y = 0f;
-                right.Normalize();
-
-                Vector3 movement = (forward * stick.y + right * stick.x) * moveSpeed * Time.deltaTime;
-                meshObject.transform.position += movement;
-            }
+            // Stick alone → XZ movement relative to HMD facing
+            Transform hmd = Camera.main != null ? Camera.main.transform : transform;
+            Vector3 fwd = Vector3.ProjectOnPlane(hmd.forward, Vector3.up).normalized;
+            Vector3 rgt = Vector3.ProjectOnPlane(hmd.right,   Vector3.up).normalized;
+            meshObject.transform.position += (fwd * stick.y + rgt * stick.x) * moveSpeed * Time.deltaTime;
         }
 
-        // Bボタン → 確定＆RPC送信
-        if (OVRInput.GetDown(OVRInput.Button.Two))
+        // B button → confirm & send
+        if (OVRInput.GetDown(OVRInput.Button.Two, OVRInput.Controller.RTouch))
         {
             SendMeshTransform();
-            Debug.Log("[MeshHandler] Calibration confirmed and sent!");
+            Debug.Log("[MeshHandler] Calibration confirmed and sent.");
         }
     }
 #endif
 
     private void ToggleMeshVisibility()
     {
-        if (meshObject != null)
-        {
-            MeshRenderer[] renderers = meshObject.GetComponentsInChildren<MeshRenderer>(true);
-            if (renderers.Length > 0)
-            {
-                // 先頭のレンダラーの状態を反転させる
-                bool newState = !renderers[0].enabled;
-                foreach (var r in renderers)
-                {
-                    r.enabled = newState;
-                }
-                Debug.Log($"[MeshHandler] Mesh visibility toggled to: {(newState ? "ON" : "OFF")}");
-            }
-        }
+        var renderers = meshObject.GetComponentsInChildren<MeshRenderer>(true);
+        if (renderers.Length == 0) return;
+        bool next = !renderers[0].enabled;
+        foreach (var r in renderers) r.enabled = next;
+        Debug.Log($"[MeshHandler] Mesh visibility → {next}");
     }
 
-    /// <summary>
-    /// 現在のメッシュTransformを全プレイヤーに送信する。
-    /// </summary>
     public void SendMeshTransform()
     {
-        if (meshObject == null)
-        {
-            Debug.LogWarning("[MeshHandler] No mesh object to send.");
-            return;
-        }
-
-        photonView.RPC(
-            nameof(RPC_ReceiveMeshTransform),
-            RpcTarget.AllBuffered,
+        if (meshObject == null) return;
+        photonView.RPC(nameof(RPC_ReceiveMeshTransform), RpcTarget.AllBuffered,
             meshObject.transform.position,
             meshObject.transform.rotation,
-            meshObject.transform.localScale
-        );
-
-        Debug.Log("[MeshHandler] Mesh transform sent via RPC.");
+            meshObject.transform.localScale);
     }
 
     [PunRPC]
-    private void RPC_ReceiveMeshTransform(Vector3 position, Quaternion rotation, Vector3 scale)
+    private void RPC_ReceiveMeshTransform(Vector3 pos, Quaternion rot, Vector3 scale)
     {
-        if (meshObject == null)
-        {
-            meshObject = GameObject.Find(meshObjectName);
-        }
-
-        if (meshObject != null)
-        {
-            meshObject.transform.position = position;
-            meshObject.transform.rotation = rotation;
-            meshObject.transform.localScale = scale;
-            Debug.Log($"[MeshHandler] Mesh transform updated: pos={position}, rot={rotation.eulerAngles}");
-        }
-        else
-        {
-            Debug.LogWarning("[MeshHandler] Could not find mesh object to apply received transform.");
-        }
+        if (meshObject == null) meshObject = GameObject.Find(meshObjectName);
+        if (meshObject == null) return;
+        meshObject.transform.SetPositionAndRotation(pos, rot);
+        meshObject.transform.localScale = scale;
     }
 }

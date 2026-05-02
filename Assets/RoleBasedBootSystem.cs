@@ -13,6 +13,9 @@ public enum AppRole
 
 public class RoleBasedBootSystem : MonoBehaviour
 {
+    [TextArea(3, 10)]
+    public string note;
+
     [Header("デバッグ用: Inspector上でロールを選択")]
     [SerializeField] private AppRole selectedRole = AppRole.Worker;
 

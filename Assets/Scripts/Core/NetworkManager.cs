@@ -69,5 +69,20 @@ public class NetworkManager : MonoBehaviourPunCallbacks
     public override void OnDisconnected(DisconnectCause cause)
     {
         Debug.LogWarning($"[NetworkManager] Disconnected: {cause}");
+
+        // Don't reconnect on intentional or unrecoverable causes
+        if (cause == DisconnectCause.DisconnectByClientLogic ||
+            cause == DisconnectCause.ApplicationQuit           ||
+            cause == DisconnectCause.InvalidAuthentication     ||
+            cause == DisconnectCause.CustomAuthenticationFailed) return;
+
+        StartCoroutine(ReconnectAfterDelay(3f));
+    }
+
+    private System.Collections.IEnumerator ReconnectAfterDelay(float delay)
+    {
+        Debug.Log($"[NetworkManager] Reconnecting in {delay}s...");
+        yield return new WaitForSeconds(delay);
+        Connect();
     }
 }

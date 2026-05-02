@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(Get-ChildItem -Path \"C:\\\\Users\\\\mtaku\\\\CoGaze\" -Recurse -Directory)",
+      "Bash(Select-Object -ExpandProperty FullName)",
+      "Bash(Sort-Object)",
+      "Bash(dir /s \"C:\\\\Users\\\\mtaku\\\\CoGaze\\\\Assets\\\\Scripts\\\\*\" -Filter \"*.cs\")",
+      "Bash(Select-Object FullName)",
+      "WebFetch(domain:github.com)"
+    ]
+  }
+}

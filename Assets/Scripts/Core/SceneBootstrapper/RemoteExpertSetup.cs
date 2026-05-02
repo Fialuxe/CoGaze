@@ -2,26 +2,42 @@ using UnityEngine;
 using Photon.Pun;
 
 /// <summary>
-/// RemoteExpert (PC) 側のセットアップ。
-/// RemoteExpert PrefabをInstantiateし、ConnectionHandler・GazeHandler・MeshHandlerをAddComponentする。
-/// GazeHandlerにはOscGazeInputを注入し、外部アイトラッカーからOSC経由で受信した視線データを送信する。
+/// RemoteExpert (PC) side setup.
+/// Spawns the RemoteExpert prefab and attaches all handlers.
+/// Also attaches ExperimentManager (Expert authority) and ExpertUI.
+///
+/// On reconnect (called by SceneBootstrapper), skips re-instantiation and
+/// re-broadcasts the current experiment state so the Worker can recover.
 /// </summary>
 public class RemoteExpertSetup : MonoBehaviour
 {
     private const string PREFAB_PATH = "Prefabs/RemoteExpert";
+    private const int    VIDEO_PORT  = 9100;
 
     private GameObject remoteExpertInstance;
 
+    // Kept for reconnect path
+    private ExperimentManager expManager;
+
+    // Video transport (kept for cleanup)
+    private UdpVideoTransport videoTransport;
+
     public void Initialize()
     {
-        // Expert側（PC）ではVR用のOVRCameraRigは不要なので、シーンにあれば削除して干渉を防ぐ
         OVRCameraRig existingRig = Object.FindAnyObjectByType<OVRCameraRig>();
         if (existingRig != null)
         {
-            // Destroyはフレームの最後に行われるため、先にSetActive(false)してCamera.mainから外す
             existingRig.gameObject.SetActive(false);
             Destroy(existingRig.gameObject);
-            Debug.Log("[RemoteExpertSetup] Disabled and Destroyed OVRCameraRig (Not needed for Expert).");
+        }
+
+        // OVRCameraRig carries the scene's only AudioListener — restore it immediately
+        // so white noise and any other audio works from the first frame.
+        if (Object.FindAnyObjectByType<AudioListener>() == null)
+        {
+            var listenerGo = new GameObject("AudioListener");
+            listenerGo.AddComponent<AudioListener>();
+            Debug.Log("[RemoteExpertSetup] AudioListener created.");
         }
 
         remoteExpertInstance = PhotonNetwork.Instantiate(
@@ -30,30 +46,81 @@ public class RemoteExpertSetup : MonoBehaviour
 
         if (view.IsMine)
         {
-            // ConnectionHandler（FPSカメラ操作 + transform同期）
+            // ConnectionHandler (FPS camera + transform sync)
             if (remoteExpertInstance.GetComponent<ConnectionHandler>() == null)
                 remoteExpertInstance.AddComponent<ConnectionHandler>();
 
-            // PostureHandler（Expertのカメラ位置をWorker側に同期）
+            // PostureHandler
             var postureHandler = remoteExpertInstance.GetComponent<PostureHandler>();
-            if (postureHandler == null) Debug.LogError("[RemoteExpertSetup] PostureHandler is missing from RemoteExpert Prefab!");
+            if (postureHandler == null)
+                Debug.LogError("[RemoteExpertSetup] PostureHandler missing from RemoteExpert prefab.");
 
-            // GazeHandler + OscGazeInput（extOSC経由で視線データ受信）
-            var gazeInput = remoteExpertInstance.AddComponent<OscGazeInput>();
+            // GazeHandler + OscGazeInput
+            var gazeInput   = remoteExpertInstance.AddComponent<OscGazeInput>();
             var gazeHandler = remoteExpertInstance.GetComponent<GazeHandler>();
             if (gazeHandler != null) gazeHandler.Initialize(gazeInput);
-            else Debug.LogError("[RemoteExpertSetup] GazeHandler is missing from RemoteExpert Prefab!");
+            else Debug.LogError("[RemoteExpertSetup] GazeHandler missing from RemoteExpert prefab.");
 
             // MeshHandler
             if (remoteExpertInstance.GetComponent<MeshHandler>() == null)
-                Debug.LogError("[RemoteExpertSetup] MeshHandler is missing from RemoteExpert Prefab!");
+                Debug.LogError("[RemoteExpertSetup] MeshHandler missing from RemoteExpert prefab.");
 
-            // GazeVisualizerをローカル生成（自分がどこを見ているか確認するため）
-            var gazeVisualizerInstance = new GameObject("LocalGazeVisualizer");
-            var gazeVis = gazeVisualizerInstance.AddComponent<GazeVisualizer>();
-            gazeVis.Initialize();
+            // ExperimentManager — Expert is the authority
+            expManager = remoteExpertInstance.AddComponent<ExperimentManager>();
+            expManager.Initialize(isExpert: true);
 
-            Debug.Log("[RemoteExpertSetup] RemoteExpert initialized with all handlers.");
+            // ExpertUI — screen-space overlay on the Expert's monitor
+            var expertUI = remoteExpertInstance.AddComponent<ExpertUI>();
+            expertUI.Initialize(expManager);
+
+            // ── Video transport (UDP receiver) ──────────────────────────
+            videoTransport = new UdpVideoTransport();
+            videoTransport.StartReceiver(VIDEO_PORT);
+
+            // Publish local IP so Worker can find us
+            string localIp = UdpVideoTransport.GetLocalIPv4();
+            var props = new ExitGames.Client.Photon.Hashtable
+            {
+                { "ip", localIp },
+                { "videoPort", VIDEO_PORT }
+            };
+            PhotonNetwork.LocalPlayer.SetCustomProperties(props);
+            Debug.Log($"[RemoteExpertSetup] Published local IP: {localIp}:{VIDEO_PORT}");
+
+            // ExpertVideoDisplay — shows worker's video stream during assembly tasks
+            var videoDisplay = remoteExpertInstance.AddComponent<ExpertVideoDisplay>();
+            videoDisplay.Initialize(expManager, videoTransport);
+
+            // GazeVisualizer (Expert self-view)
+            var vizGo = new GameObject("LocalGazeVisualizer");
+            vizGo.AddComponent<GazeVisualizer>().Initialize();
+
+            Debug.Log("[RemoteExpertSetup] RemoteExpert fully initialized.");
         }
+    }
+
+    /// <summary>
+    /// Called by SceneBootstrapper on reconnect (instead of Initialize).
+    /// Re-registers Photon callbacks and re-broadcasts the current experiment
+    /// state so any reconnecting Worker receives it without a full scene reset.
+    /// </summary>
+    public void BroadcastCurrentState()
+    {
+        if (expManager == null)
+        {
+            Debug.LogWarning("[RemoteExpertSetup] BroadcastCurrentState: expManager is null.");
+            return;
+        }
+
+        // Re-register in case callbacks were cleared during disconnect
+        PhotonNetwork.AddCallbackTarget(expManager);
+
+        expManager.BroadcastCurrentState();
+        Debug.Log("[RemoteExpertSetup] Re-broadcast current experiment state after reconnect.");
+    }
+
+    private void OnDestroy()
+    {
+        videoTransport?.StopReceiver();
     }
 }

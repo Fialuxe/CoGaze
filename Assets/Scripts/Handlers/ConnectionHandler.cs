@@ -5,6 +5,10 @@ using UnityEngine.InputSystem;
 /// RemoteExpert (PC) 側のFPSカメラ操作。
 /// WASD移動 + マウスで視点回転。Minecraftスタイル。
 /// 新しい Input System パッケージ対応。
+///
+/// followTarget が設定されている場合（Assembly中）、
+/// WASD/マウス入力を無視して followTarget の位置・回転に追従する。
+/// キーボード入力（Gaze Mode切替、ESC等）は常に処理される。
 /// </summary>
 public class ConnectionHandler : MonoBehaviour
 {
@@ -20,6 +24,9 @@ public class ConnectionHandler : MonoBehaviour
     private float pitch = 0f;
     private float yaw = 0f;
     private bool cursorLocked = true;
+
+    // ── Follow mode (Assembly中のWorker追従) ──────────────────────────
+    private Transform followTarget;
 
     private void Start()
     {
@@ -41,7 +48,10 @@ public class ConnectionHandler : MonoBehaviour
             Debug.Log("[ConnectionHandler] Created new camera.");
         }
 
-        // 現在の向きを初期値にする
+        // OVRCameraRig is destroyed on Expert side — ensure an AudioListener exists
+        if (FindAnyObjectByType<AudioListener>() == null)
+            cam.gameObject.AddComponent<AudioListener>();
+
         Vector3 euler = cam.transform.eulerAngles;
         yaw = euler.y;
         pitch = euler.x > 180f ? euler.x - 360f : euler.x;
@@ -55,22 +65,45 @@ public class ConnectionHandler : MonoBehaviour
 
         var keyboard = Keyboard.current;
         var mouse = Mouse.current;
+
+        // ── キーボード入力（常に処理 — follow mode 中も有効） ──────────
+        if (keyboard != null)
+        {
+            // Gaze Mode の切り替え（1, 2, 3キー）
+            var gazeHandler = GetComponent<GazeHandler>();
+            if (gazeHandler != null)
+            {
+                if (keyboard.digit1Key.wasPressedThisFrame) { gazeHandler.CurrentMode = VisualizationMode.Ray; Debug.Log("Mode: Ray"); }
+                if (keyboard.digit2Key.wasPressedThisFrame) { gazeHandler.CurrentMode = VisualizationMode.Circle; Debug.Log("Mode: Circle"); }
+                if (keyboard.digit3Key.wasPressedThisFrame) { gazeHandler.CurrentMode = VisualizationMode.Frustum; Debug.Log("Mode: Frustum"); }
+            }
+
+            // ESCでカーソル解除/再ロック
+            if (keyboard.escapeKey.wasPressedThisFrame)
+            {
+                SetCursorLock(!cursorLocked);
+            }
+        }
+
+        // ── Follow mode: Assembly中はWorkerの頭に追従 ─────────────────
+        if (followTarget != null)
+        {
+            cam.transform.position = followTarget.position;
+            cam.transform.rotation = followTarget.rotation;
+
+            // transform を同期（Worker側から見たExpertの位置）
+            transform.position = cam.transform.position;
+            transform.rotation = cam.transform.rotation;
+
+            // pitch/yaw を更新しておく（follow解除後にスムーズに復帰するため）
+            Vector3 euler = followTarget.rotation.eulerAngles;
+            yaw   = euler.y;
+            pitch = euler.x > 180f ? euler.x - 360f : euler.x;
+            return; // WASD/マウスのみスキップ
+        }
+
+        // ── Free mode: 通常のFPS操作 ─────────────────────────────────
         if (keyboard == null || mouse == null) return;
-
-        // Gaze Mode の切り替え（1, 2, 3キー）
-        var gazeHandler = GetComponent<GazeHandler>();
-        if (gazeHandler != null)
-        {
-            if (keyboard.digit1Key.wasPressedThisFrame) { gazeHandler.CurrentMode = VisualizationMode.Ray; Debug.Log("Mode: Ray"); }
-            if (keyboard.digit2Key.wasPressedThisFrame) { gazeHandler.CurrentMode = VisualizationMode.Circle; Debug.Log("Mode: Circle"); }
-            if (keyboard.digit3Key.wasPressedThisFrame) { gazeHandler.CurrentMode = VisualizationMode.Frustum; Debug.Log("Mode: Frustum"); }
-        }
-
-        // ESCでカーソル解除/再ロック
-        if (keyboard.escapeKey.wasPressedThisFrame)
-        {
-            SetCursorLock(!cursorLocked);
-        }
 
         // マウス回転
         if (cursorLocked)
@@ -99,6 +132,35 @@ public class ConnectionHandler : MonoBehaviour
         // → Worker側から見たExpertの位置が正しくなる
         transform.position = cam.transform.position;
         transform.rotation = cam.transform.rotation;
+    }
+
+    public void TeleportTo(Vector3 position, Quaternion rotation)
+    {
+        cam.transform.position = position;
+        cam.transform.rotation = rotation;
+        Vector3 euler = rotation.eulerAngles;
+        yaw   = euler.y;
+        pitch = euler.x > 180f ? euler.x - 360f : euler.x;
+    }
+
+    /// <summary>
+    /// Assembly中にWorkerの頭位置に追従するモードを開始する。
+    /// followTarget が非null の間、WASD/マウス入力は無視される。
+    /// キーボード入力（Gaze Mode切替等）は引き続き処理される。
+    /// </summary>
+    public void SetFollowTarget(Transform target)
+    {
+        followTarget = target;
+        Debug.Log($"[ConnectionHandler] Follow mode ON: {(target != null ? target.name : "null")}");
+    }
+
+    /// <summary>
+    /// 追従モードを解除し、通常のFPS操作に戻す。
+    /// </summary>
+    public void ClearFollowTarget()
+    {
+        followTarget = null;
+        Debug.Log("[ConnectionHandler] Follow mode OFF — free movement restored.");
     }
 
     private void SetCursorLock(bool locked)

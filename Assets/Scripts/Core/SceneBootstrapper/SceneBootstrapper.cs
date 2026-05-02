@@ -6,12 +6,23 @@ using UnityEngine.XR.Management;
 /// Awake()でNetworkManagerを生成し、ルーム参加後にRoleBasedBootSystemの設定に基づいて
 /// LocalWorkerSetup または RemoteExpertSetup を呼び分ける。
 /// Expert時はXRを停止し、Worker時はXRを確保する。
+///
+/// 再接続時(_setupDone == true)は再初期化をスキップし、代わりに軽量な
+/// OnReconnected()パスを実行して実験の状態を復元する。
 /// </summary>
 public class SceneBootstrapper : MonoBehaviour
 {
     private NetworkManager networkManager;
     [TextArea(3, 10)] 
     public string note;
+
+    // Guards against re-running full init on reconnect
+    private bool _setupDone = false;
+    private string _role;
+
+    // References kept for reconnect path
+    private LocalWorkerSetup  _workerSetup;
+    private RemoteExpertSetup _expertSetup;
 
     private void Awake()
     {
@@ -62,44 +73,81 @@ public class SceneBootstrapper : MonoBehaviour
 
     private void OnRoomJoined()
     {
+        if (_setupDone)
+        {
+            // ── Reconnect path ────────────────────────────────────────────
+            // Full init was already done; just recover experiment state.
+            OnReconnected();
+            return;
+        }
+
+        // ── First-time init ───────────────────────────────────────────────
+
         // RoleBasedBootSystem からロールを取得
         RoleBasedBootSystem bootSystem = FindAnyObjectByType<RoleBasedBootSystem>();
 
-        string role;
         if (bootSystem != null)
         {
-            role = bootSystem.SelectedRole == AppRole.Expert
+            _role = bootSystem.SelectedRole == AppRole.Expert
                 ? RoleManager.ROLE_EXPERT
                 : RoleManager.ROLE_WORKER;
-            Debug.Log($"[SceneBootstrapper] Role from RoleBasedBootSystem: {role}");
+            Debug.Log($"[SceneBootstrapper] Role from RoleBasedBootSystem: {_role}");
         }
         else
         {
             // フォールバック: ビルドターゲットで判断
 #if UNITY_ANDROID
-            role = RoleManager.ROLE_WORKER;
+            _role = RoleManager.ROLE_WORKER;
 #else
-            role = RoleManager.ROLE_EXPERT;
+            _role = RoleManager.ROLE_EXPERT;
 #endif
-            Debug.Log($"[SceneBootstrapper] Role from build target (fallback): {role}");
+            Debug.Log($"[SceneBootstrapper] Role from build target (fallback): {_role}");
         }
 
         // ロールをPhotonに登録
-        RoleManager.SetRole(role);
+        RoleManager.SetRole(_role);
 
         // XR制御: Expert時はXRを停止、Worker時はXRを確保
-        ConfigureXR(role);
+        ConfigureXR(_role);
 
         // 対応するSetupを起動
-        if (role == RoleManager.ROLE_WORKER)
+        if (_role == RoleManager.ROLE_WORKER)
         {
-            var setup = gameObject.AddComponent<LocalWorkerSetup>();
-            setup.Initialize();
+            _workerSetup = gameObject.AddComponent<LocalWorkerSetup>();
+            _workerSetup.Initialize();
         }
         else
         {
-            var setup = gameObject.AddComponent<RemoteExpertSetup>();
-            setup.Initialize();
+            _expertSetup = gameObject.AddComponent<RemoteExpertSetup>();
+            _expertSetup.Initialize();
+        }
+
+        _setupDone = true;
+    }
+
+    /// <summary>
+    /// Lightweight reconnect handler.
+    /// Does NOT re-instantiate prefabs or re-run calibration.
+    /// Worker: sends SYNC_REQUEST → Expert re-broadcasts state + RemainingSeconds.
+    /// Expert: re-broadcasts current state immediately.
+    /// MeshHandler calibration is preserved automatically via Photon's AllBuffered RPC cache.
+    /// </summary>
+    private void OnReconnected()
+    {
+        Debug.Log("[SceneBootstrapper] Reconnected — restoring experiment state.");
+
+        if (_role == RoleManager.ROLE_WORKER && _workerSetup != null)
+        {
+            _workerSetup.RequestStateSync();
+        }
+        else if (_role == RoleManager.ROLE_EXPERT && _expertSetup != null)
+        {
+            _expertSetup.BroadcastCurrentState();
+        }
+        else
+        {
+            Debug.LogWarning("[SceneBootstrapper] OnReconnected: no setup reference found. " +
+                             "State recovery may be incomplete.");
         }
     }
 

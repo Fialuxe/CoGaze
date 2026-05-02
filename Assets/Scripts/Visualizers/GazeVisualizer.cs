@@ -5,6 +5,10 @@ using Photon.Pun;
 /// RemoteExpertの視線データをワールド座標に変換し、
 /// SetMode()で指定された方式（Ray / Circle / Frustum）で表示するメインコントローラー。
 /// Start()でRay/Circle/FrustumVisualizerをAddComponentする。
+///
+/// FOV は ExperimentManager の状態に応じて切り替える:
+///   - Identification タスク: Expert の PC カメラ FOV (60°)
+///   - Assembly タスク: PCA カメラの FOV (streamingFov)
 /// </summary>
 public enum VisualizationMode
 {
@@ -35,6 +39,15 @@ public class GazeVisualizer : MonoBehaviour
     private Ray lastRay;
     private Camera cachedCamera;
 
+    // ── FOV 設定 ──────────────────────────────────────────────────────
+    private const float EXPERT_CAMERA_FOV = 60f;   // Expert の PC カメラ (ConnectionHandler)
+    private float streamingFov = 90f;               // PCA カメラの推定 FOV（Quest 3 left camera）
+    private float streamingAspect = 4f / 3f;        // PCA の解像度比 (640x480 = 4:3)
+    private bool  isStreamingMode = false;
+
+    // ExperimentManager 参照（FOV 切替用）
+    private ExperimentManager expManager;
+
     /// <summary>各Visualizerを初期化する</summary>
     public void Initialize()
     {
@@ -58,9 +71,44 @@ public class GazeVisualizer : MonoBehaviour
         Debug.Log($"[GazeVisualizer] Mode changed to: {mode}");
     }
 
+    /// <summary>
+    /// ストリーミング中の PCA カメラパラメータを設定する。
+    /// Assembly 開始時に ExperimentManager から呼ばれる。
+    /// </summary>
+    public void SetStreamingCameraParams(float fov, float aspect)
+    {
+        streamingFov    = fov;
+        streamingAspect = aspect;
+        Debug.Log($"[GazeVisualizer] Streaming camera params: FOV={fov}, aspect={aspect}");
+    }
+
+    /// <summary>
+    /// ストリーミングモード (Assembly) ON/OFF を切り替える。
+    /// cachedCamera の FOV/aspect を適切に更新する。
+    /// </summary>
+    public void SetStreamingMode(bool streaming)
+    {
+        isStreamingMode = streaming;
+        if (cachedCamera != null)
+        {
+            cachedCamera.fieldOfView = streaming ? streamingFov : EXPERT_CAMERA_FOV;
+            if (streaming)
+                cachedCamera.aspect = streamingAspect;
+            else
+                cachedCamera.ResetAspect(); // PC スクリーンの実際のアスペクト比に戻す
+        }
+        Debug.Log($"[GazeVisualizer] Streaming mode: {streaming}, FOV={cachedCamera?.fieldOfView}");
+    }
+
     private void Update()
     {
         frameCounter++;
+
+        // ExperimentManager の参照を取得（1回だけ）
+        if (expManager == null)
+        {
+            expManager = FindAnyObjectByType<ExperimentManager>();
+        }
 
         // ExpertのGazeHandlerを探す（重いので30フレームに1回だけ）
         if (targetGazeHandler == null)
@@ -72,10 +120,21 @@ public class GazeVisualizer : MonoBehaviour
             return;
         }
 
-        Vector3 gazeData = targetGazeHandler.CurrentGazeData; // ReceivedGazeData から CurrentGazeData に変更
+        Vector3 gazeData = targetGazeHandler.CurrentGazeData;
         float x = gazeData.x;
         float y = gazeData.y;
         float blink = gazeData.z;
+
+        // デバッグ: 60フレームに1回、データソースと値を表示
+        if (frameCounter % 60 == 0)
+        {
+            var pv = targetGazeHandler.GetComponent<Photon.Pun.PhotonView>();
+            Debug.Log($"[GazeVisualizer] source={targetGazeHandler.name} " +
+                      $"isMine={pv?.IsMine} " +
+                      $"gaze=({x:F3},{y:F3},{blink:F1}) " +
+                      $"camPos={cachedCamera?.transform.position} " +
+                      $"streaming={isStreamingMode}");
+        }
 
         // モードの同期
         if (currentMode != targetGazeHandler.CurrentMode)
@@ -95,7 +154,17 @@ public class GazeVisualizer : MonoBehaviour
         {
             cachedCamera = targetGazeHandler.gameObject.AddComponent<Camera>();
             cachedCamera.enabled = false; // レンダリングはしない
-            cachedCamera.fieldOfView = 60f; // ConnectionHandlerのデフォルトと同じ
+
+            // 現在のモードに応じて FOV を設定
+            if (isStreamingMode)
+            {
+                cachedCamera.fieldOfView = streamingFov;
+                cachedCamera.aspect      = streamingAspect;
+            }
+            else
+            {
+                cachedCamera.fieldOfView = EXPERT_CAMERA_FOV;
+            }
         }
 
         // 正規化座標をビューポート座標として使用し、Expertの視点からのレイを計算
