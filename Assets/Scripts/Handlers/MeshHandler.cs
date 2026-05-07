@@ -61,6 +61,10 @@ public class MeshHandler : MonoBehaviourPun
     }
 
 #if UNITY_ANDROID
+    // Axis threshold for grip and index trigger — avoids the Quest 3 Touch Plus
+    // digital-button threshold mismatch that prevents calibration from activating.
+    private const float TriggerThreshold = 0.7f;
+
     private void UpdateCalibration()
     {
         // X button (left controller) — toggle mesh visibility
@@ -72,7 +76,9 @@ public class MeshHandler : MonoBehaviourPun
             Debug.Log("[MeshHandler] Y button OK");
 
         // Right grip held → calibration mode
-        bool grip = OVRInput.Get(OVRInput.Button.PrimaryHandTrigger, OVRInput.Controller.RTouch);
+        // Use axis API instead of Button.PrimaryHandTrigger to avoid the digital
+        // threshold mismatch on Quest 3 Touch Plus controllers.
+        bool grip = OVRInput.Get(OVRInput.Axis1D.PrimaryHandTrigger, OVRInput.Controller.RTouch) > TriggerThreshold;
         if (!grip)
         {
             if (isCalibrating)
@@ -91,7 +97,8 @@ public class MeshHandler : MonoBehaviourPun
 
         Vector2 stick   = OVRInput.Get(OVRInput.Axis2D.PrimaryThumbstick, OVRInput.Controller.RTouch);
         bool    aHeld   = OVRInput.Get(OVRInput.Button.One,                OVRInput.Controller.RTouch);
-        bool    trigger = OVRInput.Get(OVRInput.Button.PrimaryIndexTrigger, OVRInput.Controller.RTouch);
+        // Use axis API for index trigger for the same reason as grip above.
+        bool    trigger = OVRInput.Get(OVRInput.Axis1D.PrimaryIndexTrigger, OVRInput.Controller.RTouch) > TriggerThreshold;
 
         if (trigger)
         {
@@ -135,17 +142,23 @@ public class MeshHandler : MonoBehaviourPun
     public void SendMeshTransform()
     {
         if (meshObject == null) return;
-        photonView.RPC(nameof(RPC_ReceiveMeshTransform), RpcTarget.AllBuffered,
-            meshObject.transform.position,
-            meshObject.transform.rotation,
-            meshObject.transform.localScale);
+        Vector3    pos   = meshObject.transform.position;
+        Quaternion rot   = meshObject.transform.rotation;
+        Vector3    scale = meshObject.transform.localScale;
+        Debug.Log($"[MeshHandler] SendMeshTransform pos={pos} rot={rot.eulerAngles} scale={scale}");
+        photonView.RPC(nameof(RPC_ReceiveMeshTransform), RpcTarget.AllBuffered, pos, rot, scale);
     }
 
     [PunRPC]
     private void RPC_ReceiveMeshTransform(Vector3 pos, Quaternion rot, Vector3 scale)
     {
         if (meshObject == null) meshObject = GameObject.Find(meshObjectName);
-        if (meshObject == null) return;
+        if (meshObject == null)
+        {
+            Debug.LogWarning($"[MeshHandler] RPC_ReceiveMeshTransform: '{meshObjectName}' not found in scene.");
+            return;
+        }
+        Debug.Log($"[MeshHandler] RPC_ReceiveMeshTransform pos={pos} rot={rot.eulerAngles} scale={scale}");
         meshObject.transform.SetPositionAndRotation(pos, rot);
         meshObject.transform.localScale = scale;
     }
