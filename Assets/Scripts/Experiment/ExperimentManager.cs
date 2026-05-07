@@ -190,7 +190,7 @@ public class ExperimentManager : MonoBehaviour, IOnEventCallback
 
     private void StartExperiment()
     {
-        if (steps.Count == 0) { Debug.LogWarning("[ExperimentManager] No steps loaded."); return; }
+        if (steps.Count == 0) { UnityEngine.Debug.LogWarning("[ExperimentManager] No steps loaded."); return; }
         CurrentStepIndex = 0;
         ExecuteCurrentStep();
     }
@@ -414,7 +414,7 @@ public class ExperimentManager : MonoBehaviour, IOnEventCallback
             yield return new WaitForSeconds(delay);
             if (CurrentState != ExperimentState.Idle) yield break;
             SendSyncRequest();
-            Debug.Log($"[ExperimentManager] Sync request sent (still Idle after {delay}s).");
+            UnityEngine.Debug.Log($"[ExperimentManager] Sync request sent (still Idle after {delay}s).");
         }
     }
 
@@ -456,7 +456,7 @@ public class ExperimentManager : MonoBehaviour, IOnEventCallback
             var   syncedType      = (StepType)Convert.ToByte(data[3]);
             float syncedRemaining = data.Length > 4 ? Convert.ToSingle(data[4]) : taskDurationSeconds;
 
-            Debug.Log($"[ExperimentManager] OnEvent: state={newState}, step={syncedStep}/{syncedTotal}, remaining={syncedRemaining:F1}s");
+            UnityEngine.Debug.Log($"[ExperimentManager] OnEvent: state={newState}, step={syncedStep}/{syncedTotal}, remaining={syncedRemaining:F1}s");
 
             if (newState == CurrentState && syncedStep == CurrentStepIndex &&
                 (newState == ExperimentState.TaskRunning || newState == ExperimentState.WhiteNoise))
@@ -491,7 +491,7 @@ public class ExperimentManager : MonoBehaviour, IOnEventCallback
         }
         catch (System.Exception ex)
         {
-            Debug.LogError($"[ExperimentManager] OnEvent exception: {ex}");
+            UnityEngine.Debug.LogError($"[ExperimentManager] OnEvent exception: {ex}");
         }
     }
 
@@ -521,12 +521,12 @@ public class ExperimentManager : MonoBehaviour, IOnEventCallback
         if (req.result == UnityWebRequest.Result.Success)
             ParseTemplate(req.downloadHandler.text);
         else
-            Debug.LogError($"[ExperimentManager] Load failed: {req.error}");
+            UnityEngine.Debug.LogError($"[ExperimentManager] Load failed: {req.error}");
 #else
         if (File.Exists(path))
             ParseTemplate(File.ReadAllText(path));
         else
-            Debug.LogError($"[ExperimentManager] instructions.txt not found at: {path}");
+            UnityEngine.Debug.LogError($"[ExperimentManager] instructions.txt not found at: {path}");
         yield return null;
 #endif
 
@@ -570,7 +570,7 @@ public class ExperimentManager : MonoBehaviour, IOnEventCallback
         }
         Commit();
 
-        Debug.Log($"[ExperimentManager] Template: {conditionTemplate.Count} steps/condition.");
+        UnityEngine.Debug.Log($"[ExperimentManager] Template: {conditionTemplate.Count} steps/condition.");
     }
 
     // Cyclic Latin Square: participant n → row (n % 9)
@@ -582,7 +582,7 @@ public class ExperimentManager : MonoBehaviour, IOnEventCallback
         for (int i = 0; i < n; i++)
             conditionOrder[i] = (start + i) % n;
 
-        Debug.Log($"[ExperimentManager] Participant {participantNumber} → condition order: [{string.Join(", ", conditionOrder)}]");
+        UnityEngine.Debug.Log($"[ExperimentManager] Participant {participantNumber} → condition order: [{string.Join(", ", conditionOrder)}]");
     }
 
     // Expand template into 9 condition blocks, each prefixed with an auto-generated ConditionStart step
@@ -613,7 +613,7 @@ public class ExperimentManager : MonoBehaviour, IOnEventCallback
                 });
         }
 
-        Debug.Log($"[ExperimentManager] Expanded: {n} conditions × {conditionTemplate.Count + 1} steps = {steps.Count} total.");
+        UnityEngine.Debug.Log($"[ExperimentManager] Expanded: {n} conditions × {conditionTemplate.Count + 1} steps = {steps.Count} total.");
     }
 
     // ── Condition Actions (Expert only) ───────────────────────────────────
@@ -625,7 +625,7 @@ public class ExperimentManager : MonoBehaviour, IOnEventCallback
         {
             if (!ph.photonView.IsMine) return ph;
         }
-        Debug.LogWarning("[ExperimentManager] Worker PostureHandler not found.");
+        UnityEngine.Debug.LogWarning("[ExperimentManager] Worker PostureHandler not found.");
         return null;
     }
 
@@ -638,10 +638,10 @@ public class ExperimentManager : MonoBehaviour, IOnEventCallback
         if (ch != null)
         {
             ch.TeleportTo(ph.transform.position, ph.transform.rotation);
-            Debug.Log($"[ExperimentManager] Expert aligned to Worker: pos={ph.transform.position}");
+            UnityEngine.Debug.Log($"[ExperimentManager] Expert aligned to Worker: pos={ph.transform.position}");
         }
         else
-            Debug.LogWarning("[ExperimentManager] AlignToWorker: ConnectionHandler not found.");
+            UnityEngine.Debug.LogWarning("[ExperimentManager] AlignToWorker: ConnectionHandler not found.");
     }
 
     /// <summary>Lock Expert camera to Worker's head (Assembly中).</summary>
@@ -654,7 +654,7 @@ public class ExperimentManager : MonoBehaviour, IOnEventCallback
         if (ch != null)
         {
             ch.SetFollowTarget(ph.transform);
-            Debug.Log("[ExperimentManager] Expert follow mode started.");
+            UnityEngine.Debug.Log("[ExperimentManager] Expert follow mode started.");
         }
 
         // GazeVisualizer の FOV を PCA カメラに合わせる
@@ -668,7 +668,7 @@ public class ExperimentManager : MonoBehaviour, IOnEventCallback
         if (ch != null)
         {
             ch.ClearFollowTarget();
-            Debug.Log("[ExperimentManager] Expert follow mode ended.");
+            UnityEngine.Debug.Log("[ExperimentManager] Expert follow mode ended.");
         }
 
         // GazeVisualizer の FOV を Expert カメラに戻す
@@ -689,7 +689,7 @@ public class ExperimentManager : MonoBehaviour, IOnEventCallback
         if (expertGazeHandler != null)
         {
             expertGazeHandler.CurrentMode = mode;
-            Debug.Log($"[ExperimentManager] Gaze mode → {mode}");
+            UnityEngine.Debug.Log($"[ExperimentManager] Gaze mode → {mode}");
         }
     }
 
@@ -708,11 +708,11 @@ public class ExperimentManager : MonoBehaviour, IOnEventCallback
                 UseShellExecute = true,
                 CreateNoWindow  = false
             });
-            Debug.Log($"[ExperimentManager] Launched: {pythonExecutable} \"{scriptPath}\"");
+            UnityEngine.Debug.Log($"[ExperimentManager] Launched: {pythonExecutable} \"{scriptPath}\"");
         }
         catch (System.Exception ex)
         {
-            Debug.LogError($"[ExperimentManager] Python launch failed: {ex.Message}");
+            UnityEngine.Debug.LogError($"[ExperimentManager] Python launch failed: {ex.Message}");
         }
 #endif
     }
