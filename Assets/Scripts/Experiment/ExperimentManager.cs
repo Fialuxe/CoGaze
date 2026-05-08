@@ -7,7 +7,7 @@ using UnityEngine.InputSystem;
 using Photon.Pun;
 using Photon.Realtime;
 using ExitGames.Client.Photon;
-#if !UNITY_ANDROID
+#if UNITY_STANDALONE || UNITY_EDITOR
 using System.Diagnostics;
 #endif
 #if UNITY_ANDROID && !UNITY_EDITOR
@@ -16,6 +16,8 @@ using UnityEngine.Networking;
 
 // ── Enums / Data ──────────────────────────────────────────────────────────────
 
+// We handle experiment steps by step. Each step has a type and instructions.
+// The instructions are displayed on the remote expert's screen and local worker's screen.
 public enum StepType : byte
 {
     Noise          = 0,
@@ -23,7 +25,8 @@ public enum StepType : byte
     Questionnaire  = 2,
     Assembly       = 3,
     Alignment      = 4,  // position-alignment gate — video feed ON, no timer, Enter to advance
-    ConditionStart = 5,  // auto-generated: switches gaze mode + launches Python, then questionnaire gate
+    ConditionStart = 5,  // auto-generated: switches gaze mode, then questionnaire gate
+    Launch         = 6,  // launches Python script, auto-advances immediately
 }
 
 public enum ExperimentState : byte
@@ -41,30 +44,38 @@ public enum ExperimentState : byte
 public class ExperimentStep
 {
     public StepType Type;
-    public string   Instruction  = string.Empty;
-    public int      ConditionIndex = -1; // only set for ConditionStart steps
+    public string   Instruction      = string.Empty; // Remote Expert
+    public string   LocalInstruction = string.Empty; // Local Worker
+    public int      ConditionIndex   = -1;           // set for ConditionStart / Launch steps
+    public string   ScriptArgs       = string.Empty; // baked in at expand time for Launch steps
 }
 
 // ── ExperimentManager ─────────────────────────────────────────────────────────
 
 /// <summary>
-/// Drives a 9-condition experiment (3 gaze modes × 3 noise levels) defined in
-/// StreamingAssets/instructions.txt as a single-condition template.
+/// Drives a 9-condition experiment (3 gaze modes × 3 noise levels) structured
+/// as 3 BLOCKED tracking-method blocks, each containing 3 gaze-mode sub-conditions.
 ///
-/// At runtime the template is expanded into 9 condition blocks in Latin Square
-/// order determined by participantNumber % 9.
+///   Block 0 — Tobii infrared (noise_low, 32-bit Python)
+///   Block 1 — Webcam (noise_mid, 64-bit Python)
+///   Block 2 — High noise (noise_high, 64-bit Python)
 ///
-/// Each condition block starts with an auto-generated ConditionStart step that
-/// switches the gaze visualization mode and launches the noise Python script.
+/// Block order and gaze-mode order within each block are counterbalanced by
+/// participantNumber: block order uses (n % 6), gaze order uses ((n/6) % 6).
+/// This gives 36 distinct orderings, covering up to 36 participants.
 ///
-/// Step types in the template file:
+/// Python script is launched ONCE at the start of each block (3 launches total).
+/// The per-condition template in instructions.txt is repeated 3 times per block;
+/// any Launch steps in the template are ignored (launches are code-generated).
+///
+/// Step types recognised in instructions.txt:
 ///   noise         → white noise (auto-ends)
 ///   task          → identification task (taskDurationSeconds)
 ///   assembly      → assembly task with video stream (assemblyDurationSeconds)
 ///   alignment     → position-alignment gate (video feed ON, Enter to advance)
 ///   questionnaire → freeform gate (Enter to advance)
 ///
-/// Expert keyboard controls:
+/// Expert keyboard:
 ///   Enter  — start / advance after task or noise completes / end questionnaire
 ///   Delete — force-skip current task or noise
 /// </summary>
@@ -84,10 +95,26 @@ public class ExperimentManager : MonoBehaviour, IOnEventCallback
     [Header("Participant & Conditions")]
     [Tooltip("Participant number — determines Latin Square row (n % 9).")]
     public int    participantNumber      = 0;
-    [Tooltip("Python executable name or full path (e.g. 'python' or 'C:/Python311/python.exe').")]
-    public string pythonExecutable       = "python";
-    [Tooltip("Directory that contains noise_low.py / noise_mid.py / noise_high.py.")]
+    [Tooltip("32-bit Python executable — used for Tobii infrared (noise_low). E.g. C:/Python311_32/python.exe")]
+    public string pythonExecutable32     = "python";
+    [Tooltip("64-bit Python executable — used for webcam / high-noise scripts. E.g. C:/Python311/python.exe")]
+    public string pythonExecutable64     = "python";
+    [Tooltip("Root directory of the EyeTrackToOSCData repository.")]
     public string pythonScriptDirectory  = "";
+    [Tooltip("Turn it on when you don't have Tobii / when you want to skip Tobii launch. It will skip the launch of the 32-bit script.")]
+    public bool   skipTobiiLaunch        = false;
+
+    [Header("Python Script Args (per block)")]
+    [Tooltip("CLI args for Block 0 — Tobii infrared script. Usually empty.")]
+    public string tobiiScriptArgs     = "";
+    [Tooltip("CLI args for Block 1 — Webcam execution script.")]
+    public string webcamScriptArgs    = "--weights models/L2CSNet_gaze360.pkl --osc-port 8000";
+    [Tooltip("CLI args for Block 2 — High-noise script. Usually empty.")]
+    public string highNoiseScriptArgs = "";
+
+    [Header("Python Calibration Args (Webcam only)")]
+    [Tooltip("Webcam calibration args — same script as execution, run before the block. Tobii calibration is done manually.")]
+    public string webcamCalibArgs     = "--calibrate --weights models/L2CSNet_gaze360.pkl --osc-port 0";
 
     // ── Public Read-only State ────────────────────────────────────────────
     public ExperimentState CurrentState    { get; private set; } = ExperimentState.Idle;
@@ -103,18 +130,36 @@ public class ExperimentManager : MonoBehaviour, IOnEventCallback
     public event Action<string>                OnInstructionChanged;
     public event Action<int, int, StepType>    OnProgressChanged;
 
-    // ── Condition Table (3 gaze × 3 noise = 9) ───────────────────────────
-    private static readonly (VisualizationMode gaze, string noise, string script)[] CONDITIONS =
+    // ── Condition Table — BLOCKED by tracking method (3 blocks × 3 gaze modes) ──
+    // Conditions 0-2: Tobii infrared (noise_low, 32-bit Python)
+    // Conditions 3-5: Webcam        (noise_mid, 64-bit Python)
+    // Conditions 6-8: High noise    (noise_high, 64-bit Python)
+    //
+    // script: path relative to pythonScriptDirectory (repo root)
+    // CLI args are set per-block in the Inspector (tobiiScriptArgs / webcamScriptArgs / highNoiseScriptArgs)
+    private static readonly (VisualizationMode gaze, string noise, string script, bool use32bit)[] CONDITIONS =
     {
-        (VisualizationMode.Ray,     "noise_low",  "noise_low.py"),
-        (VisualizationMode.Ray,     "noise_mid",  "noise_mid.py"),
-        (VisualizationMode.Ray,     "noise_high", "noise_high.py"),
-        (VisualizationMode.Circle,  "noise_low",  "noise_low.py"),
-        (VisualizationMode.Circle,  "noise_mid",  "noise_mid.py"),
-        (VisualizationMode.Circle,  "noise_high", "noise_high.py"),
-        (VisualizationMode.Frustum, "noise_low",  "noise_low.py"),
-        (VisualizationMode.Frustum, "noise_mid",  "noise_mid.py"),
-        (VisualizationMode.Frustum, "noise_high", "noise_high.py"),
+        // Block 0 — Tobii infrared
+        (VisualizationMode.Ray,     "noise_low",  @"scr_infrared\EyeTracking_Py32Only.py", true),
+        (VisualizationMode.Circle,  "noise_low",  @"scr_infrared\EyeTracking_Py32Only.py", true),
+        (VisualizationMode.Frustum, "noise_low",  @"scr_infrared\EyeTracking_Py32Only.py", true),
+        // Block 1 — Webcam
+        (VisualizationMode.Ray,     "noise_mid",  @"scr_webcam\webcam_gaze_tracker.py",    false),
+        (VisualizationMode.Circle,  "noise_mid",  @"scr_webcam\webcam_gaze_tracker.py",    false),
+        (VisualizationMode.Frustum, "noise_mid",  @"scr_webcam\webcam_gaze_tracker.py",    false),
+        // Block 2 — High noise
+        (VisualizationMode.Ray,     "noise_high", @"scr_webcam\webcam_gaze_tracker.py",    false),
+        (VisualizationMode.Circle,  "noise_high", @"scr_webcam\webcam_gaze_tracker.py",    false),
+        (VisualizationMode.Frustum, "noise_high", @"scr_webcam\webcam_gaze_tracker.py",    false),
+    };
+
+    private const int BLOCK_SIZE = 3; // gaze modes per tracking block
+
+    // All 6 permutations of [0,1,2] for counterbalancing
+    private static readonly int[][] PERMUTATIONS_3 =
+    {
+        new[]{0,1,2}, new[]{0,2,1}, new[]{1,0,2},
+        new[]{1,2,0}, new[]{2,0,1}, new[]{2,1,0}
     };
 
     // ── Internal ──────────────────────────────────────────────────────────
@@ -128,6 +173,10 @@ public class ExperimentManager : MonoBehaviour, IOnEventCallback
     private Coroutine    noiseRoutine;
     private Coroutine    resyncRoutine;
     private GazeHandler  expertGazeHandler;
+    private int          currentConditionIndex = -1; // updated at each ConditionStart
+#if UNITY_STANDALONE || UNITY_EDITOR
+    private Process      noisePythonProcess;
+#endif
 
     private const byte PHOTON_EVENT = 43;
     private const byte SYNC_REQUEST = 0xFF;
@@ -146,20 +195,19 @@ public class ExperimentManager : MonoBehaviour, IOnEventCallback
         audioSource.loop         = true;
 
         if (isExpert)
-        {
             expertGazeHandler = GetComponent<GazeHandler>();
-            StartCoroutine(LoadInstructions());
-        }
-        else
-        {
+
+        StartCoroutine(LoadInstructions());
+
+        if (!isExpert)
             StartCoroutine(DelaySyncRequest());
-        }
     }
 
     private void OnDestroy()
     {
         PhotonNetwork.RemoveCallbackTarget(this);
         if (noiseClip != null) Destroy(noiseClip);
+        KillNoisePythonProcess();
     }
 
     // ── Expert Keyboard ───────────────────────────────────────────────────
@@ -190,7 +238,7 @@ public class ExperimentManager : MonoBehaviour, IOnEventCallback
 
     private void StartExperiment()
     {
-        if (steps.Count == 0) { Debug.LogWarning("[ExperimentManager] No steps loaded."); return; }
+        if (steps.Count == 0) { UnityEngine.Debug.LogWarning("[ExperimentManager] No steps loaded."); return; }
         CurrentStepIndex = 0;
         ExecuteCurrentStep();
     }
@@ -259,11 +307,19 @@ public class ExperimentManager : MonoBehaviour, IOnEventCallback
             case StepType.ConditionStart:
                 if (IsExpert && step.ConditionIndex >= 0 && step.ConditionIndex < CONDITIONS.Length)
                 {
-                    var cond = CONDITIONS[step.ConditionIndex];
-                    SetGazeMode(cond.gaze);
-                    LaunchPythonScript(cond.script);
+                    currentConditionIndex = step.ConditionIndex;
+                    SetGazeMode(CONDITIONS[step.ConditionIndex].gaze);
                 }
                 Transition(ExperimentState.Questionnaire);
+                break;
+
+            case StepType.Launch:
+                if (IsExpert && step.ConditionIndex >= 0 && step.ConditionIndex < CONDITIONS.Length)
+                {
+                    var cond = CONDITIONS[step.ConditionIndex];
+                    LaunchPythonScript(cond.script, cond.use32bit, step.ScriptArgs);
+                }
+                StartCoroutine(AdvanceNextFrame());
                 break;
 
             case StepType.Questionnaire:
@@ -273,6 +329,12 @@ public class ExperimentManager : MonoBehaviour, IOnEventCallback
     }
 
     // ── Timer ─────────────────────────────────────────────────────────────
+
+    private IEnumerator AdvanceNextFrame()
+    {
+        yield return null;
+        AdvanceStep();
+    }
 
     public void RestartTimerAt(float startSeconds)
     {
@@ -354,7 +416,16 @@ public class ExperimentManager : MonoBehaviour, IOnEventCallback
         CurrentState = next;
         if (IsExpert) TotalSteps = steps.Count;
 
-        string instruction = IsExpert ? GetCurrentInstruction() : string.Empty;
+        // Do not fire step instruction text for states that have their own fixed
+        // messages in the UI. TaskComplete/NoiseComplete in particular must not
+        // be overridden — doing so would show the just-finished step's instruction
+        // one beat late instead of the "task ended, press Enter" message.
+        bool suppressInstruction = next == ExperimentState.Ready
+                                || next == ExperimentState.Idle
+                                || next == ExperimentState.Finished
+                                || next == ExperimentState.TaskComplete
+                                || next == ExperimentState.NoiseComplete;
+        string instruction = suppressInstruction ? string.Empty : GetCurrentInstruction();
         OnStateChanged?.Invoke(next);
         OnInstructionChanged?.Invoke(instruction);
         OnProgressChanged?.Invoke(CurrentStepIndex, TotalSteps, CurrentStepType);
@@ -414,7 +485,7 @@ public class ExperimentManager : MonoBehaviour, IOnEventCallback
             yield return new WaitForSeconds(delay);
             if (CurrentState != ExperimentState.Idle) yield break;
             SendSyncRequest();
-            Debug.Log($"[ExperimentManager] Sync request sent (still Idle after {delay}s).");
+            UnityEngine.Debug.Log($"[ExperimentManager] Sync request sent (still Idle after {delay}s).");
         }
     }
 
@@ -456,7 +527,7 @@ public class ExperimentManager : MonoBehaviour, IOnEventCallback
             var   syncedType      = (StepType)Convert.ToByte(data[3]);
             float syncedRemaining = data.Length > 4 ? Convert.ToSingle(data[4]) : taskDurationSeconds;
 
-            Debug.Log($"[ExperimentManager] OnEvent: state={newState}, step={syncedStep}/{syncedTotal}, remaining={syncedRemaining:F1}s");
+            UnityEngine.Debug.Log($"[ExperimentManager] OnEvent: state={newState}, step={syncedStep}/{syncedTotal}, remaining={syncedRemaining:F1}s");
 
             if (newState == CurrentState && syncedStep == CurrentStepIndex &&
                 (newState == ExperimentState.TaskRunning || newState == ExperimentState.WhiteNoise))
@@ -491,7 +562,7 @@ public class ExperimentManager : MonoBehaviour, IOnEventCallback
         }
         catch (System.Exception ex)
         {
-            Debug.LogError($"[ExperimentManager] OnEvent exception: {ex}");
+            UnityEngine.Debug.LogError($"[ExperimentManager] OnEvent exception: {ex}");
         }
     }
 
@@ -521,19 +592,19 @@ public class ExperimentManager : MonoBehaviour, IOnEventCallback
         if (req.result == UnityWebRequest.Result.Success)
             ParseTemplate(req.downloadHandler.text);
         else
-            Debug.LogError($"[ExperimentManager] Load failed: {req.error}");
+            UnityEngine.Debug.LogError($"[ExperimentManager] Load failed: {req.error}");
 #else
         if (File.Exists(path))
             ParseTemplate(File.ReadAllText(path));
         else
-            Debug.LogError($"[ExperimentManager] instructions.txt not found at: {path}");
+            UnityEngine.Debug.LogError($"[ExperimentManager] instructions.txt not found at: {path}");
         yield return null;
 #endif
 
         BuildConditionOrder();
         ExpandTemplate();
         TotalSteps = steps.Count;
-        Transition(ExperimentState.Ready);
+        if (IsExpert) Transition(ExperimentState.Ready);
     }
 
     private void ParseTemplate(string text)
@@ -552,11 +623,51 @@ public class ExperimentManager : MonoBehaviour, IOnEventCallback
                 "questionnaire" => StepType.Questionnaire,
                 "assembly"      => StepType.Assembly,
                 "alignment"     => StepType.Alignment,
+                "launch"        => StepType.Launch,
                 _               => StepType.Task
             };
-            step.Instruction = block.Count > 1
-                ? string.Join("\n", block.GetRange(1, block.Count - 1))
-                : string.Empty;
+
+            // For Launch steps, parse [args] key.
+            if (step.Type == StepType.Launch)
+            {
+                for (int i = 1; i < block.Count; i++)
+                {
+                    string l = block[i].Trim();
+                    if (l.StartsWith("[args]"))
+                        step.ScriptArgs = l.Substring("[args]".Length).Trim();
+                }
+                conditionTemplate.Add(step);
+                block.Clear();
+                return;
+            }
+
+            // If the block contains [remote]/[local] markers, split accordingly.
+            // Without markers, all lines go to Instruction (Remote) for backward compat.
+            bool hasMarkers = block.Exists(l => l.Trim() == "[remote]" || l.Trim() == "[local]");
+            if (hasMarkers)
+            {
+                var remoteLines = new List<string>();
+                var localLines  = new List<string>();
+                List<string> current = null; // lines before any marker are ignored
+
+                for (int i = 1; i < block.Count; i++)
+                {
+                    string l = block[i].Trim();
+                    if      (l == "[remote]") { current = remoteLines; }
+                    else if (l == "[local]")  { current = localLines; }
+                    else                      { current?.Add(block[i]); }
+                }
+
+                step.Instruction      = string.Join("\n", remoteLines).Trim();
+                step.LocalInstruction = string.Join("\n", localLines).Trim();
+            }
+            else
+            {
+                step.Instruction = block.Count > 1
+                    ? string.Join("\n", block.GetRange(1, block.Count - 1)).Trim()
+                    : string.Empty;
+            }
+
             conditionTemplate.Add(step);
             block.Clear();
         }
@@ -570,50 +681,112 @@ public class ExperimentManager : MonoBehaviour, IOnEventCallback
         }
         Commit();
 
-        Debug.Log($"[ExperimentManager] Template: {conditionTemplate.Count} steps/condition.");
+        UnityEngine.Debug.Log($"[ExperimentManager] Template: {conditionTemplate.Count} steps/condition.");
     }
 
-    // Cyclic Latin Square: participant n → row (n % 9)
+    // Blocked counterbalancing:
+    //   block order  → participantNumber % 6        (6 permutations of 3 blocks)
+    //   gaze order   → (participantNumber / 6) % 6  (6 permutations within each block)
+    // 6 × 6 = 36 distinct orderings — covers up to 36 participants.
     private void BuildConditionOrder()
     {
-        int n     = CONDITIONS.Length;
-        int start = participantNumber % n;
-        conditionOrder = new int[n];
-        for (int i = 0; i < n; i++)
-            conditionOrder[i] = (start + i) % n;
+        int blockPerm = participantNumber % 6;
+        int gazePerm  = (participantNumber / 6) % 6;
 
-        Debug.Log($"[ExperimentManager] Participant {participantNumber} → condition order: [{string.Join(", ", conditionOrder)}]");
+        int[] blockOrder = PERMUTATIONS_3[blockPerm];
+        int[] gazeOrder  = PERMUTATIONS_3[gazePerm];
+
+        conditionOrder = new int[CONDITIONS.Length];
+        for (int b = 0; b < BLOCK_SIZE; b++)
+            for (int g = 0; g < BLOCK_SIZE; g++)
+                conditionOrder[b * BLOCK_SIZE + g] = blockOrder[b] * BLOCK_SIZE + gazeOrder[g];
+
+        UnityEngine.Debug.Log($"[ExperimentManager] P{participantNumber} → blocks [{string.Join(",", blockOrder)}], gazes [{string.Join(",", gazeOrder)}]");
+        UnityEngine.Debug.Log($"[ExperimentManager] Condition order: [{string.Join(", ", conditionOrder)}]");
     }
 
-    // Expand template into 9 condition blocks, each prefixed with an auto-generated ConditionStart step
+    // Expand template into 3 blocks × 3 conditions.
+    // A code-generated Launch step fires ONCE at the start of each block (before ConditionStart).
+    // Any Launch steps inside the template are skipped — args now live in the CONDITIONS table.
     private void ExpandTemplate()
     {
         steps.Clear();
-        int n = CONDITIONS.Length;
+        int numBlocks = CONDITIONS.Length / BLOCK_SIZE;
 
-        for (int c = 0; c < n; c++)
+        for (int c = 0; c < CONDITIONS.Length; c++)
         {
-            int condIdx = conditionOrder[c];
-            var cond    = CONDITIONS[condIdx];
+            int condIdx      = conditionOrder[c];
+            var cond         = CONDITIONS[condIdx];
+            bool isBlockStart = (c % BLOCK_SIZE == 0);
+            int  blockNum    = c / BLOCK_SIZE + 1;
 
-            steps.Add(new ExperimentStep
+            // ── Block-start: (optional) calibration then execution launch ──
+            if (isBlockStart)
             {
-                Type           = StepType.ConditionStart,
-                ConditionIndex = condIdx,
-                Instruction    = $"[条件 {c + 1}/{n}]  ガゼ: {cond.gaze}  |  ノイズ: {cond.noise}\n" +
-                                 $"スクリプト {cond.script} の起動を確認したら Enter を押してください。"
-            });
+                int    blockIdx  = c / BLOCK_SIZE;
+                string calibArgs = GetBlockCalibArgs(blockIdx);
+                string execArgs  = GetBlockArgs(blockIdx);
+                string argsNote  = string.IsNullOrEmpty(execArgs) ? "" : $"\n{execArgs}";
 
-            foreach (var t in conditionTemplate)
+                if (!string.IsNullOrEmpty(calibArgs))
+                {
+                    // 1. Same script, calibration args
+                    steps.Add(new ExperimentStep
+                    {
+                        Type             = StepType.Launch,
+                        ConditionIndex   = condIdx,
+                        ScriptArgs       = calibArgs,
+                        Instruction      = $"[Block {blockNum}/{numBlocks}]  キャリブレーション開始\n{cond.script}\n{calibArgs}",
+                        LocalInstruction = $"[Block {blockNum}/{numBlocks}]  キャリブレーション中です。しばらくお待ちください。",
+                    });
+                    // 2. Expert confirms calibration done
+                    steps.Add(new ExperimentStep
+                    {
+                        Type             = StepType.Questionnaire,
+                        Instruction      = $"[Block {blockNum}/{numBlocks}]  キャリブレーションを実行してください。\n完了したら [Enter] を押してください。",
+                        LocalInstruction = $"[Block {blockNum}/{numBlocks}]  キャリブレーション中です。担当者の指示をお待ちください。",
+                    });
+                }
+
+                // 3. Same script, execution args (kills calibration process first)
                 steps.Add(new ExperimentStep
                 {
-                    Type           = t.Type,
-                    Instruction    = t.Instruction,
-                    ConditionIndex = -1
+                    Type             = StepType.Launch,
+                    ConditionIndex   = condIdx,
+                    ScriptArgs       = execArgs,
+                    Instruction      = $"[Block {blockNum}/{numBlocks}]  {cond.noise}  ({(cond.use32bit ? "32-bit" : "64-bit")})\n{cond.script}{argsNote}",
+                    LocalInstruction = $"[Block {blockNum}/{numBlocks}]  次のブロックを準備中です。しばらくお待ちください。",
                 });
+            }
+
+            // ── ConditionStart: switch gaze mode, open ready gate ──
+            string readyNote = isBlockStart
+                ? "実行スクリプト起動済み。アイトラッキングを確認し、[Enter] で開始してください。"
+                : "次の視線モードに切り替えました。[Enter] で続けてください。";
+            steps.Add(new ExperimentStep
+            {
+                Type             = StepType.ConditionStart,
+                ConditionIndex   = condIdx,
+                Instruction      = $"[Block {blockNum}/{numBlocks}  Cond {c + 1}/9]  Gaze: {cond.gaze}  |  Noise: {cond.noise}\n{readyNote}",
+                LocalInstruction = $"[Block {blockNum}/{numBlocks}  Cond {c + 1}/9]  次の条件を準備中です。しばらくお待ちください。",
+            });
+
+            // ── Per-condition steps from template (skip any Launch — handled above) ──
+            foreach (var t in conditionTemplate)
+            {
+                if (t.Type == StepType.Launch) continue;
+                steps.Add(new ExperimentStep
+                {
+                    Type             = t.Type,
+                    Instruction      = t.Instruction,
+                    LocalInstruction = t.LocalInstruction,
+                    ScriptArgs       = t.ScriptArgs,
+                    ConditionIndex   = -1
+                });
+            }
         }
 
-        Debug.Log($"[ExperimentManager] Expanded: {n} conditions × {conditionTemplate.Count + 1} steps = {steps.Count} total.");
+        UnityEngine.Debug.Log($"[ExperimentManager] Expanded: {numBlocks} blocks × {BLOCK_SIZE} conds × {conditionTemplate.Count} template steps = {steps.Count} total.");
     }
 
     // ── Condition Actions (Expert only) ───────────────────────────────────
@@ -625,7 +798,7 @@ public class ExperimentManager : MonoBehaviour, IOnEventCallback
         {
             if (!ph.photonView.IsMine) return ph;
         }
-        Debug.LogWarning("[ExperimentManager] Worker PostureHandler not found.");
+        UnityEngine.Debug.LogWarning("[ExperimentManager] Worker PostureHandler not found.");
         return null;
     }
 
@@ -638,10 +811,10 @@ public class ExperimentManager : MonoBehaviour, IOnEventCallback
         if (ch != null)
         {
             ch.TeleportTo(ph.transform.position, ph.transform.rotation);
-            Debug.Log($"[ExperimentManager] Expert aligned to Worker: pos={ph.transform.position}");
+            UnityEngine.Debug.Log($"[ExperimentManager] Expert aligned to Worker: pos={ph.transform.position}");
         }
         else
-            Debug.LogWarning("[ExperimentManager] AlignToWorker: ConnectionHandler not found.");
+            UnityEngine.Debug.LogWarning("[ExperimentManager] AlignToWorker: ConnectionHandler not found.");
     }
 
     /// <summary>Lock Expert camera to Worker's head (Assembly中).</summary>
@@ -654,7 +827,7 @@ public class ExperimentManager : MonoBehaviour, IOnEventCallback
         if (ch != null)
         {
             ch.SetFollowTarget(ph.transform);
-            Debug.Log("[ExperimentManager] Expert follow mode started.");
+            UnityEngine.Debug.Log("[ExperimentManager] Expert follow mode started.");
         }
 
         // GazeVisualizer の FOV を PCA カメラに合わせる
@@ -668,7 +841,7 @@ public class ExperimentManager : MonoBehaviour, IOnEventCallback
         if (ch != null)
         {
             ch.ClearFollowTarget();
-            Debug.Log("[ExperimentManager] Expert follow mode ended.");
+            UnityEngine.Debug.Log("[ExperimentManager] Expert follow mode ended.");
         }
 
         // GazeVisualizer の FOV を Expert カメラに戻す
@@ -689,30 +862,89 @@ public class ExperimentManager : MonoBehaviour, IOnEventCallback
         if (expertGazeHandler != null)
         {
             expertGazeHandler.CurrentMode = mode;
-            Debug.Log($"[ExperimentManager] Gaze mode → {mode}");
+            UnityEngine.Debug.Log($"[ExperimentManager] Gaze mode → {mode}");
         }
     }
 
-    private void LaunchPythonScript(string scriptName)
+    private string GetBlockArgs(int blockIndex) => blockIndex switch
     {
-#if !UNITY_ANDROID
-        string scriptPath = string.IsNullOrEmpty(pythonScriptDirectory)
-            ? scriptName
-            : Path.Combine(pythonScriptDirectory, scriptName);
+        0 => tobiiScriptArgs,
+        1 => webcamScriptArgs,
+        2 => highNoiseScriptArgs,
+        _ => ""
+    };
+
+    // Only Block 1 (webcam) has a calibration step; Tobii is calibrated manually.
+    private string GetBlockCalibArgs(int blockIndex) => blockIndex == 1 ? webcamCalibArgs : "";
+
+    private void KillNoisePythonProcess()
+    {
+#if UNITY_STANDALONE || UNITY_EDITOR
+        if (noisePythonProcess == null) return;
         try
         {
-            Process.Start(new ProcessStartInfo
+            if (!noisePythonProcess.HasExited)
             {
-                FileName        = pythonExecutable,
-                Arguments       = $"\"{scriptPath}\"",
-                UseShellExecute = true,
-                CreateNoWindow  = false
-            });
-            Debug.Log($"[ExperimentManager] Launched: {pythonExecutable} \"{scriptPath}\"");
+                noisePythonProcess.Kill();
+                UnityEngine.Debug.Log("[ExperimentManager] Previous Python process killed.");
+            }
         }
         catch (System.Exception ex)
         {
-            Debug.LogError($"[ExperimentManager] Python launch failed: {ex.Message}");
+            UnityEngine.Debug.LogWarning($"[ExperimentManager] Kill failed: {ex.Message}");
+        }
+        finally
+        {
+            noisePythonProcess.Dispose();
+            noisePythonProcess = null;
+        }
+#endif
+    }
+
+    private void LaunchPythonScript(string scriptName, bool use32bit, string args = "")
+    {
+#if UNITY_STANDALONE || UNITY_EDITOR
+        if (use32bit && skipTobiiLaunch)
+        {
+            UnityEngine.Debug.Log("[ExperimentManager] Tobii launch skipped (skipTobiiLaunch=true).");
+            return;
+        }
+
+        KillNoisePythonProcess();
+
+        string exe        = use32bit ? pythonExecutable32 : pythonExecutable64;
+        string scriptPath = string.IsNullOrEmpty(pythonScriptDirectory)
+            ? scriptName
+            : Path.Combine(pythonScriptDirectory, scriptName);
+
+        // Normalize to backslashes — cmd.exe rejects mixed-slash paths.
+        scriptPath = scriptPath.Replace('/', '\\');
+        exe        = exe.Replace('/', '\\');
+
+        // Build argument string — append extra args after script path if provided.
+        string extraArgs = string.IsNullOrEmpty(args) ? "" : $" {args}";
+        UnityEngine.Debug.Log($"[ExperimentManager] Launching: {exe} \"{scriptPath}\"{extraArgs}");
+        try
+        {
+            // cmd /k keeps the window open after the script exits or crashes,
+            // so any Python error traceback remains visible.
+            // Outer quotes required by cmd when the inner command contains spaces.
+            // WorkingDirectory = script's own folder so relative paths (models/, etc.) resolve correctly.
+            string workDir = Path.GetDirectoryName(scriptPath);
+
+            noisePythonProcess = Process.Start(new ProcessStartInfo
+            {
+                FileName         = "cmd.exe",
+                Arguments        = $"/k \"\"{exe}\" \"{scriptPath}\"{extraArgs}\"",
+                WorkingDirectory = workDir,
+                UseShellExecute  = true,
+                CreateNoWindow   = false
+            });
+            UnityEngine.Debug.Log($"[ExperimentManager] Launch OK. PID={noisePythonProcess?.Id}");
+        }
+        catch (System.Exception ex)
+        {
+            UnityEngine.Debug.LogError($"[ExperimentManager] Launch FAILED: {ex.Message}");
         }
 #endif
     }
@@ -722,12 +954,14 @@ public class ExperimentManager : MonoBehaviour, IOnEventCallback
     private string GetCurrentInstruction()
     {
         if (steps == null || CurrentStepIndex >= steps.Count) return string.Empty;
-        return steps[CurrentStepIndex].Instruction;
+        var step = steps[CurrentStepIndex];
+        return IsExpert ? step.Instruction : step.LocalInstruction;
     }
 
     public string GetInstruction(int idx)
     {
         if (steps == null || idx >= steps.Count) return string.Empty;
-        return steps[idx].Instruction;
+        var step = steps[idx];
+        return IsExpert ? step.Instruction : step.LocalInstruction;
     }
 }

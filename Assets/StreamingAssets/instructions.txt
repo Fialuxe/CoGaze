@@ -1,15 +1,27 @@
 # ============================================================
-# CoGaze — 1条件分テンプレート
+# CoGaze — 1条件分テンプレート（ブロック設計）
 #
-# このファイルは1条件分のステップのみを記述します。
-# ExperimentManager がラテン方格の順序で9回展開します。
+# このファイルは「1条件分」のステップのみを記述します。
+# ExperimentManager が 3ブロック × 3視線モード = 9条件に展開します。
 #
-# Step types:
+# ブロック構成（自動生成）:
+#   Block 0 — Tobii 赤外線 (noise_low, 32bit Python)
+#   Block 1 — ウェブカメラ (noise_mid, 64bit Python)
+#   Block 2 — ハイノイズ   (noise_high, 64bit Python)
+#
+# Python スクリプトはブロック先頭に1回だけ自動起動されます。
+# このファイルに launch ステップを書く必要はありません。
+#
+# 利用可能な Step types:
 #   noise         — ホワイトノイズ（自動終了）
 #   task          — 識別課題（taskDurationSeconds）
 #   assembly      — 組み立て課題（assemblyDurationSeconds, video feed ON）
 #   alignment     — 位置合わせゲート（video feed ON, Enter で進む）
 #   questionnaire — 汎用ゲート（Enter で進む）
+#
+# 各ステップには [remote] と [local] ブロックで
+# Remote Expert と Local Worker それぞれへの指示を書きます。
+# どちらかを省略した場合、そのロールには何も表示されません。
 #
 # ステップの区切りは ===
 # # で始まる行と空行は無視されます
@@ -18,33 +30,42 @@
 noise
 ===
 task
-識別課題 (1/3)：テーブルの上のカードを引いて、指示に従ってください。
-===
-task
-識別課題 (2/3)：テーブルの上のカードを引いて、指示に従ってください。
-===
-task
-識別課題 (3/3)：テーブルの上のカードを引いて、指示に従ってください。
+[remote]
+識別課題：テーブルの上のカードを引いて、指示に従ってください。
+[local]
+識別課題：テーブルの上のカードをremoteが引きました。remoteの指示に従ってください。
 ===
 noise
 ===
 questionnaire
+[remote]
+識別タスクのアンケートに回答するよう Local Worker に指示してください。
+[local]
 識別タスクのアンケートに回答してください。担当者の指示に従ってください。
 ===
 questionnaire
+[remote]
 Local Worker にアセンブリエリアへの移動を指示してください。
+[local]
+アセンブリエリアへ移動してください。
 ===
 questionnaire
+[remote]
 移動が完了したことを確認したら Enter を押してください。
+[local]
+移動が完了したら担当者に知らせてください。
 ===
 noise
 ===
-alignment
-Remote の位置を Local に合わせてください。Worker の映像を参考に調整し、完了したら Enter を押してください。
-===
 assembly
+[remote]
 ソーマキューブを組み立ててください（Remote がカードを引き、Local が組み立てる）。
+[local]
+ソーマキューブを組み立ててください。Remote Expert の視線を参考にしてください。
 ===
 questionnaire
+[remote]
+アセンブリタスクのアンケートに回答するよう Local Worker に指示してください。
+[local]
 アセンブリタスクのアンケートに回答してください。担当者の指示に従ってください。
 ===

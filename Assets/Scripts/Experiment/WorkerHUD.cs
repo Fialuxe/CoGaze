@@ -47,7 +47,8 @@ public class WorkerHUD : MonoBehaviour
         manager = experimentManager;
         BuildHUD();
 
-        manager.OnStateChanged += HandleStateChanged;
+        manager.OnStateChanged       += HandleStateChanged;
+        manager.OnInstructionChanged += HandleInstructionChanged;
 
         // Trigger initial UI state
         if (manager != null)
@@ -57,7 +58,10 @@ public class WorkerHUD : MonoBehaviour
     private void OnDestroy()
     {
         if (manager != null)
-            manager.OnStateChanged -= HandleStateChanged;
+        {
+            manager.OnStateChanged       -= HandleStateChanged;
+            manager.OnInstructionChanged -= HandleInstructionChanged;
+        }
     }
 
     // ── Update — polls timer and alert billboard every frame ──────────────
@@ -288,7 +292,7 @@ public class WorkerHUD : MonoBehaviour
                 SetState("タスク実行中", new Color(0.6f, 0.9f, 1f));
                 // Timer row will be updated by RefreshTimer() every frame
                 SetTimer(FormatTime(manager.RemainingSeconds), Color.white);
-                SetPanelMode(false);    // slim mode — only timer visible
+                SetPanelMode(true);    // keep instruction row visible so Worker sees the task instruction
                 break;
 
             case ExperimentState.TaskComplete:
@@ -315,6 +319,16 @@ public class WorkerHUD : MonoBehaviour
                 SetPanelMode(true);
                 break;
         }
+    }
+
+    // ── Instruction Handler ───────────────────────────────────────────────
+
+    private void HandleInstructionChanged(string instruction)
+    {
+        // Override the default state label with the step-specific local instruction.
+        // Empty string means no instruction defined for this step — keep the state label.
+        if (!string.IsNullOrEmpty(instruction))
+            SetState(instruction, new Color(0.6f, 0.9f, 1f));
     }
 
     // ── Panel Mode ────────────────────────────────────────────────────────

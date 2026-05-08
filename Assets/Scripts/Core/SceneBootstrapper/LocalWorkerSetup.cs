@@ -21,6 +21,9 @@ public class LocalWorkerSetup : MonoBehaviourPunCallbacks
     private PhotonView         localWorkerView;
     private GameObject         gazeVisualizerInstance;
 
+    // Set by SceneBootstrapper before Initialize()
+    public int participantNumber = 0;
+
     // Kept for reconnect path
     private ExperimentManager  expManager;
 
@@ -70,6 +73,7 @@ public class LocalWorkerSetup : MonoBehaviourPunCallbacks
 
             // ExperimentManager — Worker is a mirror receiver
             expManager = localWorkerInstance.AddComponent<ExperimentManager>();
+            expManager.participantNumber = participantNumber;
             expManager.Initialize(isExpert: false);
 
             // WorkerHUD — world-space overlay in the HMD

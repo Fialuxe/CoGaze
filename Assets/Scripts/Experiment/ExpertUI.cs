@@ -147,14 +147,14 @@ public class ExpertUI : MonoBehaviour
             case ExperimentState.Ready:
                 stateText.text       = "準備完了";
                 stateText.color      = Color.green;
-                instructionText.text = "[Enter] を押して実験を開始してください";
+                instructionText.text = "メッシュのキャリブレーションが終わっているかを確認し、[Enter] を押して実験を開始してください";
                 hintText.text        = "[Enter] 開始";
                 timerText.text       = "--:--";
                 timerText.color      = Color.white;
                 break;
 
             case ExperimentState.WhiteNoise:
-                stateText.text       = "■ ノイズ";
+                stateText.text       = "■ ノイズ再生中";
                 stateText.color      = Color.yellow;
                 instructionText.text = "ホワイトノイズ再生中...";
                 hintText.text        = "[Del] スキップ";
@@ -162,14 +162,14 @@ public class ExpertUI : MonoBehaviour
                 break;
 
             case ExperimentState.TaskRunning:
-                stateText.text  = "実行中";
+                stateText.text  = "タスク実行中です";
                 stateText.color = Color.red;
                 hintText.text   = "[Del] スキップ";
                 timerText.color = Color.white;
                 break;
 
             case ExperimentState.Questionnaire:
-                stateText.text  = "アンケート";
+                stateText.text  = "アンケートに回答してください";
                 stateText.color = new Color(0.4f, 0.8f, 1f);
                 hintText.text   = "[Enter] 完了";
                 timerText.text  = "--:--";
@@ -179,7 +179,7 @@ public class ExpertUI : MonoBehaviour
             case ExperimentState.TaskComplete:
                 stateText.text       = "タスク終了";
                 stateText.color      = new Color(1f, 0.60f, 0.15f); // orange
-                instructionText.text = "タスクが終了しました。アンケートへ進む場合は [Enter] を押してください。";
+                instructionText.text = "タスクが終了しました。アンケートへ回答し、回答が完了したら [Enter] を押してください。";
                 hintText.text        = "[Enter] 次へ";
                 timerText.text       = "00:00";
                 timerText.color      = Color.white;
@@ -233,7 +233,7 @@ public class ExpertUI : MonoBehaviour
         // All other states including TaskComplete get the full strip.
         bool taskRunning = hideNonEssentialDuringTask && state == ExperimentState.TaskRunning;
 
-        SetActive(instructionText, !taskRunning);
+        SetActive(instructionText, true);          // always visible — Expert must see the task instruction
         SetActive(hintText,        !taskRunning);
         SetActive(stateText,       !taskRunning);
 
