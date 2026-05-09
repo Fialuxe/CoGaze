@@ -5,9 +5,9 @@
 # ExperimentManager が 3ブロック × 3視線モード = 9条件に展開します。
 #
 # ブロック構成（自動生成）:
-#   Block 0 — Tobii 赤外線 (noise_low, 32bit Python)
-#   Block 1 — ウェブカメラ (noise_mid, 64bit Python)
-#   Block 2 — ハイノイズ   (noise_high, 64bit Python)
+#   Block 0 — Tobii 赤外線 
+#   Block 1 — ウェブカメラ 
+#   Block 2 — ハイノイズ  
 #
 # Python スクリプトはブロック先頭に1回だけ自動起動されます。
 # このファイルに launch ステップを書く必要はありません。
