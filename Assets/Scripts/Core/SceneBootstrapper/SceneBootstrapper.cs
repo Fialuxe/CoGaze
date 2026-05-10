@@ -1,14 +1,15 @@
+using System.Collections;
 using UnityEngine;
 using UnityEngine.XR.Management;
 
 /// <summary>
-/// アプリ起動時の最初のエントリポイント。
-/// Awake()でNetworkManagerを生成し、ルーム参加後にRoleBasedBootSystemの設定に基づいて
-/// LocalWorkerSetup または RemoteExpertSetup を呼び分ける。
-/// Expert時はXRを停止し、Worker時はXRを確保する。
+/// Application entry point.
+/// Creates NetworkManager in Awake() and, after joining a room, calls
+/// LocalWorkerSetup or RemoteExpertSetup based on the RoleBasedBootSystem setting.
+/// Stops XR for Expert (PC) and ensures XR is running for Worker (Quest).
 ///
-/// 再接続時(_setupDone == true)は再初期化をスキップし、代わりに軽量な
-/// OnReconnected()パスを実行して実験の状態を復元する。
+/// On disconnect the setup components are destroyed and _setupDone is reset,
+/// so the next OnRoomJoined always runs full initialisation.
 /// </summary>
 public class SceneBootstrapper : MonoBehaviour
 {
@@ -52,20 +53,14 @@ public class SceneBootstrapper : MonoBehaviour
 
     private void Awake()
     {
-        // ==========================================
-        // 実行時パフォーマンス最適化（特にQuest向け）
-        // ==========================================
         ApplyRuntimeOptimizations();
 
-        // NetworkManagerを生成
         GameObject nmObj = new GameObject("NetworkManager");
         networkManager = nmObj.AddComponent<NetworkManager>();
-        // DontDestroyOnLoad は NetworkManager.Awake() 内で処理済み
 
-        // ルーム参加イベントを購読
         networkManager.OnRoomJoined += OnRoomJoined;
+        networkManager.OnNetworkDisconnected += OnPhotonDisconnected;
 
-        // 接続開始
         networkManager.Connect();
 
         Debug.Log("[SceneBootstrapper] Initialized. Connecting to Photon...");
@@ -73,19 +68,19 @@ public class SceneBootstrapper : MonoBehaviour
 
     private void ApplyRuntimeOptimizations()
     {
-        // 1. ターゲットFPS設定（Quest標準は72fps、最低30fpsを保証するための措置）
+        // Quest standard is 72 fps
         Application.targetFrameRate = 72;
 
-        // 2. 物理演算の更新頻度を下げる（デフォルト0.02s=50Hz → 0.04s=25Hz）
-        //    このアプリは物理シミュレーション不要なので、負荷を大幅に削減できる
+        // Drop fixed-update rate from 50 Hz (0.02 s) to 25 Hz (0.04 s) —
+        // this app has no physics simulation so we cut fixed update cost significantly.
         Time.fixedDeltaTime = 0.04f;
         Physics.defaultSolverIterations = 1;
 
-        // 3. 影を完全無効化（QualitySettings/URP設定のフォールバック）
+        // Belt-and-suspenders shadow disable in case QualitySettings/URP profile is not stripped
         QualitySettings.shadows = ShadowQuality.Disable;
         QualitySettings.shadowDistance = 0;
 
-        // 4. シーン内の全ライトからリアルタイム影を剥がす
+        // Strip realtime shadows from every light in the scene
         Light[] allLights = FindObjectsByType<Light>(FindObjectsSortMode.None);
         foreach (var light in allLights)
         {
@@ -99,19 +94,18 @@ public class SceneBootstrapper : MonoBehaviour
 
     private void OnRoomJoined()
     {
-        if (_setupDone)
-        {
-            // ── Reconnect path ────────────────────────────────────────────
-            // Full init was already done; just recover experiment state.
-            OnReconnected();
-            return;
-        }
+        // Role detection and XR configuration must happen immediately on the main thread.
+        DetectRole();
+        RoleManager.SetRole(_role);
+        ConfigureXR(_role);
 
-        // ── First-time init ───────────────────────────────────────────────
+        // Show device check screen before starting audio; setup runs after user confirms.
+        StartCoroutine(SetupAfterDeviceCheck());
+    }
 
-        // RoleBasedBootSystem からロールを取得
+    private void DetectRole()
+    {
         RoleBasedBootSystem bootSystem = FindAnyObjectByType<RoleBasedBootSystem>();
-
         if (bootSystem != null)
         {
             _role = bootSystem.SelectedRole == AppRole.Expert
@@ -121,7 +115,7 @@ public class SceneBootstrapper : MonoBehaviour
         }
         else
         {
-            // フォールバック: ビルドターゲットで判断
+            // Fallback: infer role from build target when RoleBasedBootSystem is absent
 #if UNITY_ANDROID
             _role = RoleManager.ROLE_WORKER;
 #else
@@ -129,18 +123,24 @@ public class SceneBootstrapper : MonoBehaviour
 #endif
             Debug.Log($"[SceneBootstrapper] Role from build target (fallback): {_role}");
         }
+    }
 
-        // ロールをPhotonに登録
-        RoleManager.SetRole(_role);
+    private IEnumerator SetupAfterDeviceCheck()
+    {
+        string selectedDevice = null;
+        bool   confirmed      = false;
 
-        // XR制御: Expert時はXRを停止、Worker時はXRを確保
-        ConfigureXR(_role);
+        var checker = gameObject.AddComponent<AudioDeviceChecker>();
+        checker.OnDeviceConfirmed += dev => { selectedDevice = dev; confirmed = true; };
+        checker.Initialize(_role == RoleManager.ROLE_EXPERT);
 
-        // 対応するSetupを起動
+        yield return new WaitUntil(() => confirmed);
+
         if (_role == RoleManager.ROLE_WORKER)
         {
             _workerSetup = gameObject.AddComponent<LocalWorkerSetup>();
-            _workerSetup.participantNumber = participantNumber;
+            _workerSetup.participantNumber  = participantNumber;
+            _workerSetup.preferredMicDevice = selectedDevice;
             _workerSetup.Initialize();
         }
         else
@@ -155,42 +155,22 @@ public class SceneBootstrapper : MonoBehaviour
             _expertSetup.webcamScriptArgs      = webcamScriptArgs;
             _expertSetup.highNoiseScriptArgs   = highNoiseScriptArgs;
             _expertSetup.webcamCalibArgs       = webcamCalibArgs;
+            _expertSetup.preferredMicDevice    = selectedDevice;
             _expertSetup.Initialize();
         }
 
         _setupDone = true;
     }
 
-    /// <summary>
-    /// Lightweight reconnect handler.
-    /// Does NOT re-instantiate prefabs or re-run calibration.
-    /// Worker: sends SYNC_REQUEST → Expert re-broadcasts state + RemainingSeconds.
-    /// Expert: re-broadcasts current state immediately.
-    /// MeshHandler calibration is preserved automatically via Photon's AllBuffered RPC cache.
-    /// </summary>
-    private void OnReconnected()
+    private void OnPhotonDisconnected()
     {
-        Debug.Log("[SceneBootstrapper] Reconnected — restoring experiment state.");
-
-        if (_role == RoleManager.ROLE_WORKER && _workerSetup != null)
-        {
-            _workerSetup.RequestStateSync();
-        }
-        else if (_role == RoleManager.ROLE_EXPERT && _expertSetup != null)
-        {
-            _expertSetup.BroadcastCurrentState();
-        }
-        else
-        {
-            Debug.LogWarning("[SceneBootstrapper] OnReconnected: no setup reference found. " +
-                             "State recovery may be incomplete.");
-        }
+        if (!_setupDone) return;
+        Debug.Log("[SceneBootstrapper] Network lost — resetting for full re-init on reconnect.");
+        if (_workerSetup != null) { Destroy(_workerSetup); _workerSetup = null; }
+        if (_expertSetup != null) { Destroy(_expertSetup); _expertSetup = null; }
+        _setupDone = false;
     }
 
-    /// <summary>
-    /// ロールに応じてXRサブシステムを制御する。
-    /// Expert (PC) ではXRを停止してMeta Questへの接続を防ぐ。
-    /// </summary>
     private void ConfigureXR(string role)
     {
         var xrSettings = XRGeneralSettings.Instance;
@@ -198,7 +178,6 @@ public class SceneBootstrapper : MonoBehaviour
 
         if (role == RoleManager.ROLE_EXPERT)
         {
-            // Expert: XRを停止（HMDに接続しない）
             if (xrSettings.Manager.isInitializationComplete)
             {
                 xrSettings.Manager.StopSubsystems();
@@ -208,7 +187,6 @@ public class SceneBootstrapper : MonoBehaviour
         }
         else
         {
-            // Worker: XRが未起動なら起動
             if (!xrSettings.Manager.isInitializationComplete)
             {
                 xrSettings.Manager.InitializeLoaderSync();
@@ -223,6 +201,7 @@ public class SceneBootstrapper : MonoBehaviour
         if (networkManager != null)
         {
             networkManager.OnRoomJoined -= OnRoomJoined;
+            networkManager.OnNetworkDisconnected -= OnPhotonDisconnected;
         }
     }
 }

@@ -15,11 +15,21 @@ using UnityEngine;
 ///
 /// On the receiver side, chunks are reassembled per frameId.
 /// Incomplete frames are discarded when a new frameId arrives.
+///
+/// Sender design: Send() enqueues chunks into a background thread that paces
+/// them 2 ms apart.  Without pacing, a single 30 KB JPEG was sent as one large
+/// UDP burst (~24 ms), monopolising the WiFi medium and starving the audio TCP
+/// stream.  With 4 KB chunks and 2 ms spacing the medium is free for audio
+/// packets between every chunk.
 /// </summary>
 public class UdpVideoTransport : IVideoTransport
 {
-    private const int CHUNK_PAYLOAD = 60000; // fits well within 64KB UDP limit on LAN
-    private const int HEADER_SIZE   = 4;
+    // 1400 B fits within the 1500-byte Ethernet MTU (1400 + 4 header + 8 UDP + 20 IP = 1432 B).
+    // Larger chunks trigger IP fragmentation: a single lost fragment drops the whole UDP datagram,
+    // multiplying effective loss rate.  1400 B is the industry-standard safe size.
+    private const int CHUNK_PAYLOAD  = 1400;
+    private const int HEADER_SIZE    = 4;
+    private const int CHUNK_INTERVAL_MS = 2; // ms between consecutive chunk sends
 
     // ── Sender ────────────────────────────────────────────────────────────
 
@@ -27,83 +37,98 @@ public class UdpVideoTransport : IVideoTransport
     private IPEndPoint senderEndpoint;
     private ushort     frameCounter;
 
+    private readonly ConcurrentQueue<byte[]> chunkQueue = new();
+    private Thread       senderThread;
+    private volatile bool senderRunning;
+
     public void StartSender(string remoteIp, int port)
     {
         StopSender();
         senderEndpoint = new IPEndPoint(IPAddress.Parse(remoteIp), port);
         senderClient   = new UdpClient();
-        // Allow large send buffer for burst frames
         senderClient.Client.SendBufferSize = 512 * 1024;
-        frameCounter = 0;
+        frameCounter  = 0;
+        senderRunning = true;
+        senderThread  = new Thread(SenderLoop) { IsBackground = true, Name = "UdpVideoSender" };
+        senderThread.Start();
         Debug.Log($"[UdpVideoTransport] Sender started → {remoteIp}:{port}");
     }
 
     public void StopSender()
     {
-        if (senderClient != null)
-        {
-            senderClient.Close();
-            senderClient = null;
-            Debug.Log("[UdpVideoTransport] Sender stopped.");
-        }
+        senderRunning = false;
+        while (chunkQueue.TryDequeue(out _)) { }
+        senderThread?.Join(500);
+        senderThread = null;
+        senderClient?.Close();
+        senderClient = null;
     }
 
     public void Send(byte[] jpeg)
     {
         if (senderClient == null || jpeg == null || jpeg.Length == 0) return;
 
-        ushort frameId     = frameCounter++;
-        int    totalChunks = (jpeg.Length + CHUNK_PAYLOAD - 1) / CHUNK_PAYLOAD;
+        int totalChunks = (jpeg.Length + CHUNK_PAYLOAD - 1) / CHUNK_PAYLOAD;
         if (totalChunks > 255) { Debug.LogWarning("[UdpVideoTransport] Frame too large, skipping."); return; }
+
+        ushort frameId = frameCounter++;
+
+        // Drop any not-yet-sent chunks from the previous frame so the receiver
+        // always gets the freshest data rather than a backlog of stale frames.
+        while (chunkQueue.TryDequeue(out _)) { }
 
         for (int i = 0; i < totalChunks; i++)
         {
-            int offset  = i * CHUNK_PAYLOAD;
-            int len     = Math.Min(CHUNK_PAYLOAD, jpeg.Length - offset);
-            var packet  = new byte[HEADER_SIZE + len];
+            int offset = i * CHUNK_PAYLOAD;
+            int len    = Math.Min(CHUNK_PAYLOAD, jpeg.Length - offset);
+            var packet = new byte[HEADER_SIZE + len];
 
-            // Header
             packet[0] = (byte)(frameId >> 8);
             packet[1] = (byte)(frameId & 0xFF);
             packet[2] = (byte)i;
             packet[3] = (byte)totalChunks;
 
-            // Payload
             Buffer.BlockCopy(jpeg, offset, packet, HEADER_SIZE, len);
+            chunkQueue.Enqueue(packet);
+        }
+    }
 
-            try
+    private void SenderLoop()
+    {
+        while (senderRunning)
+        {
+            if (chunkQueue.TryDequeue(out byte[] packet))
             {
-                senderClient.Send(packet, packet.Length, senderEndpoint);
+                try { senderClient?.Send(packet, packet.Length, senderEndpoint); }
+                catch (SocketException ex) { Debug.LogWarning($"[UdpVideoTransport] Send error: {ex.Message}"); }
+                Thread.Sleep(CHUNK_INTERVAL_MS);
             }
-            catch (SocketException ex)
+            else
             {
-                Debug.LogWarning($"[UdpVideoTransport] Send error: {ex.Message}");
-                return;
+                Thread.Sleep(1);
             }
         }
     }
 
     // ── Receiver ──────────────────────────────────────────────────────────
 
-    private UdpClient  receiverClient;
-    private Thread     receiverThread;
+    private UdpClient    receiverClient;
+    private Thread       receiverThread;
     private volatile bool receiverRunning;
 
-    // Reassembly state
     private ushort assemblyFrameId;
     private int    assemblyExpectedChunks;
     private int    assemblyReceivedCount;
     private byte[][] assemblyChunks;
     private int[]    assemblyChunkLengths;
 
-    // Output queue — only the latest complete frame matters
     private readonly ConcurrentQueue<byte[]> frameQueue = new();
 
     public void StartReceiver(int port)
     {
         StopReceiver();
         receiverClient = new UdpClient(port);
-        receiverClient.Client.ReceiveBufferSize = 1024 * 1024; // 1 MB buffer
+        receiverClient.Client.ReceiveBufferSize = 1024 * 1024;
         receiverRunning = true;
 
         receiverThread = new Thread(ReceiveLoop)
@@ -118,17 +143,10 @@ public class UdpVideoTransport : IVideoTransport
     public void StopReceiver()
     {
         receiverRunning = false;
-        if (receiverClient != null)
-        {
-            receiverClient.Close();
-            receiverClient = null;
-        }
-        if (receiverThread != null && receiverThread.IsAlive)
-        {
-            receiverThread.Join(500);
-            receiverThread = null;
-        }
-        // Drain queue
+        receiverClient?.Close();
+        receiverClient = null;
+        receiverThread?.Join(500);
+        receiverThread = null;
         while (frameQueue.TryDequeue(out _)) { }
         Debug.Log("[UdpVideoTransport] Receiver stopped.");
     }
@@ -136,7 +154,6 @@ public class UdpVideoTransport : IVideoTransport
     public bool TryDequeue(out byte[] jpeg)
     {
         jpeg = null;
-        // Drain to get the latest frame (skip stale ones)
         while (frameQueue.TryDequeue(out var frame))
             jpeg = frame;
         return jpeg != null;
@@ -158,7 +175,6 @@ public class UdpVideoTransport : IVideoTransport
                 int    totalChunks = data[3];
                 int    payloadLen  = data.Length - HEADER_SIZE;
 
-                // New frame — reset assembly
                 if (frameId != assemblyFrameId || assemblyChunks == null || totalChunks != assemblyExpectedChunks)
                 {
                     assemblyFrameId        = frameId;
@@ -169,21 +185,20 @@ public class UdpVideoTransport : IVideoTransport
                 }
 
                 if (chunkIdx >= totalChunks) continue;
-                if (assemblyChunks[chunkIdx] != null) continue; // duplicate
+                if (assemblyChunks[chunkIdx] != null) continue;
 
                 assemblyChunks[chunkIdx]       = new byte[payloadLen];
                 assemblyChunkLengths[chunkIdx] = payloadLen;
                 Buffer.BlockCopy(data, HEADER_SIZE, assemblyChunks[chunkIdx], 0, payloadLen);
                 assemblyReceivedCount++;
 
-                // All chunks received — reassemble
                 if (assemblyReceivedCount == assemblyExpectedChunks)
                 {
                     int totalLen = 0;
                     for (int i = 0; i < assemblyExpectedChunks; i++)
                         totalLen += assemblyChunkLengths[i];
 
-                    var jpeg = new byte[totalLen];
+                    var jpeg   = new byte[totalLen];
                     int offset = 0;
                     for (int i = 0; i < assemblyExpectedChunks; i++)
                     {
@@ -192,31 +207,21 @@ public class UdpVideoTransport : IVideoTransport
                     }
 
                     frameQueue.Enqueue(jpeg);
-                    assemblyChunks = null; // ready for next frame
+                    assemblyChunks = null;
                 }
             }
-            catch (SocketException)
-            {
-                // Expected on StopReceiver() → socket closed
-                if (!receiverRunning) break;
-            }
-            catch (ObjectDisposedException)
-            {
-                break;
-            }
+            catch (SocketException)         { if (!receiverRunning) break; }
+            catch (ObjectDisposedException) { break; }
         }
     }
 
     // ── Utility ───────────────────────────────────────────────────────────
 
-    /// <summary>Get this machine's local IPv4 address (for LAN communication).</summary>
     public static string GetLocalIPv4()
     {
         try
         {
             using var socket = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
-            // Connect to a public address to determine the outgoing interface
-            // (no actual traffic is sent for UDP)
             socket.Connect("8.8.8.8", 80);
             return ((IPEndPoint)socket.LocalEndPoint).Address.ToString();
         }

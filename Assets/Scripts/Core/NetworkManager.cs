@@ -4,15 +4,15 @@ using Photon.Realtime;
 using System;
 
 /// <summary>
-/// Photon接続とルーム参加を管理するシングルトン。
-/// SceneBootstrapperがAwake()で生成し、DontDestroyOnLoadをかける。
+/// Singleton that manages Photon connection and room joining.
+/// Created by SceneBootstrapper in Awake() with DontDestroyOnLoad.
 /// </summary>
 public class NetworkManager : MonoBehaviourPunCallbacks
 {
     public static NetworkManager Instance { get; private set; }
 
-    /// <summary>ルーム参加完了時に発火するイベント</summary>
     public event Action OnRoomJoined;
+    public event Action OnNetworkDisconnected;
 
     private const string ROOM_NAME = "CoGaze_Room";
     private const string FIXED_REGION = "asia";
@@ -28,7 +28,6 @@ public class NetworkManager : MonoBehaviourPunCallbacks
         DontDestroyOnLoad(gameObject);
     }
 
-    /// <summary>Photonサーバーへ接続を開始する</summary>
     public void Connect()
     {
         if (PhotonNetwork.IsConnected)
@@ -76,7 +75,13 @@ public class NetworkManager : MonoBehaviourPunCallbacks
             cause == DisconnectCause.InvalidAuthentication     ||
             cause == DisconnectCause.CustomAuthenticationFailed) return;
 
+        OnNetworkDisconnected?.Invoke();
         StartCoroutine(ReconnectAfterDelay(3f));
+    }
+
+    private void OnDestroy()
+    {
+        Instance = null;
     }
 
     private System.Collections.IEnumerator ReconnectAfterDelay(float delay)

@@ -32,6 +32,7 @@ public class FrustumVisualizer : MonoBehaviour
     {
         verticalFOV = fieldOfView;
         horizontalFOV = Camera.VerticalToHorizontalFieldOfView(verticalFOV, aspectRatio);
+        meshRebuilt = false;
     }
 
     private void BuildFrustumObjects()
@@ -118,7 +119,10 @@ public class FrustumVisualizer : MonoBehaviour
             new Vector3(-halfH_far,   halfV_far,  length),        // 7 far TL
         };
 
-        bool isExpert = RoleManager.LocalRole == RoleManager.ROLE_EXPERT;
+        // In replay scene there is no Photon role — default to Expert style (far face only)
+        // so the frustum doesn't obscure the observer's view.
+        bool isExpert = string.IsNullOrEmpty(RoleManager.LocalRole) ||
+                        RoleManager.LocalRole == RoleManager.ROLE_EXPERT;
 
         int[] tris;
         if (isExpert)

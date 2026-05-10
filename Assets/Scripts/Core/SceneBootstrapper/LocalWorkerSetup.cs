@@ -1,7 +1,8 @@
+using System;
+using System.Collections;
 using UnityEngine;
 using Photon.Pun;
 using Photon.Realtime;
-using System.Collections;
 using ExitGames.Client.Photon;
 
 /// <summary>
@@ -22,7 +23,8 @@ public class LocalWorkerSetup : MonoBehaviourPunCallbacks
     private GameObject         gazeVisualizerInstance;
 
     // Set by SceneBootstrapper before Initialize()
-    public int participantNumber = 0;
+    public int    participantNumber  = 0;
+    public string preferredMicDevice = null;
 
     // Kept for reconnect path
     private ExperimentManager  expManager;
@@ -30,6 +32,17 @@ public class LocalWorkerSetup : MonoBehaviourPunCallbacks
     // Video transport
     private UdpVideoTransport  videoTransport;
     private WorkerVideoStream  videoStream;
+
+    // Audio transport — UDP for low-latency delivery; loss concealed by Opus FEC/PLC
+    private const int          AUDIO_PORT = 9102;
+    private UdpAudioTransport  audioTransport;
+
+#if UNITY_ANDROID && !UNITY_EDITOR
+    // WIFI_MODE_FULL_LOW_LATENCY (4, Android 10+) disables the WiFi PSM (power-saving mode).
+    // Without this lock the AP can batch-deliver packets at the DTIM interval (up to 500 ms),
+    // which is the single largest source of audio dropout on Quest even on a strong signal.
+    private AndroidJavaObject _wifiLock;
+#endif
 
     public void Initialize()
     {
@@ -41,7 +54,7 @@ public class LocalWorkerSetup : MonoBehaviourPunCallbacks
             Debug.Log("[LocalWorkerSetup] Default Main Camera disabled.");
         }
 
-        OVRCameraRig existingRig = Object.FindAnyObjectByType<OVRCameraRig>();
+        OVRCameraRig existingRig = UnityEngine.Object.FindAnyObjectByType<OVRCameraRig>();
         if (existingRig == null)
             Debug.LogWarning("[LocalWorkerSetup] OVRCameraRig not found. Place OVRCameraRigSetup prefab in scene.");
 
@@ -76,11 +89,50 @@ public class LocalWorkerSetup : MonoBehaviourPunCallbacks
             expManager.participantNumber = participantNumber;
             expManager.Initialize(isExpert: false);
 
+#if UNITY_ANDROID && !UNITY_EDITOR
+            // WorkerHandBroadcaster — sends hand bone positions to Expert for logging
+            try
+            {
+                var handBc = localWorkerInstance.AddComponent<WorkerHandBroadcaster>();
+                handBc.Initialize(expManager);
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError($"[LocalWorkerSetup] Failed to start WorkerHandBroadcaster: {ex.Message}");
+            }
+#endif
+
+            // VoiceCommunicator — two-way audio with spatial playback + WAV recording
+            try
+            {
+                string logDir = System.IO.Path.Combine(
+                    Application.persistentDataPath, "logs", $"P{participantNumber}");
+                var voice = localWorkerInstance.AddComponent<VoiceCommunicator>();
+                voice.Initialize(false, logDir, preferredMicDevice);
+
+                audioTransport = new UdpAudioTransport();
+                audioTransport.StartReceiver(AUDIO_PORT);
+                voice.SetTransport(audioTransport);
+
+                // Publish Worker's audio endpoint so Expert can start sending back
+                string workerIp = UdpVideoTransport.GetLocalIPv4();
+                var audioProps = new ExitGames.Client.Photon.Hashtable
+                {
+                    { "ip",        workerIp   },
+                    { "audioPort", AUDIO_PORT }
+                };
+                PhotonNetwork.LocalPlayer.SetCustomProperties(audioProps);
+                Debug.Log($"[LocalWorkerSetup] Published audio endpoint: {workerIp}:{AUDIO_PORT}");
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError($"[LocalWorkerSetup] Failed to start VoiceCommunicator: {ex.Message}");
+            }
+
             // WorkerHUD — world-space overlay in the HMD
             var hud = localWorkerInstance.AddComponent<WorkerHUD>();
             hud.Initialize(expManager);
 
-            // ── Video transport (UDP sender) ──────────────────────────
             videoTransport = new UdpVideoTransport();
             videoStream    = localWorkerInstance.AddComponent<WorkerVideoStream>();
             videoStream.Initialize(expManager, videoTransport);
@@ -89,15 +141,19 @@ public class LocalWorkerSetup : MonoBehaviourPunCallbacks
             TryConnectToExpert();
 
             Debug.Log("[LocalWorkerSetup] LocalWorker fully initialized.");
+
+#if UNITY_ANDROID && !UNITY_EDITOR
+            AcquireWifiLock();
+#endif
         }
 
         CheckForExistingExpert();
     }
 
     /// <summary>
-    /// Called by SceneBootstrapper on reconnect (instead of Initialize).
+    /// Called by SceneBootstrapper after re-joining the room following a disconnect.
     /// Re-registers Photon callbacks and sends a SYNC_REQUEST so the Expert
-    /// re-broadcasts the current experiment state — no re-instantiation needed.
+    /// re-broadcasts current state.
     /// </summary>
     public void RequestStateSync()
     {
@@ -187,6 +243,15 @@ public class LocalWorkerSetup : MonoBehaviourPunCallbacks
                 int port  = (int)portObj;
                 videoTransport.StartSender(ip, port);
                 Debug.Log($"[LocalWorkerSetup] Video sender connected to Expert at {ip}:{port}");
+
+                // Start audio sender toward Expert if their audioPort is published
+                if (audioTransport != null &&
+                    player.CustomProperties.TryGetValue("audioPort", out object audioPortObj))
+                {
+                    int audioPort = (int)audioPortObj;
+                    audioTransport.StartSender(ip, audioPort);
+                    Debug.Log($"[LocalWorkerSetup] Audio sender → Expert {ip}:{audioPort}");
+                }
                 return;
             }
         }
@@ -196,5 +261,51 @@ public class LocalWorkerSetup : MonoBehaviourPunCallbacks
     private void OnDestroy()
     {
         videoTransport?.StopSender();
+        audioTransport?.StopSender();
+        audioTransport?.StopReceiver();
+#if UNITY_ANDROID && !UNITY_EDITOR
+        ReleaseWifiLock();
+#endif
     }
+
+#if UNITY_ANDROID && !UNITY_EDITOR
+    private void AcquireWifiLock()
+    {
+        try
+        {
+            using var player   = new AndroidJavaClass("com.unity3d.player.UnityPlayer");
+            using var activity = player.GetStatic<AndroidJavaObject>("currentActivity");
+            using var wifiMgr  = activity.Call<AndroidJavaObject>("getSystemService", "wifi");
+
+            // WIFI_MODE_FULL_LOW_LATENCY = 4 (Android 10+).
+            // Falls back gracefully: if the screen turns off the lock automatically
+            // downgrades to FULL_HIGH_PERF (3), which still disables PSM.
+            _wifiLock = wifiMgr.Call<AndroidJavaObject>("createWifiLock", 4, "CoGaze_RealTimeAV");
+            _wifiLock.Call("acquire");
+            Debug.Log("[LocalWorkerSetup] WiFi low-latency lock acquired.");
+        }
+        catch (Exception ex)
+        {
+            Debug.LogWarning($"[LocalWorkerSetup] WiFi lock failed (non-fatal): {ex.Message}");
+        }
+    }
+
+    private void ReleaseWifiLock()
+    {
+        try
+        {
+            if (_wifiLock != null && _wifiLock.Call<bool>("isHeld"))
+            {
+                _wifiLock.Call("release");
+                Debug.Log("[LocalWorkerSetup] WiFi lock released.");
+            }
+            _wifiLock?.Dispose();
+            _wifiLock = null;
+        }
+        catch (Exception ex)
+        {
+            Debug.LogWarning($"[LocalWorkerSetup] WiFi lock release failed: {ex.Message}");
+        }
+    }
+#endif
 }

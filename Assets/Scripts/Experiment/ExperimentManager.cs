@@ -14,10 +14,6 @@ using System.Diagnostics;
 using UnityEngine.Networking;
 #endif
 
-// ── Enums / Data ──────────────────────────────────────────────────────────────
-
-// We handle experiment steps by step. Each step has a type and instructions.
-// The instructions are displayed on the remote expert's screen and local worker's screen.
 public enum StepType : byte
 {
     Noise          = 0,
@@ -50,8 +46,6 @@ public class ExperimentStep
     public string   ScriptArgs       = string.Empty; // baked in at expand time for Launch steps
 }
 
-// ── ExperimentManager ─────────────────────────────────────────────────────────
-
 /// <summary>
 /// Drives a 9-condition experiment (3 gaze modes × 3 noise levels) structured
 /// as 3 BLOCKED tracking-method blocks, each containing 3 gaze-mode sub-conditions.
@@ -81,7 +75,6 @@ public class ExperimentStep
 /// </summary>
 public class ExperimentManager : MonoBehaviour, IOnEventCallback
 {
-    // ── Inspector ─────────────────────────────────────────────────────────
     [Header("Timings")]
     public float taskDurationSeconds      = 10f;
     public float assemblyDurationSeconds  = 180f;
@@ -116,21 +109,25 @@ public class ExperimentManager : MonoBehaviour, IOnEventCallback
     [Tooltip("Webcam calibration args — same script as execution, run before the block. Tobii calibration is done manually.")]
     public string webcamCalibArgs     = "--calibrate --weights models/L2CSNet_gaze360.pkl --osc-port 0";
 
-    // ── Public Read-only State ────────────────────────────────────────────
     public ExperimentState CurrentState    { get; private set; } = ExperimentState.Idle;
     public StepType        CurrentStepType { get; private set; } = StepType.Noise;
     public float           RemainingSeconds{ get; private set; }
     public int             CurrentStepIndex{ get; private set; }
     public int             TotalSteps      { get; private set; }
     public bool            IsExpert        { get; private set; }
+    public int             CurrentConditionIndex => currentConditionIndex;
 
-    // ── Events ────────────────────────────────────────────────────────────
+    public (VisualizationMode gaze, string noise) GetConditionInfo(int idx)
+    {
+        if (idx < 0 || idx >= CONDITIONS.Length) return (VisualizationMode.Ray, "unknown");
+        return (CONDITIONS[idx].gaze, CONDITIONS[idx].noise);
+    }
+
     public event Action<ExperimentState>       OnStateChanged;
     public event Action<float>                 OnTimerUpdated;
     public event Action<string>                OnInstructionChanged;
     public event Action<int, int, StepType>    OnProgressChanged;
 
-    // ── Condition Table — BLOCKED by tracking method (3 blocks × 3 gaze modes) ──
     // Conditions 0-2: Tobii infrared (noise_low, 32-bit Python)
     // Conditions 3-5: Webcam        (noise_mid, 64-bit Python)
     // Conditions 6-8: High noise    (noise_high, 64-bit Python)
@@ -162,7 +159,6 @@ public class ExperimentManager : MonoBehaviour, IOnEventCallback
         new[]{1,2,0}, new[]{2,0,1}, new[]{2,1,0}
     };
 
-    // ── Internal ──────────────────────────────────────────────────────────
     private List<ExperimentStep> steps            = new();
     private List<ExperimentStep> conditionTemplate = new();
     private int[]                conditionOrder;
@@ -180,8 +176,6 @@ public class ExperimentManager : MonoBehaviour, IOnEventCallback
 
     private const byte PHOTON_EVENT = 43;
     private const byte SYNC_REQUEST = 0xFF;
-
-    // ── Init ──────────────────────────────────────────────────────────────
 
     public void Initialize(bool isExpert)
     {
@@ -210,8 +204,6 @@ public class ExperimentManager : MonoBehaviour, IOnEventCallback
         KillNoisePythonProcess();
     }
 
-    // ── Expert Keyboard ───────────────────────────────────────────────────
-
     private void Update()
     {
         if (!IsExpert) return;
@@ -233,8 +225,6 @@ public class ExperimentManager : MonoBehaviour, IOnEventCallback
                     CurrentState == ExperimentState.WhiteNoise))
             ForceSkip();
     }
-
-    // ── Step Flow ─────────────────────────────────────────────────────────
 
     private void StartExperiment()
     {
@@ -328,8 +318,6 @@ public class ExperimentManager : MonoBehaviour, IOnEventCallback
         }
     }
 
-    // ── Timer ─────────────────────────────────────────────────────────────
-
     private IEnumerator AdvanceNextFrame()
     {
         yield return null;
@@ -364,8 +352,6 @@ public class ExperimentManager : MonoBehaviour, IOnEventCallback
             Transition(ExperimentState.TaskComplete);
         }
     }
-
-    // ── Noise ─────────────────────────────────────────────────────────────
 
     private void StopNoiseRoutine()
     {
@@ -409,8 +395,6 @@ public class ExperimentManager : MonoBehaviour, IOnEventCallback
         return clip;
     }
 
-    // ── State Transition ──────────────────────────────────────────────────
-
     private void Transition(ExperimentState next)
     {
         CurrentState = next;
@@ -450,8 +434,6 @@ public class ExperimentManager : MonoBehaviour, IOnEventCallback
             SetAllVisualizersStreamingMode(streamingNeeded);
         }
     }
-
-    // ── Photon ────────────────────────────────────────────────────────────
 
     private void BroadcastState(ExperimentState state)
     {
@@ -579,8 +561,6 @@ public class ExperimentManager : MonoBehaviour, IOnEventCallback
         OnTimerUpdated?.Invoke(0f);
         noiseRoutine = null;
     }
-
-    // ── Instructions Loading & Expansion ─────────────────────────────────
 
     private IEnumerator LoadInstructions()
     {
@@ -720,7 +700,6 @@ public class ExperimentManager : MonoBehaviour, IOnEventCallback
             bool isBlockStart = (c % BLOCK_SIZE == 0);
             int  blockNum    = c / BLOCK_SIZE + 1;
 
-            // ── Block-start: (optional) calibration then execution launch ──
             if (isBlockStart)
             {
                 int    blockIdx  = c / BLOCK_SIZE;
@@ -748,7 +727,7 @@ public class ExperimentManager : MonoBehaviour, IOnEventCallback
                     });
                 }
 
-                // 3. Same script, execution args (kills calibration process first)
+                // 3. Same script, execution args — kills the calibration process first
                 steps.Add(new ExperimentStep
                 {
                     Type             = StepType.Launch,
@@ -759,7 +738,7 @@ public class ExperimentManager : MonoBehaviour, IOnEventCallback
                 });
             }
 
-            // ── ConditionStart: switch gaze mode, open ready gate ──
+            // ConditionStart: switch gaze mode, open ready gate
             string readyNote = isBlockStart
                 ? "実行スクリプト起動済み。アイトラッキングを確認し、[Enter] で開始してください。"
                 : "次の視線モードに切り替えました。[Enter] で続けてください。";
@@ -771,7 +750,7 @@ public class ExperimentManager : MonoBehaviour, IOnEventCallback
                 LocalInstruction = $"[Block {blockNum}/{numBlocks}  Cond {c + 1}/9]  次の条件を準備中です。しばらくお待ちください。",
             });
 
-            // ── Per-condition steps from template (skip any Launch — handled above) ──
+            // Per-condition steps from template (skip any Launch — handled above)
             foreach (var t in conditionTemplate)
             {
                 if (t.Type == StepType.Launch) continue;
@@ -788,8 +767,6 @@ public class ExperimentManager : MonoBehaviour, IOnEventCallback
 
         UnityEngine.Debug.Log($"[ExperimentManager] Expanded: {numBlocks} blocks × {BLOCK_SIZE} conds × {conditionTemplate.Count} template steps = {steps.Count} total.");
     }
-
-    // ── Condition Actions (Expert only) ───────────────────────────────────
 
     /// <summary>Find the Worker's PostureHandler (the one not owned by this client).</summary>
     private PostureHandler FindWorkerPosture()
@@ -817,7 +794,7 @@ public class ExperimentManager : MonoBehaviour, IOnEventCallback
             UnityEngine.Debug.LogWarning("[ExperimentManager] AlignToWorker: ConnectionHandler not found.");
     }
 
-    /// <summary>Lock Expert camera to Worker's head (Assembly中).</summary>
+    /// <summary>Lock Expert camera to Worker's head during Assembly.</summary>
     private void FollowWorker()
     {
         var ph = FindWorkerPosture();
@@ -830,11 +807,11 @@ public class ExperimentManager : MonoBehaviour, IOnEventCallback
             UnityEngine.Debug.Log("[ExperimentManager] Expert follow mode started.");
         }
 
-        // GazeVisualizer の FOV を PCA カメラに合わせる
+        // Switch GazeVisualizer FOV to match the PCA (streaming) camera during Assembly
         SetAllVisualizersStreamingMode(true);
     }
 
-    /// <summary>Release Expert camera from Worker追従.</summary>
+    /// <summary>Release Expert camera from Worker follow.</summary>
     private void UnfollowWorker()
     {
         var ch = UnityEngine.Object.FindAnyObjectByType<ConnectionHandler>();
@@ -844,7 +821,7 @@ public class ExperimentManager : MonoBehaviour, IOnEventCallback
             UnityEngine.Debug.Log("[ExperimentManager] Expert follow mode ended.");
         }
 
-        // GazeVisualizer の FOV を Expert カメラに戻す
+        // Restore GazeVisualizer FOV to the Expert's own camera
         SetAllVisualizersStreamingMode(false);
     }
 
@@ -948,8 +925,6 @@ public class ExperimentManager : MonoBehaviour, IOnEventCallback
         }
 #endif
     }
-
-    // ── Helpers ───────────────────────────────────────────────────────────
 
     private string GetCurrentInstruction()
     {

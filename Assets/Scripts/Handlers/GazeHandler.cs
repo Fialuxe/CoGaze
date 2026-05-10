@@ -2,19 +2,16 @@ using UnityEngine;
 using Photon.Pun;
 
 /// <summary>
-/// 視線データ (x, y, blink) をPhotonStreamで同期するHandler。
-/// IsMineの場合はIGazeInputからデータを読んで送信し、
-/// リモート側はReceivedGazeDataプロパティで受信データを参照する。
+/// Synchronises gaze data (x, y, blink) over Photon. The owner reads from IGazeInput
+/// and sends; remotes receive and cache the value.
 /// </summary>
 public class GazeHandler : MonoBehaviourPun, IPunObservable
 {
     private IGazeInput gazeInput;
     private Vector3 receivedGazeData;
 
-    /// <summary>リモートから受信した視線データ (x, y, blink)</summary>
     public Vector3 ReceivedGazeData => receivedGazeData;
 
-    /// <summary>ローカルの視線データ（IsMineの場合はgazeInputから直接）</summary>
     public Vector3 CurrentGazeData
     {
         get
@@ -25,10 +22,9 @@ public class GazeHandler : MonoBehaviourPun, IPunObservable
         }
     }
 
-    /// <summary>現在の視線表示モード（Expert側で変更され、同期される）</summary>
     public VisualizationMode CurrentMode { get; set; } = VisualizationMode.Ray;
 
-    /// <summary>IGazeInput実装を注入する</summary>
+    /// <summary>Inject IGazeInput implementation.</summary>
     public void Initialize(IGazeInput input)
     {
         gazeInput = input;
@@ -39,7 +35,6 @@ public class GazeHandler : MonoBehaviourPun, IPunObservable
     {
         if (stream.IsWriting)
         {
-            // ローカル: gazeInputからデータを読んで送信
             Vector3 data = gazeInput != null ? gazeInput.GazeData : Vector3.zero;
             stream.SendNext(data.x);
             stream.SendNext(data.y);
@@ -48,7 +43,6 @@ public class GazeHandler : MonoBehaviourPun, IPunObservable
         }
         else
         {
-            // リモート: 受信データを保存
             float x = (float)stream.ReceiveNext();
             float y = (float)stream.ReceiveNext();
             float blink = (float)stream.ReceiveNext();
