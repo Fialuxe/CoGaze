@@ -241,6 +241,8 @@ Assets/Scripts/
 ## 🔗 Acknowledgments / 謝辞
 
 - **Eye Tracking / アイトラッキング**: [EyeTrackToOSCData by Fialuxe](https://github.com/Fialuxe/EyeTrackToOSCData)
-- **Webcam Gaze Estimation / ウェブカメラ視線推定**: [L2CS-Net](https://github.com/Ahmednull/L2CS-Net) — used for gaze estimation in Block 1 (webcam) and Block 2 (high-noise) conditions via `webcam_gaze_tracker.py`
-- **Opus Audio Codec / 音声コーデック**: [Concentus](https://github.com/lostromb/concentus) — pure C# implementation of the Opus codec (IETF RFC 6716) used for low-latency voice communication. Place `Concentus.dll` in `Assets/Plugins/`.
+- **Webcam Gaze Estimation / ウェブカメラ視線推定**: [L2CS-Net](https://github.com/Ahmednull/L2CS-Net) (MIT License) — used for gaze estimation in Block 1 (webcam) and Block 2 (high-noise) conditions via `webcam_gaze_tracker.py`
+- **Opus Audio Codec / 音声コーデック**: [Concentus](https://github.com/lostromb/concentus) (Opus BSD License + MIT License) — pure C# implementation of the Opus codec (IETF RFC 6716) used for low-latency voice communication. Place `Concentus.dll` in `Assets/Plugins/`.
 - **Base System / ベースシステム**: [remotexr_client](https://github.com/prasanthsasikumar/remotexr_client) and `localxr_client`
+
+This project is distributed under the MIT License. Full license text and third-party notices (Opus, Concentus, L2CS-Net) are in [LICENSE](LICENSE).
