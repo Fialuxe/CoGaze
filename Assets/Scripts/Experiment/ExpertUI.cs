@@ -179,7 +179,7 @@ public class ExpertUI : MonoBehaviour
             case ExperimentState.TaskComplete:
                 stateText.text       = "タスク終了";
                 stateText.color      = new Color(1f, 0.60f, 0.15f); // orange
-                instructionText.text = "タスクが終了しました。アンケートへ回答し、回答が完了したら [Enter] を押してください。";
+                instructionText.text = "タスクが終了しました。 [Enter] を押してください。";
                 hintText.text        = "[Enter] 次へ";
                 timerText.text       = "00:00";
                 timerText.color      = Color.white;

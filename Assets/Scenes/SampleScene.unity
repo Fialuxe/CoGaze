@@ -130,6 +130,7 @@ GameObject:
   - component: {fileID: 83729580}
   - component: {fileID: 83729581}
   - component: {fileID: 83729582}
+  - component: {fileID: 83729583}
   m_Layer: 0
   m_Name: SceneBootstrapper
   m_TagString: Untagged
@@ -150,7 +151,7 @@ Transform:
   m_LocalScale: {x: 1, y: 1, z: 1}
   m_ConstrainProportionsScale: 0
   m_Children: []
-  m_Father: {fileID: 832575519}
+  m_Father: {fileID: 0}
   m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
 --- !u!114 &83729581
 MonoBehaviour:
@@ -183,14 +184,55 @@ MonoBehaviour:
     \n2. Edit this script to change the system procedure without adding other GameObject
     directly to the Scene."
   participantNumber: 0
-  pythonExecutable32: C:\Users\mtaku\AppData\Local\Programs\Python\Python311-32\python.exe
-  pythonExecutable64: C:\Users\mtaku\AppData\Local\Programs\Python\Python311\python.exe
-  pythonScriptDirectory: C:/Users/mtaku/EyeTrackToOSCData
-  skipTobiiLaunch: 1
+  pythonExecutable32: C:\Users\takum\AppData\Local\Programs\Python\Python310-32\python.exe
+  pythonExecutable64: C:\Users\takum\AppData\Local\Programs\Python\Python310\python.exe
+  pythonScriptDirectory: C:/Users/takum/EyeTrackToOSCData
+  skipTobiiLaunch: 0
   tobiiScriptArgs: 
   webcamScriptArgs: --ema-alpha 0.25 --osc-port 8000 --device cuda --preview
   highNoiseScriptArgs: --ema-alpha 1.0  --osc-port 8000 --preview
   webcamCalibArgs: --weights models/L2CSNet_gaze360.pkl --calibrate
+--- !u!114 &83729583
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 83729579}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 81d9debcbaf99472bb70ffc2f99cb23f, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: 
+  DisconnectAfterKeepAlive: 0
+  KeepAliveInBackground: 60000
+  ApplyDontDestroyOnLoad: 1
+  runInBackground: 1
+  statsResetInterval: 1000
+  speakerPrefab: {fileID: 0}
+  primaryRecorder: {fileID: 0}
+  usePrimaryRecorder: 0
+  cppCompatibilityMode: 0
+  Settings:
+    AppIdRealtime: 
+    AppIdFusion: 
+    AppIdChat: 
+    AppIdVoice: 
+    AppVersion: 
+    UseNameServer: 1
+    FixedRegion: 
+    Server: 
+    Port: 0
+    ProxyServer: 
+    Protocol: 0
+    EnableProtocolFallback: 1
+    AuthMode: 0
+    EnableLobbyStatistics: 0
+    NetworkLogging: 1
+  ShowSettings: 1
+  AutoConnectAndJoin: 1
+  usePunAppSettings: 1
+  usePunAuthValues: 1
 --- !u!4 &102308336 stripped
 Transform:
   m_CorrespondingSourceObject: {fileID: -3910990755373119420, guid: 0b864fa985817ee498eda55a850e6a8b, type: 3}
@@ -977,10 +1019,54 @@ Transform:
   m_ConstrainProportionsScale: 0
   m_Children:
   - {fileID: 410087041}
-  - {fileID: 83729580}
   - {fileID: 233894058}
   - {fileID: 210467054}
   - {fileID: 102308336}
+  m_Father: {fileID: 0}
+  m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
+--- !u!1 &844589183
+GameObject:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  serializedVersion: 6
+  m_Component:
+  - component: {fileID: 844589185}
+  - component: {fileID: 844589184}
+  m_Layer: 0
+  m_Name: VoiceLogger
+  m_TagString: Untagged
+  m_Icon: {fileID: 0}
+  m_NavMeshLayer: 0
+  m_StaticEditorFlags: 0
+  m_IsActive: 1
+--- !u!114 &844589184
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 844589183}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: a86f533fd9917dd4da8601e9eb542c96, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: 
+  LogLevel: 2
+--- !u!4 &844589185
+Transform:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 844589183}
+  serializedVersion: 2
+  m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
+  m_LocalPosition: {x: 0, y: 0, z: 0}
+  m_LocalScale: {x: 1, y: 1, z: 1}
+  m_ConstrainProportionsScale: 0
+  m_Children: []
   m_Father: {fileID: 0}
   m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
 --- !u!1001 &994591615
@@ -1239,3 +1325,5 @@ SceneRoots:
   m_Roots:
   - {fileID: 330585546}
   - {fileID: 832575519}
+  - {fileID: 844589185}
+  - {fileID: 83729580}

@@ -146,6 +146,12 @@ public class MeshHandler : MonoBehaviourPun
         photonView.RPC(nameof(RPC_ReceiveMeshTransform), RpcTarget.AllBuffered, pos, rot, scale);
     }
 
+    /// <summary>
+    /// Re-sends the current transform as an AllBuffered RPC so a reconnecting
+    /// player receives the latest calibration position.  Called from RemoteExpertSetup.BroadcastCurrentState().
+    /// </summary>
+    public void BroadcastTransform() => SendMeshTransform();
+
     [PunRPC]
     private void RPC_ReceiveMeshTransform(Vector3 pos, Quaternion rot, Vector3 scale)
     {

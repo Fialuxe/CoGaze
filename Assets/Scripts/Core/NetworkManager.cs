@@ -15,7 +15,6 @@ public class NetworkManager : MonoBehaviourPunCallbacks
     public event Action OnNetworkDisconnected;
 
     private const string ROOM_NAME = "CoGaze_Room";
-    private const string FIXED_REGION = "asia";
 
     private void Awake()
     {
@@ -36,9 +35,8 @@ public class NetworkManager : MonoBehaviourPunCallbacks
             return;
         }
 
-        PhotonNetwork.PhotonServerSettings.AppSettings.FixedRegion = FIXED_REGION;
         PhotonNetwork.ConnectUsingSettings();
-        Debug.Log("[NetworkManager] Connecting to Photon (region: asia)...");
+        Debug.Log($"[NetworkManager] Connecting to Photon (region: {PhotonNetwork.PhotonServerSettings.AppSettings.FixedRegion})...");
     }
 
     public override void OnConnectedToMaster()

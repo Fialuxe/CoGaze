@@ -1,221 +1,181 @@
 using UnityEngine;
 using System.Collections;
+using Unity.WebRTC;
 #if UNITY_ANDROID && !UNITY_EDITOR
 using Meta.XR;
 #endif
 
 /// <summary>
-/// Runs on the Local Worker (Quest 3/3S) only — attached inside LocalWorkerSetup's IsMine block.
+/// Runs on the Local Worker (Quest 3) only.
 ///
-/// Uses PassthroughCameraAccess (MRUK) to capture the physical front camera.
-/// Frames are JPEG-encoded and sent to the Expert via IVideoTransport.
-/// Editor falls back to a virtual capture camera for pipeline testing.
+/// Captures the passthrough camera via PassthroughCameraAccess and blits each
+/// frame into a stable RenderTexture.  WebRtcVideoSession reads that texture and
+/// encodes it with the Snapdragon hardware H.264 encoder — no CPU JPEG, no ReadPixels.
+///
+/// Call TriggerOffer() once the Expert is confirmed in the Photon room so that
+/// WebRtcVideoSession initiates the SDP offer.
 /// </summary>
 public class WorkerVideoStream : MonoBehaviour
 {
-    [Header("Capture settings")]
+    [Header("Capture")]
     public Vector2Int requestedResolution = new Vector2Int(640, 480);
-    [Range(1, 100)]
-    public int jpegQuality = 40;
-    [Tooltip("Seconds between frames sent. 0.1 = 10 fps.")]
-    public float frameInterval = 0.1f;
+    [Tooltip("Seconds between blit ticks. 0.033 ≈ 30 fps.")]
+    public float frameInterval = 0.033f;
 
-    private ExperimentManager expManager;
-    private Coroutine         streamCoroutine;
-    private Texture2D         readbackTex;
-    private IVideoTransport   transport;
+    private ExperimentManager  expManager;
+    private WebRtcVideoSession session;
+    private RenderTexture      captureRT;
+    private Coroutine          streamCoroutine;
 
-    // ── PCA (Android / Quest 3+) ──────────────────────────────────────────
 #if UNITY_ANDROID && !UNITY_EDITOR
     private PassthroughCameraAccess pca;
 #endif
 
-    // ── Virtual camera fallback (Editor) ──────────────────────────────────
 #if UNITY_EDITOR
-    private Camera        captureCamera;
-    private RenderTexture captureRT;
+    private Camera        editorCam;
+    private RenderTexture editorRT;
 #endif
 
-    // ── Init ──────────────────────────────────────────────────────────────
+    // ── Init ────────────────────────────────────────────────────────────────
 
-    public void Initialize(ExperimentManager manager, IVideoTransport videoTransport)
+    public void Initialize(ExperimentManager manager)
     {
         expManager = manager;
-        transport  = videoTransport;
         expManager.OnStateChanged += OnStateChanged;
+
+        // Format must match what Unity WebRTC expects for the current graphics API.
+        // OpenGLES3 (Quest default) needs R8G8B8A8; Vulkan/D3D needs B8G8R8A8.
+        // Using the wrong format throws ArgumentException inside VideoStreamTrack constructor.
+       var rtFormat = WebRTC.GetSupportedRenderTextureFormat(SystemInfo.graphicsDeviceType);
+        captureRT = new RenderTexture(requestedResolution.x, requestedResolution.y, 0, rtFormat);
+        captureRT.Create(); // must be allocated before VideoStreamTrack binds the native handle
+
+        session = gameObject.AddComponent<WebRtcVideoSession>();
 
 #if UNITY_ANDROID && !UNITY_EDITOR
         SetupPCA();
 #endif
     }
 
-    private void OnDestroy()
+    /// <summary>
+    /// Called by LocalWorkerSetup once the Expert is in the room.
+    /// Starts the WebRTC handshake.  Signaling callbacks must already be wired
+    /// before this is called (done in LocalWorkerSetup).
+    /// </summary>
+    public void TriggerOffer()
     {
-        if (readbackTex != null) Destroy(readbackTex);
-#if UNITY_EDITOR
-        if (captureRT != null) { captureRT.Release(); Destroy(captureRT); }
-#endif
+        Debug.Log($"[WorkerVideoStream] TriggerOffer called. RT={captureRT?.width}x{captureRT?.height} fmt={captureRT?.graphicsFormat} created={captureRT?.IsCreated()} gfx={SystemInfo.graphicsDeviceType}");
+        session.StartAsOfferer(captureRT);
     }
 
-    // ── PCA setup (Android / Quest 3+) ───────────────────────────────────
+    public WebRtcVideoSession Session => session;
+
+    // ── PCA setup ───────────────────────────────────────────────────────────
 
 #if UNITY_ANDROID && !UNITY_EDITOR
     private void SetupPCA()
     {
         if (!PassthroughCameraAccess.IsSupported)
         {
-            Debug.LogError("[WorkerVideoStream] PassthroughCameraAccess not supported on this device/OS version.");
+            Debug.LogError("[WorkerVideoStream] PassthroughCameraAccess not supported.");
             return;
         }
         pca = gameObject.AddComponent<PassthroughCameraAccess>();
-        pca.CameraPosition      = PassthroughCameraAccess.CameraPositionType.Left;
-        pca.RequestedResolution  = requestedResolution;
-        pca.enabled = false; // enabled only while streaming
-        Debug.Log("[WorkerVideoStream] PassthroughCameraAccess ready.");
+        pca.CameraPosition     = PassthroughCameraAccess.CameraPositionType.Left;
+        pca.RequestedResolution = requestedResolution;
+        pca.enabled = false;
+        Debug.Log("[WorkerVideoStream] PCA ready.");
     }
 #endif
 
-    // ── Experiment state ──────────────────────────────────────────────────
+    // ── Experiment state ─────────────────────────────────────────────────────
 
     private void OnStateChanged(ExperimentState state)
     {
-        bool shouldStream =
+        bool active =
             (state == ExperimentState.TaskRunning   && expManager.CurrentStepType == StepType.Assembly)
          || (state == ExperimentState.Questionnaire && expManager.CurrentStepType == StepType.Alignment);
-        if (shouldStream) StartStream(); else StopStream();
+        Debug.Log($"[WorkerVideoStream] OnStateChanged state={state} stepType={expManager.CurrentStepType} active={active}");
+        if (active) StartCapture(); else StopCapture();
     }
 
-    private void StartStream()
+    private void StartCapture()
     {
         if (streamCoroutine != null) return;
-
 #if UNITY_ANDROID && !UNITY_EDITOR
-        if (pca == null)
-        {
-            Debug.LogWarning("[WorkerVideoStream] PCA not available — stream not started.");
-            return;
-        }
-        pca.enabled = true;
+        if (pca != null) pca.enabled = true;
 #else
-        SetupVirtualCamera();
+        SetupEditorCamera();
 #endif
-
-        streamCoroutine = StartCoroutine(StreamLoop());
-        Debug.Log("[WorkerVideoStream] Streaming started.");
+        streamCoroutine = StartCoroutine(CaptureLoop());
+        Debug.Log("[WorkerVideoStream] Capture started.");
     }
 
-    private void StopStream()
+    private void StopCapture()
     {
         if (streamCoroutine == null) return;
         StopCoroutine(streamCoroutine);
         streamCoroutine = null;
-
 #if UNITY_ANDROID && !UNITY_EDITOR
         if (pca != null) pca.enabled = false;
 #endif
-        Debug.Log("[WorkerVideoStream] Streaming stopped.");
+        Debug.Log("[WorkerVideoStream] Capture stopped.");
     }
 
-    // ── Virtual camera setup (Editor only) ───────────────────────────────
+    // ── Capture loop ─────────────────────────────────────────────────────────
+
+    private IEnumerator CaptureLoop()
+    {
+        while (true)
+        {
+            yield return null; // check every frame — never miss a PCA update
+            BlitFrame();
+        }
+    }
+
+    private void BlitFrame()
+    {
+#if UNITY_ANDROID && !UNITY_EDITOR
+        if (pca == null || !pca.IsPlaying) return;
+        var src = pca.GetTexture();
+        if (src != null) Graphics.Blit(src, captureRT);
+#elif UNITY_EDITOR
+        if (editorCam == null || editorRT == null) return;
+        editorCam.Render();
+        Graphics.Blit(editorRT, captureRT);
+#endif
+    }
+
+    // ── Editor fallback camera ────────────────────────────────────────────────
 
 #if UNITY_EDITOR
-    private void SetupVirtualCamera()
+    private void SetupEditorCamera()
     {
-        if (captureCamera != null) return;
-
-        int w = requestedResolution.x;
-        int h = requestedResolution.y;
-        captureRT   = new RenderTexture(w, h, 24, RenderTextureFormat.ARGB32);
-        readbackTex = new Texture2D(w, h, TextureFormat.RGB24, false);
+        if (editorCam != null) return;
+        int w = requestedResolution.x, h = requestedResolution.y;
+        editorRT = new RenderTexture(w, h, 24, RenderTextureFormat.ARGB32);
 
         OVRCameraRig rig    = Object.FindAnyObjectByType<OVRCameraRig>();
         Transform    anchor = rig != null ? rig.centerEyeAnchor : transform;
 
-        var camGo = new GameObject("VideoCaptureCam");
-        camGo.transform.SetParent(anchor, false);
-        camGo.transform.localPosition = Vector3.zero;
-        camGo.transform.localRotation = Quaternion.identity;
-
-        captureCamera = camGo.AddComponent<Camera>();
-        captureCamera.fieldOfView     = 90f;
-        captureCamera.nearClipPlane   = 0.05f;
-        captureCamera.farClipPlane    = 100f;
-        captureCamera.cullingMask     = ~0;
-        captureCamera.clearFlags      = CameraClearFlags.SolidColor;
-        captureCamera.backgroundColor = Color.black;
-        captureCamera.targetTexture   = captureRT;
-        captureCamera.enabled         = false;
+        var go = new GameObject("EditorCaptureCam");
+        go.transform.SetParent(anchor, false);
+        editorCam = go.AddComponent<Camera>();
+        editorCam.fieldOfView   = 90f;
+        editorCam.nearClipPlane = 0.05f;
+        editorCam.farClipPlane  = 100f;
+        editorCam.targetTexture = editorRT;
+        editorCam.enabled       = false;
     }
 #endif
 
-    // ── Stream loop ───────────────────────────────────────────────────────
-
-    private IEnumerator StreamLoop()
+    private void OnDestroy()
     {
-        var wait = new WaitForSeconds(frameInterval);
-        while (true)
-        {
-            yield return wait;
-            CaptureAndSend();
-        }
-    }
-
-    private void CaptureAndSend()
-    {
-#if UNITY_ANDROID && !UNITY_EDITOR
-        SendPCAFrame();
-#else
-        SendVirtualFrame();
-#endif
-    }
-
-    // ── PCA capture (Android / Quest 3+) ─────────────────────────────────
-
-#if UNITY_ANDROID && !UNITY_EDITOR
-    private void SendPCAFrame()
-    {
-        if (pca == null || !pca.IsPlaying) return;
-        if (!pca.IsUpdatedThisFrame) return;
-
-        var rt = pca.GetTexture() as RenderTexture;
-        if (rt == null) return;
-
-        int w = pca.CurrentResolution.x;
-        int h = pca.CurrentResolution.y;
-
-        if (readbackTex == null || readbackTex.width != w || readbackTex.height != h)
-        {
-            if (readbackTex != null) Destroy(readbackTex);
-            readbackTex = new Texture2D(w, h, TextureFormat.RGBA32, false);
-        }
-
-        RenderTexture prev = RenderTexture.active;
-        RenderTexture.active = rt;
-        readbackTex.ReadPixels(new Rect(0, 0, w, h), 0, 0, false);
-        readbackTex.Apply(false);
-        RenderTexture.active = prev;
-
-        byte[] jpeg = ImageConversion.EncodeToJPG(readbackTex, jpegQuality);
-        transport?.Send(jpeg);
-    }
-#endif
-
-    // ── Virtual camera capture (Editor only) ─────────────────────────────
-
+        session?.Stop();
+        captureRT?.Release();
+        if (captureRT != null) Destroy(captureRT);
 #if UNITY_EDITOR
-    private void SendVirtualFrame()
-    {
-        if (captureCamera == null || captureRT == null) return;
-
-        captureCamera.Render();
-
-        RenderTexture prev = RenderTexture.active;
-        RenderTexture.active = captureRT;
-        readbackTex.ReadPixels(new Rect(0, 0, requestedResolution.x, requestedResolution.y), 0, 0, false);
-        readbackTex.Apply(false);
-        RenderTexture.active = prev;
-
-        transport?.Send(ImageConversion.EncodeToJPG(readbackTex, jpegQuality));
-    }
+        if (editorRT != null) { editorRT.Release(); Destroy(editorRT); }
 #endif
+    }
 }

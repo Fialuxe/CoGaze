@@ -49,8 +49,8 @@ public class ExperimentLogger : MonoBehaviour, IOnEventCallback
     private float[] latestHandR;
 
     // Voice audio offset — resolved lazily in BeginTrial
-    private VoiceCommunicator voiceCommunicator;
-    private float             trialVoiceStartSeconds;
+    private VoiceRecorder voiceCommunicator;
+    private float         trialVoiceStartSeconds;
 
     public void Initialize(ExperimentManager mgr, int participant, string logBaseDirectory = "")
     {
@@ -139,8 +139,8 @@ public class ExperimentLogger : MonoBehaviour, IOnEventCallback
         findAttempts     = 0;
 
         if (voiceCommunicator == null)
-            voiceCommunicator = GetComponent<VoiceCommunicator>();
-        trialVoiceStartSeconds = voiceCommunicator?.CurrentRecordingSeconds ?? 0f;
+            voiceCommunicator = GetComponent<VoiceRecorder>();
+        trialVoiceStartSeconds = voiceCommunicator?.RecordingSeconds ?? 0f;
 
         // Snapshot mesh transform at trial start
         var meshObj = GameObject.Find(MESH_NAME);

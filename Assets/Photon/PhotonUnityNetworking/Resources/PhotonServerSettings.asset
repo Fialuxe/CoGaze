@@ -16,10 +16,10 @@ MonoBehaviour:
     AppIdRealtime: 467a46c0-e6bf-4077-9be0-e0d77930f735
     AppIdFusion: 
     AppIdChat: 
-    AppIdVoice: 
-    AppVersion: 0.1
+    AppIdVoice: fd5103cb-f3bb-4f41-b90a-2d95243a57a6
+    AppVersion: 
     UseNameServer: 1
-    FixedRegion: asia
+    FixedRegion: jp
     Server: 
     Port: 0
     ProxyServer: 
@@ -28,14 +28,17 @@ MonoBehaviour:
     AuthMode: 0
     EnableLobbyStatistics: 0
     NetworkLogging: 1
-  DevRegion: asia
-  PunLogging: 1
+  DevRegion: jp
+  PunLogging: 0
   EnableSupportLogger: 0
   RunInBackground: 1
   StartInOfflineMode: 0
   RpcList:
+  - CantHearYou
+  - ChangeColour
   - ClickRpc
   - DestroyRpc
+  - HeresWhy
   - DestroySpaceship
   - Fire
   - RespawnSpaceship

@@ -76,9 +76,9 @@ public class ExperimentStep
 public class ExperimentManager : MonoBehaviour, IOnEventCallback
 {
     [Header("Timings")]
-    public float taskDurationSeconds      = 10f;
+    public float taskDurationSeconds      = 60f;
     public float assemblyDurationSeconds  = 180f;
-    public float whiteNoiseDurationSeconds = 10f;
+    public float whiteNoiseDurationSeconds = 30f;
     [Range(0f, 1f)] public float whiteNoiseVolume = 0.4f;
 
     [Header("Resync")]

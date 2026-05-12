@@ -1,6 +1,7 @@
 using System.Collections;
 using UnityEngine;
 using UnityEngine.XR.Management;
+using Photon.Voice.PUN;
 
 /// <summary>
 /// Application entry point.
@@ -57,6 +58,19 @@ public class SceneBootstrapper : MonoBehaviour
 
         GameObject nmObj = new GameObject("NetworkManager");
         networkManager = nmObj.AddComponent<NetworkManager>();
+
+        // PunVoiceClient must be on a root GameObject (DontDestroyOnLoad requirement).
+        // Only add in code if not already present in the scene.
+        var existingPvc = Object.FindAnyObjectByType<PunVoiceClient>();
+        if (existingPvc == null)
+        {
+            nmObj.AddComponent<PunVoiceClient>();
+        }
+        else if (existingPvc.transform.parent != null)
+        {
+            Debug.LogError("[SceneBootstrapper] PunVoiceClient is on a child GameObject — " +
+                           "move it to a root-level GameObject or it will fail DontDestroyOnLoad.");
+        }
 
         networkManager.OnRoomJoined += OnRoomJoined;
         networkManager.OnNetworkDisconnected += OnPhotonDisconnected;
