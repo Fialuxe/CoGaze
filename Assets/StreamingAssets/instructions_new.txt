@@ -1,0 +1,54 @@
+# ============================================================
+# CoGaze — 1条件分テンプレート（10条件 Williams設計）
+#
+# このファイルは「1条件分」のステップのみを記述します。
+# ExperimentManager が Williams balanced Latin square (10×10) で
+# 10条件を参加者ごとに異なる順序で展開します。
+#
+# 10条件:
+#   A: IR × Ray          F: Webcam × Frustum
+#   B: IR × Circle       G: WebcamFiltered × Ray
+#   C: IR × Frustum      H: WebcamFiltered × Circle
+#   D: Webcam × Ray      I: WebcamFiltered × Frustum
+#   E: Webcam × Circle   J: NoGaze
+#
+# 各条件の実行フロー（ExperimentManagerが制御）:
+#   WhiteNoise → Session開始(OSC) → Task1(識別) → Task2(組み立て+配置) → アンケート → 休憩
+#
+# 利用可能な Step types:
+#   noise         — ホワイトノイズ（自動終了）
+#   task          — 識別課題（taskDurationSeconds）
+#   assembly      — 組み立て+配置指示課題（assemblyDurationSeconds, video feed ON）
+#   alignment     — 位置合わせゲート（video feed ON, Enterで進む）
+#   questionnaire — ゲート（Enterで進む / アンケート完了で自動進行）
+#
+# 各ステップには [remote] と [local] ブロックで
+# Remote Expert と Local Worker それぞれへの指示を書きます。
+# どちらかを省略した場合、そのロールには何も表示されません。
+#
+# ステップの区切りは ===
+# # で始まる行と空行は無視されます
+# ============================================================
+
+noise
+===
+task
+[remote]
+識別課題：QRマーカーを視線で示してください。Worker が正しいマーカーを指し示したら Enter を押してください。
+[local]
+識別課題：Remote Expert の視線の先にあるQRマーカーを指し示してください。完了したら「Done」ボタンを押してください。
+===
+noise
+===
+assembly
+[remote]
+組み立て・配置課題：グリッド上の位置を視線で示しながら、Worker にSomaキューブを組み立てさせてください。
+[local]
+組み立て・配置課題：Remote Expert の視線が示すグリッド位置にSomaキューブを組み立ててください。
+===
+questionnaire
+[remote]
+このセッションのアンケートに Local Worker が回答します。完了まで待機してください。
+[local]
+このセッションのアンケートに回答してください。
+===

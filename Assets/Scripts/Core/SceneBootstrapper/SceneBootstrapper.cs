@@ -105,6 +105,8 @@ public class SceneBootstrapper : MonoBehaviour
 
     private void DetectRole()
     {
+#if UNITY_EDITOR
+        // In the Editor, respect the Inspector-set RoleBasedBootSystem for dev convenience.
         RoleBasedBootSystem bootSystem = FindAnyObjectByType<RoleBasedBootSystem>();
         if (bootSystem != null)
         {
@@ -112,17 +114,16 @@ public class SceneBootstrapper : MonoBehaviour
                 ? RoleManager.ROLE_EXPERT
                 : RoleManager.ROLE_WORKER;
             Debug.Log($"[SceneBootstrapper] Role from RoleBasedBootSystem: {_role}");
+            return;
         }
-        else
-        {
-            // Fallback: infer role from build target when RoleBasedBootSystem is absent
-#if UNITY_ANDROID
-            _role = RoleManager.ROLE_WORKER;
-#else
-            _role = RoleManager.ROLE_EXPERT;
 #endif
-            Debug.Log($"[SceneBootstrapper] Role from build target (fallback): {_role}");
-        }
+        // In builds, always derive role from the build target — Quest = Worker, PC = Expert.
+#if UNITY_ANDROID
+        _role = RoleManager.ROLE_WORKER;
+#else
+        _role = RoleManager.ROLE_EXPERT;
+#endif
+        Debug.Log($"[SceneBootstrapper] Role from build target: {_role}");
     }
 
     private IEnumerator SetupAfterDeviceCheck()
@@ -146,16 +147,8 @@ public class SceneBootstrapper : MonoBehaviour
         else
         {
             _expertSetup = gameObject.AddComponent<RemoteExpertSetup>();
-            _expertSetup.participantNumber     = participantNumber;
-            _expertSetup.pythonExecutable32    = pythonExecutable32;
-            _expertSetup.pythonExecutable64    = pythonExecutable64;
-            _expertSetup.pythonScriptDirectory = pythonScriptDirectory;
-            _expertSetup.skipTobiiLaunch       = skipTobiiLaunch;
-            _expertSetup.tobiiScriptArgs       = tobiiScriptArgs;
-            _expertSetup.webcamScriptArgs      = webcamScriptArgs;
-            _expertSetup.highNoiseScriptArgs   = highNoiseScriptArgs;
-            _expertSetup.webcamCalibArgs       = webcamCalibArgs;
-            _expertSetup.preferredMicDevice    = selectedDevice;
+            _expertSetup.participantNumber  = participantNumber;
+            _expertSetup.preferredMicDevice = selectedDevice;
             _expertSetup.Initialize();
         }
 

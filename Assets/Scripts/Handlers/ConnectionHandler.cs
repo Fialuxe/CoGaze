@@ -28,8 +28,21 @@ public class ConnectionHandler : MonoBehaviour
     // ── Follow mode (Assembly中のWorker追従) ──────────────────────────
     private Transform followTarget;
 
+    public bool LockGazeModeKeys = false;
+
+    private ExperimentManager2              _expMgr;
+    private System.Action<ExperimentState>  _onStateChanged;
+
     private void Start()
     {
+        // Lock gaze mode keys during a running task
+        _expMgr = FindAnyObjectByType<ExperimentManager2>();
+        if (_expMgr != null)
+        {
+            _onStateChanged = state => LockGazeModeKeys = state == ExperimentState.TaskRunning;
+            _expMgr.OnStateChanged += _onStateChanged;
+        }
+
         // カメラを探す: Camera.main → FindObjectOfType → 生成
         cam = Camera.main;
 
@@ -69,13 +82,16 @@ public class ConnectionHandler : MonoBehaviour
         // ── キーボード入力（常に処理 — follow mode 中も有効） ──────────
         if (keyboard != null)
         {
-            // Gaze Mode の切り替え（1, 2, 3キー）
-            var gazeHandler = GetComponent<GazeHandler>();
-            if (gazeHandler != null)
+            // Gaze Mode の切り替え（1, 2, 3キー）— 実験中はロック
+            if (!LockGazeModeKeys)
             {
-                if (keyboard.digit1Key.wasPressedThisFrame) { gazeHandler.CurrentMode = VisualizationMode.Ray; Debug.Log("Mode: Ray"); }
-                if (keyboard.digit2Key.wasPressedThisFrame) { gazeHandler.CurrentMode = VisualizationMode.Circle; Debug.Log("Mode: Circle"); }
-                if (keyboard.digit3Key.wasPressedThisFrame) { gazeHandler.CurrentMode = VisualizationMode.Frustum; Debug.Log("Mode: Frustum"); }
+                var gazeHandler = GetComponent<GazeHandler>();
+                if (gazeHandler != null)
+                {
+                    if (keyboard.digit1Key.wasPressedThisFrame) { gazeHandler.CurrentMode = VisualizationMode.Ray; Debug.Log("Mode: Ray"); }
+                    if (keyboard.digit2Key.wasPressedThisFrame) { gazeHandler.CurrentMode = VisualizationMode.Circle; Debug.Log("Mode: Circle"); }
+                    if (keyboard.digit3Key.wasPressedThisFrame) { gazeHandler.CurrentMode = VisualizationMode.Frustum; Debug.Log("Mode: Frustum"); }
+                }
             }
 
             // ESCでカーソル解除/再ロック
@@ -172,6 +188,8 @@ public class ConnectionHandler : MonoBehaviour
 
     private void OnDestroy()
     {
+        if (_expMgr != null && _onStateChanged != null)
+            _expMgr.OnStateChanged -= _onStateChanged;
         SetCursorLock(false);
     }
 }

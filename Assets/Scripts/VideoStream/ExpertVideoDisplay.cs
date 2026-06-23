@@ -3,87 +3,80 @@ using UnityEngine.UI;
 using UnityEngine.InputSystem;
 
 /// <summary>
-/// Runs on the Remote Expert (PC) only — attached inside RemoteExpertSetup's IsMine block.
+/// Runs on the Remote Expert (PC) only.
 ///
-/// Receives JPEG frames from WorkerVideoStream via IVideoTransport and displays them
-/// fullscreen behind the ExpertUI text overlay.
+/// Creates a fullscreen RawImage canvas and connects it to WebRtcVideoSession.
+/// Video frames arrive as Texture from WebRTC and are assigned directly —
+/// no JPEG decode, no polling loop.
 ///
-/// Visibility:
-///   - Auto-shows when an assembly task begins, auto-hides when it ends.
-///   - Press V at any time to manually toggle.
+/// Visibility mirrors the assembly-task state. Press V to toggle manually.
 /// </summary>
 public class ExpertVideoDisplay : MonoBehaviour
 {
-    private Canvas    canvas;
-    private RawImage  videoImage;
-    private Texture2D displayTex;
-    private ExperimentManager expManager;
-    private IVideoTransport   transport;
+    private Canvas             canvas;
+    private RawImage           videoImage;
+    private ExperimentManager2 expManager;
+    private WebRtcVideoSession session;
 
-    // ── Init ──────────────────────────────────────────────────────────
+    // ── Init ────────────────────────────────────────────────────────────────
 
-    public void Initialize(ExperimentManager manager, IVideoTransport videoTransport)
+    public void Initialize(ExperimentManager2 manager)
     {
         expManager = manager;
-        transport  = videoTransport;
         expManager.OnStateChanged += OnStateChanged;
         BuildUI();
-        Debug.Log("[ExpertVideoDisplay] Initialized.");
+
+        session = gameObject.AddComponent<WebRtcVideoSession>();
+        session.StartAsAnswerer(OnFrameReceived);
+
+        FileLogger.Log("Transport", "[ExpertVideoDisplay] Initialized.");
     }
 
-    private void OnDestroy()
+    public WebRtcVideoSession Session => session;
+
+    // ── Frame callback (main thread, called by WebRTC) ───────────────────────
+
+    private void OnFrameReceived(Texture tex)
     {
-        if (displayTex != null) Destroy(displayTex);
+        videoImage.texture = tex;
     }
 
-    // ── UI Construction ───────────────────────────────────────────────
+    // ── UI ──────────────────────────────────────────────────────────────────
 
     private void BuildUI()
     {
-        var canvasGo = new GameObject("WorkerVideoCanvas");
-        canvas = canvasGo.AddComponent<Canvas>();
+        var go = new GameObject("WorkerVideoCanvas");
+        canvas = go.AddComponent<Canvas>();
         canvas.renderMode   = RenderMode.ScreenSpaceOverlay;
-        canvas.sortingOrder = 5; // below ExpertUI (sortingOrder=10) so text is on top
+        canvas.sortingOrder = 5;
+        go.AddComponent<CanvasScaler>();
 
-        canvasGo.AddComponent<CanvasScaler>();
-
-        // Fullscreen video image
         var imgGo = new GameObject("VideoImage");
-        imgGo.transform.SetParent(canvasGo.transform, false);
+        imgGo.transform.SetParent(go.transform, false);
         videoImage = imgGo.AddComponent<RawImage>();
         videoImage.color = Color.white;
-        var imgRt = imgGo.GetComponent<RectTransform>();
-        imgRt.anchorMin = Vector2.zero;
-        imgRt.anchorMax = Vector2.one;
-        imgRt.offsetMin = Vector2.zero;
-        imgRt.offsetMax = Vector2.zero;
+        var fitter = imgGo.AddComponent<AspectRatioFitter>();
+        fitter.aspectMode  = AspectRatioFitter.AspectMode.FitInParent;
+        fitter.aspectRatio = 4f / 3f;
+        var rt = imgGo.GetComponent<RectTransform>();
+        rt.anchorMin = Vector2.zero;
+        rt.anchorMax = Vector2.one;
+        rt.offsetMin = Vector2.zero;
+        rt.offsetMax = Vector2.zero;
 
-        canvasGo.SetActive(false); // hidden until an assembly task starts
+        go.SetActive(false);
     }
 
-    // ── Update — poll for frames + keyboard toggle ────────────────────
+    // ── Update — keyboard toggle only ────────────────────────────────────────
 
     private void Update()
     {
-        // Keyboard toggle
         var kb = Keyboard.current;
         if (kb != null && kb.vKey.wasPressedThisFrame)
             canvas.gameObject.SetActive(!canvas.gameObject.activeSelf);
-
-        // Poll for new frames
-        if (transport != null && canvas.gameObject.activeSelf)
-        {
-            if (transport.TryDequeue(out byte[] jpeg))
-            {
-                if (displayTex == null) displayTex = new Texture2D(2, 2);
-
-                if (ImageConversion.LoadImage(displayTex, jpeg, false))
-                    videoImage.texture = displayTex;
-            }
-        }
     }
 
-    // ── Experiment state ──────────────────────────────────────────────
+    // ── Experiment state ─────────────────────────────────────────────────────
 
     private void OnStateChanged(ExperimentState state)
     {
@@ -91,5 +84,11 @@ public class ExpertVideoDisplay : MonoBehaviour
             (state == ExperimentState.TaskRunning   && expManager.CurrentStepType == StepType.Assembly)
          || (state == ExperimentState.Questionnaire && expManager.CurrentStepType == StepType.Alignment);
         if (canvas != null) canvas.gameObject.SetActive(show);
+    }
+
+    private void OnDestroy()
+    {
+        if (expManager != null) expManager.OnStateChanged -= OnStateChanged;
+        session?.Stop();
     }
 }

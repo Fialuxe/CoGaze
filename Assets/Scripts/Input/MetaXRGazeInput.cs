@@ -75,8 +75,10 @@ public class MetaXRGazeInput : MonoBehaviour, IGazeInput
     {
         // 視線方向を0-1の正規化座標に変換
         // gazeDirection.x: 左(-1)〜右(+1), gazeDirection.y: 下(-1)〜上(+1)
-        float x = Mathf.InverseLerp(-0.5f, 0.5f, gazeDirection.x);
-        float y = Mathf.InverseLerp(-0.5f, 0.5f, gazeDirection.y);
+        // Quest3 eye tracking covers ~±40° FOV; sin(40°) ≈ 0.643
+        const float kHalfFovSin = 0.6428f;
+        float x = Mathf.InverseLerp(-kHalfFovSin, kHalfFovSin, gazeDirection.x);
+        float y = Mathf.InverseLerp(-kHalfFovSin, kHalfFovSin, gazeDirection.y);
 
         // blink: confidence が低い場合をblinkとみなす
         float blink = confidence < 0.3f ? 1f : 0f;

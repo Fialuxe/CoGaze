@@ -3,39 +3,38 @@ using System.Collections;
 using UnityEngine;
 using Photon.Pun;
 using Photon.Realtime;
+using Photon.Voice;
+using Photon.Voice.Unity;
+using Photon.Voice.PUN;
+using POpusCodec.Enums;
 using ExitGames.Client.Photon;
+using Hashtable = ExitGames.Client.Photon.Hashtable;
 
 /// <summary>
-/// LocalWorker (Android / Meta Quest) side setup.
-/// Spawns the LocalWorker prefab, attaches all handlers,
-/// attaches ExperimentManager (Worker mirror) and WorkerHUD.
-///
-/// On reconnect (called by SceneBootstrapper), skips re-instantiation and
-/// instead sends a SYNC_REQUEST so the Expert re-broadcasts current state.
+/// LocalWorker (Quest) setup.
+/// - Instantiates LocalWorker prefab and attaches all handlers.
+/// - Configures Photon Voice 2 Recorder with the selected mic device.
+/// - Wires WebRTC signaling (via Photon RaiseEvent) between WorkerVideoStream and Expert.
+/// - Attaches VoiceRecorder for WAV recording.
 /// </summary>
-public class LocalWorkerSetup : MonoBehaviourPunCallbacks
+public class LocalWorkerSetup : MonoBehaviourPunCallbacks, IOnEventCallback
 {
-    private const string PREFAB_PATH           = "Prefabs/LocalWorker";
+    private const string PREFAB_PATH            = "Prefabs/LocalWorker";
     private const string GAZE_VISUALIZER_PREFAB = "Prefabs/GazeVisualizer";
+
+    public int    participantNumber  = 0;
+    public string preferredMicDevice = null;
 
     private GameObject         localWorkerInstance;
     private PhotonView         localWorkerView;
     private GameObject         gazeVisualizerInstance;
-
-    // Set by SceneBootstrapper before Initialize()
-    public int    participantNumber  = 0;
-    public string preferredMicDevice = null;
-
-    // Kept for reconnect path
-    private ExperimentManager  expManager;
-
-    // Video transport
-    private UdpVideoTransport  videoTransport;
+    private ExperimentManager2 expManager;
     private WorkerVideoStream  videoStream;
-
-    // Audio transport — UDP for low-latency delivery; loss concealed by Opus FEC/PLC
-    private const int          AUDIO_PORT = 9102;
-    private UdpAudioTransport  audioTransport;
+    private VoiceRecorder      voiceRecorder;
+    // Guards against sending a second Offer if both OnPlayerEnteredRoom and OnPlayerPropertiesUpdate
+    // fire in the same frame (e.g. Expert already in room when Worker joins).
+    private bool               _offerTriggered;
+    private bool               _expertAudioAttached;
 
 #if UNITY_ANDROID && !UNITY_EDITOR
     // WIFI_MODE_FULL_LOW_LATENCY (4, Android 10+) disables the WiFi PSM (power-saving mode).
@@ -46,21 +45,29 @@ public class LocalWorkerSetup : MonoBehaviourPunCallbacks
 
     public void Initialize()
     {
-        // Disable any non-OVR camera so OVRCameraRig takes over
         Camera existingCam = Camera.main;
         if (existingCam != null && existingCam.GetComponentInParent<OVRCameraRig>() == null)
         {
             existingCam.gameObject.SetActive(false);
-            Debug.Log("[LocalWorkerSetup] Default Main Camera disabled.");
+            FileLogger.Log("Setup", "[LocalWorkerSetup] Default Main Camera disabled.");
         }
 
         OVRCameraRig existingRig = UnityEngine.Object.FindAnyObjectByType<OVRCameraRig>();
         if (existingRig == null)
             Debug.LogWarning("[LocalWorkerSetup] OVRCameraRig not found. Place OVRCameraRigSetup prefab in scene.");
 
-        localWorkerInstance = PhotonNetwork.Instantiate(
-            PREFAB_PATH, Vector3.zero, Quaternion.identity);
+        localWorkerInstance = PhotonNetwork.Instantiate(PREFAB_PATH, Vector3.zero, Quaternion.identity);
+        if (localWorkerInstance == null)
+        {
+            Debug.LogError("[LocalWorkerSetup] PhotonNetwork.Instantiate returned null for LocalWorker prefab.");
+            return;
+        }
         localWorkerView = localWorkerInstance.GetComponent<PhotonView>();
+        if (localWorkerView == null)
+        {
+            Debug.LogError("[LocalWorkerSetup] PhotonView missing on instantiated LocalWorker prefab.");
+            return;
+        }
 
         if (localWorkerView.IsMine)
         {
@@ -84,8 +91,8 @@ public class LocalWorkerSetup : MonoBehaviourPunCallbacks
             foreach (var r in localWorkerInstance.GetComponentsInChildren<MeshRenderer>(true))
                 r.enabled = false;
 
-            // ExperimentManager — Worker is a mirror receiver
-            expManager = localWorkerInstance.AddComponent<ExperimentManager>();
+            // ExperimentManager2 — Worker is a mirror receiver
+            expManager = localWorkerInstance.AddComponent<ExperimentManager2>();
             expManager.participantNumber = participantNumber;
             expManager.Initialize(isExpert: false);
 
@@ -98,62 +105,110 @@ public class LocalWorkerSetup : MonoBehaviourPunCallbacks
             }
             catch (Exception ex)
             {
-                Debug.LogError($"[LocalWorkerSetup] Failed to start WorkerHandBroadcaster: {ex.Message}");
+                Debug.LogError($"[LocalWorkerSetup] WorkerHandBroadcaster failed: {ex.Message}");
             }
 #endif
 
-            // VoiceCommunicator — two-way audio with spatial playback + WAV recording
-            try
-            {
-                string logDir = System.IO.Path.Combine(
-                    Application.persistentDataPath, "logs", $"P{participantNumber}");
-                var voice = localWorkerInstance.AddComponent<VoiceCommunicator>();
-                voice.Initialize(false, logDir, preferredMicDevice);
-
-                audioTransport = new UdpAudioTransport();
-                audioTransport.StartReceiver(AUDIO_PORT);
-                voice.SetTransport(audioTransport);
-
-                // Publish Worker's audio endpoint so Expert can start sending back
-                string workerIp = UdpVideoTransport.GetLocalIPv4();
-                var audioProps = new ExitGames.Client.Photon.Hashtable
-                {
-                    { "ip",        workerIp   },
-                    { "audioPort", AUDIO_PORT }
-                };
-                PhotonNetwork.LocalPlayer.SetCustomProperties(audioProps);
-                Debug.Log($"[LocalWorkerSetup] Published audio endpoint: {workerIp}:{AUDIO_PORT}");
-            }
-            catch (Exception ex)
-            {
-                Debug.LogError($"[LocalWorkerSetup] Failed to start VoiceCommunicator: {ex.Message}");
-            }
-
-            // WorkerHUD — world-space overlay in the HMD
-            var hud = localWorkerInstance.AddComponent<WorkerHUD>();
+            // WorkerHUD2 — world-space overlay in the HMD
+            var hud = localWorkerInstance.AddComponent<WorkerHUD2>();
             hud.Initialize(expManager);
 
-            videoTransport = new UdpVideoTransport();
-            videoStream    = localWorkerInstance.AddComponent<WorkerVideoStream>();
-            videoStream.Initialize(expManager, videoTransport);
+            var meshHandler = localWorkerInstance.GetComponent<MeshHandler>();
+            hud.ConnectMeshHandler(meshHandler);
 
-            // Try to connect to Expert immediately if already in room
-            TryConnectToExpert();
+            var idTask = UnityEngine.Object.FindAnyObjectByType<IdentificationTask>();
+            hud.ConnectIdentificationTask(idTask);
 
-            Debug.Log("[LocalWorkerSetup] LocalWorker fully initialized.");
+            // Photon Voice 2 — set preferred mic on the Recorder already on the prefab
+            var recorder = localWorkerInstance.GetComponentInChildren<Recorder>();
+            if (recorder != null && !string.IsNullOrEmpty(preferredMicDevice))
+                recorder.MicrophoneDevice = new Photon.Voice.DeviceInfo(preferredMicDevice);
+            else if (recorder == null)
+                Debug.LogWarning("[LocalWorkerSetup] Recorder not found on LocalWorker prefab — add PhotonVoiceView + Recorder in the Inspector.");
+
+            if (recorder != null)
+            {
+                // Use Photon mic type so Android hardware AEC/AGC/NS actually activate.
+                recorder.MicrophoneType = Recorder.MicType.Photon;
+                recorder.SetAndroidNativeMicrophoneSettings(aec: true, agc: true, ns: true);
+
+                // Hardware AEC/AGC/NS already active — disable SW duplicates to avoid
+                // "underwater" timbre (double-NS) and gain-pumping (double-AGC).
+                var dsp = recorder.gameObject.GetComponent<WebRtcAudioDsp>()
+                          ?? recorder.gameObject.AddComponent<WebRtcAudioDsp>();
+                dsp.AEC              = false;
+                dsp.NoiseSuppression = false;
+                dsp.AGC              = false;
+
+                // 16 kHz = native WebRTC DSP rate; 20 ms frame saves 20 ms one-way latency.
+                recorder.SamplingRate  = SamplingRate.Sampling16000;
+                recorder.FrameDuration = OpusCodec.FrameDuration.Frame20ms;
+                recorder.Bitrate       = 24000;
+            }
+
+            // VoiceRecorder — WAV recording independent of PV2
+            string logDir = System.IO.Path.Combine(
+                Application.persistentDataPath, "logs", $"P{participantNumber}");
+            voiceRecorder = localWorkerInstance.AddComponent<VoiceRecorder>();
+            voiceRecorder.Initialize(false, logDir, preferredMicDevice);
+
+            // VideoStream — WebRTC, no transport arg; signaling wired below
+            PhotonNetwork.AddCallbackTarget(this);
+            videoStream = localWorkerInstance.AddComponent<WorkerVideoStream>();
+            videoStream.Initialize(expManager);
+
+            // Wire WebRTC signaling: session events → Photon RaiseEvent
+            var s = videoStream.Session;
+            s.OnSendOffer  += sdp => RaiseSignal(WebRtcVideoSession.EVT_OFFER,  new[] { sdp });
+            s.OnSendAnswer += sdp => RaiseSignal(WebRtcVideoSession.EVT_ANSWER, new[] { sdp });
+            s.OnSendIce    += (c, mid, idx) =>
+                RaiseSignal(WebRtcVideoSession.EVT_ICE, new[] { c, mid, idx.ToString() });
+
+            CheckForExistingExpert();
+
+            FileLogger.Log("Setup", "[LocalWorkerSetup] LocalWorker fully initialized.");
 
 #if UNITY_ANDROID && !UNITY_EDITOR
             AcquireWifiLock();
 #endif
         }
-
-        CheckForExistingExpert();
     }
+
+    // ── WebRTC signaling helpers ─────────────────────────────────────────────
+
+    private static void RaiseSignal(byte evtCode, string[] data)
+    {
+        PhotonNetwork.RaiseEvent(evtCode, data,
+            new RaiseEventOptions { Receivers = ReceiverGroup.Others },
+            SendOptions.SendReliable);
+    }
+
+    // IOnEventCallback — receives signaling from Expert
+    public void OnEvent(EventData ev)
+    {
+        var session = videoStream?.Session;
+        if (session == null) return;
+
+        switch (ev.Code)
+        {
+            case WebRtcVideoSession.EVT_ANSWER:
+                Debug.Log("[LocalWorkerSetup] WebRTC answer received from Expert — ICE negotiation starting.");
+                session.ApplyRemoteAnswer(((string[])ev.CustomData)[0]);
+                break;
+            case WebRtcVideoSession.EVT_ICE:
+            {
+                var d = (string[])ev.CustomData;
+                if (int.TryParse(d.Length > 2 ? d[2] : "0", out int idx))
+                    session.AddRemoteIce(d[0], d.Length > 1 ? d[1] : "", idx);
+                break;
+            }
+        }
+    }
+
+    // ── Room callbacks ───────────────────────────────────────────────────────
 
     /// <summary>
     /// Called by SceneBootstrapper after re-joining the room following a disconnect.
-    /// Re-registers Photon callbacks and sends a SYNC_REQUEST so the Expert
-    /// re-broadcasts current state.
     /// </summary>
     public void RequestStateSync()
     {
@@ -162,13 +217,27 @@ public class LocalWorkerSetup : MonoBehaviourPunCallbacks
             Debug.LogWarning("[LocalWorkerSetup] RequestStateSync: expManager is null. Was Initialize called?");
             return;
         }
-
-        // Re-register callback target in case it was cleared during disconnect
         PhotonNetwork.AddCallbackTarget(expManager);
-
-        // Ask Expert to resend state (includes RemainingSeconds for timer recovery)
         expManager.SendSyncRequest();
-        Debug.Log("[LocalWorkerSetup] RequestStateSync sent.");
+        FileLogger.Log("Setup", "[LocalWorkerSetup] RequestStateSync sent.");
+    }
+
+    private static bool IsExpertReady(Player player) =>
+        player.CustomProperties.TryGetValue("expertReady", out var v) && v is bool b && b;
+
+    private void TriggerOfferOnce()
+    {
+        if (_offerTriggered) return;
+        _offerTriggered = true;
+        FileLogger.Log("Setup", "[LocalWorkerSetup] Triggering WebRTC offer (once).");
+        videoStream?.TriggerOffer();
+    }
+
+    private void TryAttachRemoteCaptureOnce()
+    {
+        if (_expertAudioAttached) return;
+        _expertAudioAttached = true;
+        TryAttachRemoteCaptureToExpert();
     }
 
     private void CheckForExistingExpert()
@@ -178,6 +247,16 @@ public class LocalWorkerSetup : MonoBehaviourPunCallbacks
             if (RoleManager.GetPlayerRole(player) == RoleManager.ROLE_EXPERT)
             {
                 SpawnGazeVisualizer();
+                TryAttachRemoteCaptureOnce();
+                if (IsExpertReady(player))
+                {
+                    FileLogger.Log("Setup", "[LocalWorkerSetup] Expert already ready — triggering offer.");
+                    TriggerOfferOnce();
+                }
+                else
+                {
+                    Debug.Log("[LocalWorkerSetup] Expert in room but not yet ready — waiting for expertReady property.");
+                }
                 return;
             }
         }
@@ -185,36 +264,83 @@ public class LocalWorkerSetup : MonoBehaviourPunCallbacks
 
     public override void OnPlayerEnteredRoom(Player newPlayer)
     {
-        StartCoroutine(WaitForRoleAndSpawn(newPlayer));
+        StartCoroutine(WaitForRoleAndAct(newPlayer));
     }
 
-    /// <summary>
-    /// Called when any player's custom properties change.
-    /// Used to detect when the Expert publishes their IP address.
-    /// </summary>
-    public override void OnPlayerPropertiesUpdate(Player targetPlayer, ExitGames.Client.Photon.Hashtable changedProps)
+    public override void OnPlayerPropertiesUpdate(Player target, Hashtable changedProps)
     {
-        if (changedProps.ContainsKey("ip"))
+        if (RoleManager.GetPlayerRole(target) != RoleManager.ROLE_EXPERT) return;
+        if (changedProps.ContainsKey("expertReady") && IsExpertReady(target))
         {
-            TryConnectToExpert();
+            FileLogger.Log("Setup", "[LocalWorkerSetup] Expert signaled ready — triggering offer.");
+            SpawnGazeVisualizer();
+            TryAttachRemoteCaptureOnce();
+            TriggerOfferOnce();
         }
     }
 
-    private IEnumerator WaitForRoleAndSpawn(Player player)
+    private IEnumerator WaitForRoleAndAct(Player player)
     {
-        float timeout = 5f, elapsed = 0f;
-        while (elapsed < timeout)
+        float t = 0f;
+        while (t < 5f)
         {
             if (RoleManager.GetPlayerRole(player) == RoleManager.ROLE_EXPERT)
             {
                 SpawnGazeVisualizer();
-                TryConnectToExpert();
+                TryAttachRemoteCaptureOnce();
+                if (IsExpertReady(player))
+                {
+                    FileLogger.Log("Setup", "[LocalWorkerSetup] Expert joined and is ready — triggering offer.");
+                    TriggerOfferOnce();
+                }
+                else
+                {
+                    Debug.Log("[LocalWorkerSetup] Expert joined but not yet ready — waiting for expertReady property.");
+                }
                 yield break;
             }
-            elapsed += 0.5f;
+            t += 0.5f;
             yield return new WaitForSeconds(0.5f);
         }
         Debug.LogWarning($"[LocalWorkerSetup] Role timeout for {player.NickName}.");
+    }
+
+    private void TryAttachRemoteCaptureToExpert()
+    {
+        if (voiceRecorder == null) return;
+        StartCoroutine(WaitForExpertSpeaker());
+    }
+
+    private IEnumerator WaitForExpertSpeaker()
+    {
+        // Bounded wait — without a timeout this spins forever if the Expert never publishes a
+        // Speaker (e.g. Expert mic muted / PV2 not transmitting), leaking the coroutine silently.
+        float elapsed = 0f;
+        const float timeout = 30f;
+        while (elapsed < timeout)
+        {
+            foreach (var pvv in FindObjectsByType<PhotonVoiceView>(FindObjectsSortMode.None))
+            {
+                if (pvv.GetComponent<PhotonView>()?.IsMine == false && pvv.SpeakerInUse != null)
+                {
+                    var src = pvv.SpeakerInUse.GetComponent<AudioSource>();
+                    if (src != null)
+                    {
+                        src.volume       = 1f;
+                        src.spatialBlend = 1f;
+                        src.rolloffMode  = AudioRolloffMode.Linear;
+                        src.minDistance  = 1f;
+                        src.maxDistance  = 20f;
+                    }
+                    voiceRecorder.AttachRemoteCapture(pvv.SpeakerInUse);
+                    yield break;
+                }
+            }
+            yield return new WaitForSeconds(0.5f);
+            elapsed += 0.5f;
+        }
+        Debug.LogWarning($"[LocalWorkerSetup] Expert Speaker not found within {timeout:F0}s — remote audio capture not started.");
+        FileLogger.Log("Setup", "[LocalWorkerSetup] WaitForExpertSpeaker timed out.");
     }
 
     private void SpawnGazeVisualizer()
@@ -222,47 +348,12 @@ public class LocalWorkerSetup : MonoBehaviourPunCallbacks
         if (gazeVisualizerInstance != null) return;
         gazeVisualizerInstance = new GameObject("LocalGazeVisualizer");
         gazeVisualizerInstance.AddComponent<GazeVisualizer>().Initialize();
-        Debug.Log("[LocalWorkerSetup] GazeVisualizer spawned.");
-    }
-
-    /// <summary>
-    /// Find Expert's IP from Photon custom properties and start UDP sender.
-    /// </summary>
-    private void TryConnectToExpert()
-    {
-        if (videoTransport == null) return;
-
-        foreach (var player in PhotonNetwork.PlayerListOthers)
-        {
-            if (RoleManager.GetPlayerRole(player) != RoleManager.ROLE_EXPERT) continue;
-
-            if (player.CustomProperties.TryGetValue("ip", out object ipObj) &&
-                player.CustomProperties.TryGetValue("videoPort", out object portObj))
-            {
-                string ip = ipObj.ToString();
-                int port  = (int)portObj;
-                videoTransport.StartSender(ip, port);
-                Debug.Log($"[LocalWorkerSetup] Video sender connected to Expert at {ip}:{port}");
-
-                // Start audio sender toward Expert if their audioPort is published
-                if (audioTransport != null &&
-                    player.CustomProperties.TryGetValue("audioPort", out object audioPortObj))
-                {
-                    int audioPort = (int)audioPortObj;
-                    audioTransport.StartSender(ip, audioPort);
-                    Debug.Log($"[LocalWorkerSetup] Audio sender → Expert {ip}:{audioPort}");
-                }
-                return;
-            }
-        }
-        Debug.Log("[LocalWorkerSetup] Expert IP not yet available, will retry on property update.");
+        FileLogger.Log("Setup", "[LocalWorkerSetup] GazeVisualizer spawned.");
     }
 
     private void OnDestroy()
     {
-        videoTransport?.StopSender();
-        audioTransport?.StopSender();
-        audioTransport?.StopReceiver();
+        PhotonNetwork.RemoveCallbackTarget(this);
 #if UNITY_ANDROID && !UNITY_EDITOR
         ReleaseWifiLock();
 #endif
@@ -282,7 +373,7 @@ public class LocalWorkerSetup : MonoBehaviourPunCallbacks
             // downgrades to FULL_HIGH_PERF (3), which still disables PSM.
             _wifiLock = wifiMgr.Call<AndroidJavaObject>("createWifiLock", 4, "CoGaze_RealTimeAV");
             _wifiLock.Call("acquire");
-            Debug.Log("[LocalWorkerSetup] WiFi low-latency lock acquired.");
+            FileLogger.Log("Setup", "[LocalWorkerSetup] WiFi low-latency lock acquired.");
         }
         catch (Exception ex)
         {
@@ -297,7 +388,7 @@ public class LocalWorkerSetup : MonoBehaviourPunCallbacks
             if (_wifiLock != null && _wifiLock.Call<bool>("isHeld"))
             {
                 _wifiLock.Call("release");
-                Debug.Log("[LocalWorkerSetup] WiFi lock released.");
+                FileLogger.Log("Setup", "[LocalWorkerSetup] WiFi lock released.");
             }
             _wifiLock?.Dispose();
             _wifiLock = null;

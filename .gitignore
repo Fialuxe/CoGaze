@@ -105,3 +105,14 @@ InitTestScene*.unity*
 
 # Auto-generated cache in Assets folder
 /[Aa]ssets/[Ss]ceneDependencyCache*
+
+# CoGaze: Photon Voice native libs for platforms we never build (Quest=Android, Expert=Windows/x86_64).
+# iOS + visionOS are ~155 MB of unused binaries — kept locally but excluded from the repo.
+/[Aa]ssets/Photon/PhotonVoice/PhotonVoiceLibs/iOS/
+/[Aa]ssets/Photon/PhotonVoice/PhotonVoiceLibs/iOS.meta
+/[Aa]ssets/Photon/PhotonVoice/PhotonVoiceLibs/VisionOS/
+/[Aa]ssets/Photon/PhotonVoice/PhotonVoiceLibs/VisionOS.meta
+
+# CoGaze: runtime artifacts pulled from the device / scratch output (not project assets)
+/quest_logs/
+/qr/

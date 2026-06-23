@@ -166,7 +166,7 @@ MonoBehaviour:
   m_EditorClassIdentifier: 
   note: "1. Please select \u201CWorker\u201D when running on MQ or build apk for
     MQ.\n2. Please select \u201CExpert\u201D when running on a PC."
-  selectedRole: 0
+  selectedRole: 1
 --- !u!114 &83729582
 MonoBehaviour:
   m_ObjectHideFlags: 0

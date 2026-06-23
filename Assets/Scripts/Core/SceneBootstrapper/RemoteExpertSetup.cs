@@ -1,63 +1,39 @@
 using System;
+using System.Collections;
 using UnityEngine;
 using Photon.Pun;
+using Photon.Realtime;
+using Photon.Voice;
+using Photon.Voice.Unity;
+using Photon.Voice.PUN;
+using POpusCodec.Enums;
+using ExitGames.Client.Photon;
 
 /// <summary>
-/// RemoteExpert (PC) side setup.
-/// Spawns the RemoteExpert prefab and attaches all handlers.
-/// Also attaches ExperimentManager (Expert authority) and ExpertUI.
-///
-/// On reconnect (called by SceneBootstrapper), skips re-instantiation and
-/// re-broadcasts the current experiment state so the Worker can recover.
+/// RemoteExpert (PC) setup.
+/// - Instantiates RemoteExpert prefab and attaches all handlers.
+/// - Configures Photon Voice 2 Recorder with the selected mic device.
+/// - Wires WebRTC signaling (via Photon RaiseEvent) between ExpertVideoDisplay and Worker.
+/// - Attaches VoiceRecorder for WAV recording.
 /// </summary>
-public class RemoteExpertSetup : MonoBehaviourPunCallbacks
+public class RemoteExpertSetup : MonoBehaviourPunCallbacks, IOnEventCallback
 {
     private const string PREFAB_PATH = "Prefabs/RemoteExpert";
-    private const int    VIDEO_PORT  = 9100;
-    private const int    AUDIO_PORT  = 9101;
 
     [Header("Experiment")]
     [Tooltip("Participant number — determines Latin Square condition order (n % 9).")]
     public int participantNumber = 0;
 
-    [Header("Python")]
-    [Tooltip("32-bit Python executable — for Tobii/infrared (noise_low). E.g. C:/Python311_32/python.exe")]
-    public string pythonExecutable32 = "python";
-    [Tooltip("64-bit Python executable — for webcam/high-noise scripts. E.g. C:/Python311/python.exe")]
-    public string pythonExecutable64 = "python";
-    [Tooltip("Root directory of the EyeTrackToOSCData repository. E.g. C:/Users/mtaku/EyeTrackToOSCData")]
-    public string pythonScriptDirectory = "";
-    public bool   skipTobiiLaunch       = false;
-
-    [Header("Python Script Args (per block)")]
-    [Tooltip("CLI args for Block 0 — Tobii infrared. Usually empty.")]
-    public string tobiiScriptArgs     = "";
-    [Tooltip("CLI args for Block 1 — Webcam execution script.")]
-    public string webcamScriptArgs    = "--weights models/L2CSNet_gaze360.pkl --osc-port 8000";
-    [Tooltip("CLI args for Block 2 — High-noise script. Usually empty.")]
-    public string highNoiseScriptArgs = "";
-
-    [Header("Python Calibration Args (Webcam only)")]
-    [Tooltip("Webcam calibration args (same script as execution). Tobii is calibrated manually.")]
-    public string webcamCalibArgs = "--calibrate --weights models/L2CSNet_gaze360.pkl --osc-port 0";
-
     [Header("Logging")]
     [Tooltip("Root directory for log files. A P{n} subfolder is created inside. Leave empty to use Application.persistentDataPath/logs.")]
     public string logBaseDirectory = "";
 
-    // Set by SceneBootstrapper from AudioDeviceChecker selection
     public string preferredMicDevice = null;
 
-    private GameObject remoteExpertInstance;
-
-    // Kept for reconnect path
-    private ExperimentManager expManager;
-
-    // Video transport (kept for cleanup)
-    private UdpVideoTransport videoTransport;
-
-    // Audio transport — UDP for low-latency delivery; loss concealed by Opus FEC/PLC
-    private UdpAudioTransport audioTransport;
+    private GameObject         remoteExpertInstance;
+    private ExperimentManager2 expManager;
+    private ExpertVideoDisplay videoDisplay;
+    private VoiceRecorder      voiceRecorder;
 
     public void Initialize()
     {
@@ -74,12 +50,21 @@ public class RemoteExpertSetup : MonoBehaviourPunCallbacks
         {
             var listenerGo = new GameObject("AudioListener");
             listenerGo.AddComponent<AudioListener>();
-            Debug.Log("[RemoteExpertSetup] AudioListener created.");
+            FileLogger.Log("Setup", "[RemoteExpertSetup] AudioListener created.");
         }
 
-        remoteExpertInstance = PhotonNetwork.Instantiate(
-            PREFAB_PATH, Vector3.zero, Quaternion.identity);
+        remoteExpertInstance = PhotonNetwork.Instantiate(PREFAB_PATH, Vector3.zero, Quaternion.identity);
+        if (remoteExpertInstance == null)
+        {
+            Debug.LogError("[RemoteExpertSetup] PhotonNetwork.Instantiate returned null for RemoteExpert prefab.");
+            return;
+        }
         var view = remoteExpertInstance.GetComponent<PhotonView>();
+        if (view == null)
+        {
+            Debug.LogError("[RemoteExpertSetup] PhotonView missing on instantiated RemoteExpert prefab.");
+            return;
+        }
 
         if (view.IsMine)
         {
@@ -102,17 +87,9 @@ public class RemoteExpertSetup : MonoBehaviourPunCallbacks
             if (remoteExpertInstance.GetComponent<MeshHandler>() == null)
                 Debug.LogError("[RemoteExpertSetup] MeshHandler missing from RemoteExpert prefab.");
 
-            // ExperimentManager — Expert is the authority
-            expManager = remoteExpertInstance.AddComponent<ExperimentManager>();
-            expManager.participantNumber     = participantNumber;
-            expManager.pythonExecutable32    = pythonExecutable32;
-            expManager.pythonExecutable64    = pythonExecutable64;
-            expManager.pythonScriptDirectory = pythonScriptDirectory;
-            expManager.skipTobiiLaunch       = skipTobiiLaunch;
-            expManager.tobiiScriptArgs       = tobiiScriptArgs;
-            expManager.webcamScriptArgs      = webcamScriptArgs;
-            expManager.highNoiseScriptArgs   = highNoiseScriptArgs;
-            expManager.webcamCalibArgs       = webcamCalibArgs;
+            // ExperimentManager2 — Expert is the authority
+            expManager = remoteExpertInstance.AddComponent<ExperimentManager2>();
+            expManager.participantNumber = participantNumber;
             expManager.Initialize(isExpert: true);
 
             string baseDir = !string.IsNullOrEmpty(logBaseDirectory)
@@ -131,61 +108,107 @@ public class RemoteExpertSetup : MonoBehaviourPunCallbacks
                 Debug.LogError($"[RemoteExpertSetup] Failed to start ExperimentLogger: {ex.Message}");
             }
 
-            // VoiceCommunicator — two-way audio with spatial playback + WAV recording
-            try
+            // Photon Voice 2 — set preferred mic on the Recorder already on the prefab
+            var recorder = remoteExpertInstance.GetComponentInChildren<Recorder>();
+            if (recorder != null && !string.IsNullOrEmpty(preferredMicDevice))
+                recorder.MicrophoneDevice = new Photon.Voice.DeviceInfo(preferredMicDevice);
+            else if (recorder == null)
+                Debug.LogWarning("[RemoteExpertSetup] Recorder not found on RemoteExpert prefab — add PhotonVoiceView + Recorder in the Inspector.");
+
+            // SW DSP on the Expert (PC) — no hardware AEC fallback so keep NS+AGC,
+            // but with sane values: AgcTargetLevel=3 leaves headroom; gain=18 is 2x
+            // the class default (9) without the clipping risk of 30 or 60.
+            // AEC=false is correct if headphones are used (required by experiment protocol).
+            if (recorder != null)
             {
-                var voice = remoteExpertInstance.AddComponent<VoiceCommunicator>();
-                voice.Initialize(true, resolvedLogDir, preferredMicDevice);
+                var dsp = recorder.gameObject.GetComponent<WebRtcAudioDsp>()
+                          ?? recorder.gameObject.AddComponent<WebRtcAudioDsp>();
+                dsp.AEC              = false;
+                dsp.NoiseSuppression = true;
+                dsp.AGC              = true;
+                dsp.AgcCompressionGain = 18;
+                dsp.AgcTargetLevel   = 3;
 
-                audioTransport = new UdpAudioTransport();
-                audioTransport.StartReceiver(AUDIO_PORT);
-                voice.SetTransport(audioTransport);
-
-                // Connect to Worker if already in the room when Expert joins.
-                // OnPlayerEnteredRoom only fires for players who join AFTER us, so we
-                // must explicitly check existing players here.
-                foreach (var player in PhotonNetwork.PlayerListOthers)
-                    TryConnectAudioToWorker(player);
-            }
-            catch (Exception ex)
-            {
-                Debug.LogError($"[RemoteExpertSetup] Failed to start VoiceCommunicator: {ex.Message}");
+                recorder.SamplingRate  = SamplingRate.Sampling48000; // PC mic does not support 16000; use 48000
+                recorder.FrameDuration = OpusCodec.FrameDuration.Frame20ms;
+                recorder.Bitrate       = 24000;
             }
 
-            // ExpertUI — screen-space overlay on the Expert's monitor
-            var expertUI = remoteExpertInstance.AddComponent<ExpertUI>();
+            // VoiceRecorder — WAV recording independent of PV2
+            voiceRecorder = remoteExpertInstance.AddComponent<VoiceRecorder>();
+            voiceRecorder.Initialize(true, resolvedLogDir, preferredMicDevice);
+            StartCoroutine(WaitForWorkerSpeaker());
+
+            // ExpertUI2 — screen-space overlay on the Expert's monitor
+            var expertUI = remoteExpertInstance.AddComponent<ExpertUI2>();
             expertUI.Initialize(expManager);
 
-            videoTransport = new UdpVideoTransport();
-            videoTransport.StartReceiver(VIDEO_PORT);
+            // ExpertVideoDisplay — WebRTC answerer; signaling wired below
+            PhotonNetwork.AddCallbackTarget(this);
+            videoDisplay = remoteExpertInstance.AddComponent<ExpertVideoDisplay>();
+            videoDisplay.Initialize(expManager);
 
-            // Publish local IP and both port numbers so Worker can reach us directly
-            string localIp = UdpVideoTransport.GetLocalIPv4();
-            var props = new ExitGames.Client.Photon.Hashtable
-            {
-                { "ip",        localIp    },
-                { "videoPort", VIDEO_PORT },
-                { "audioPort", AUDIO_PORT }
-            };
-            PhotonNetwork.LocalPlayer.SetCustomProperties(props);
-            Debug.Log($"[RemoteExpertSetup] Published local IP: {localIp}  video:{VIDEO_PORT}  audio:{AUDIO_PORT}");
-
-            // ExpertVideoDisplay — shows worker's video stream during assembly tasks
-            var videoDisplay = remoteExpertInstance.AddComponent<ExpertVideoDisplay>();
-            videoDisplay.Initialize(expManager, videoTransport);
+            var s = videoDisplay.Session;
+            s.OnSendOffer  += sdp => RaiseSignal(WebRtcVideoSession.EVT_OFFER,  new[] { sdp });
+            s.OnSendAnswer += sdp => RaiseSignal(WebRtcVideoSession.EVT_ANSWER, new[] { sdp });
+            s.OnSendIce    += (c, mid, idx) =>
+                RaiseSignal(WebRtcVideoSession.EVT_ICE, new[] { c, mid, idx.ToString() });
 
             // GazeVisualizer (Expert self-view)
             var vizGo = new GameObject("LocalGazeVisualizer");
             vizGo.AddComponent<GazeVisualizer>().Initialize();
 
-            Debug.Log("[RemoteExpertSetup] RemoteExpert fully initialized.");
+            // Signal Worker that signaling is ready — Worker won't call TriggerOffer() until this is set,
+            // preventing offer delivery before PhotonNetwork.AddCallbackTarget(this) has run.
+            Debug.Log("[RemoteExpertSetup] Setting expertReady=true — Worker can now send WebRTC offer.");
+            PhotonNetwork.LocalPlayer.SetCustomProperties(
+                new ExitGames.Client.Photon.Hashtable { ["expertReady"] = true });
+
+            FileLogger.Log("Setup", "[RemoteExpertSetup] RemoteExpert fully initialized.");
         }
     }
 
+    // ── WebRTC signaling helpers ─────────────────────────────────────────────
+
+    private static void RaiseSignal(byte evtCode, string[] data)
+    {
+        PhotonNetwork.RaiseEvent(evtCode, data,
+            new RaiseEventOptions { Receivers = ReceiverGroup.Others },
+            SendOptions.SendReliable);
+    }
+
+    // IOnEventCallback — receives signaling from Worker
+    public void OnEvent(EventData ev)
+    {
+        var session = videoDisplay?.Session;
+        if (session == null)
+        {
+            Debug.LogWarning($"[RemoteExpertSetup] OnEvent code={ev.Code} received but session is null (videoDisplay={videoDisplay != null})");
+            return;
+        }
+
+        switch (ev.Code)
+        {
+            case WebRtcVideoSession.EVT_OFFER:
+                Debug.Log("[RemoteExpertSetup] WebRTC offer received from Worker — sending answer.");
+                FileLogger.Log("Setup", "[RemoteExpertSetup] WebRTC offer received from Worker.");
+                session.ApplyRemoteOffer(((string[])ev.CustomData)[0]);
+                break;
+            case WebRtcVideoSession.EVT_ICE:
+            {
+                var d = (string[])ev.CustomData;
+                if (int.TryParse(d.Length > 2 ? d[2] : "0", out int idx))
+                    session.AddRemoteIce(d[0], d.Length > 1 ? d[1] : "", idx);
+                break;
+            }
+        }
+    }
+
+    // ── Reconnect path ───────────────────────────────────────────────────────
+
     /// <summary>
     /// Called by NetworkManager's reconnect path after re-joining the room.
-    /// Re-registers Photon callbacks and re-broadcasts current experiment state
-    /// so the rejoining Worker can recover.
+    /// Re-registers Photon callbacks and re-broadcasts current experiment state.
     /// </summary>
     public void BroadcastCurrentState()
     {
@@ -194,50 +217,60 @@ public class RemoteExpertSetup : MonoBehaviourPunCallbacks
             Debug.LogWarning("[RemoteExpertSetup] BroadcastCurrentState: expManager is null.");
             return;
         }
-
-        // Re-register in case callbacks were cleared during disconnect
         PhotonNetwork.AddCallbackTarget(expManager);
-
         expManager.BroadcastCurrentState();
-        Debug.Log("[RemoteExpertSetup] Re-broadcast current experiment state after reconnect.");
+
+        var mesh = remoteExpertInstance?.GetComponent<MeshHandler>();
+        mesh?.SendMeshTransform();
+
+        FileLogger.Log("Setup", "[RemoteExpertSetup] Re-broadcast current experiment state after reconnect.");
     }
 
-    /// <summary>
-    /// Called when the Worker joins the room — start the audio sender toward them
-    /// if their endpoint is already published.
-    /// </summary>
+    // ── Remote capture for WAV ────────────────────────────────────────────────
+
+    // Called when any player joins — restart the Speaker search so we catch
+    // a Worker who joins after Initialize() has already run.
     public override void OnPlayerEnteredRoom(Photon.Realtime.Player newPlayer)
     {
-        TryConnectAudioToWorker(newPlayer);
+        if (RoleManager.GetPlayerRole(newPlayer) == RoleManager.ROLE_WORKER)
+            StartCoroutine(WaitForWorkerSpeaker());
     }
 
-    /// <summary>
-    /// Called when any player's custom properties change.
-    /// Used to detect when the Worker publishes their IP / audioPort.
-    /// </summary>
-    public override void OnPlayerPropertiesUpdate(Photon.Realtime.Player targetPlayer, ExitGames.Client.Photon.Hashtable changedProps)
-    {
-        if (changedProps.ContainsKey("ip") || changedProps.ContainsKey("audioPort"))
-            TryConnectAudioToWorker(targetPlayer);
-    }
+    private Coroutine _speakerSearchCoroutine;
 
-    private void TryConnectAudioToWorker(Photon.Realtime.Player player)
+    private IEnumerator WaitForWorkerSpeaker()
     {
-        if (audioTransport == null) return;
-        if (RoleManager.GetPlayerRole(player) != RoleManager.ROLE_WORKER) return;
-        if (!player.CustomProperties.TryGetValue("ip",        out object ipObj)   ||
-            !player.CustomProperties.TryGetValue("audioPort", out object portObj)) return;
+        if (_speakerSearchCoroutine != null)
+            StopCoroutine(_speakerSearchCoroutine);
+        _speakerSearchCoroutine = null;
 
-        string ip   = ipObj.ToString();
-        int    port = (int)portObj;
-        audioTransport.StartSender(ip, port);
-        Debug.Log($"[RemoteExpertSetup] Audio sender → Worker {ip}:{port}");
+        // Bounded wait — see SceneBootstrapper2.WaitForRemoteSpeaker: without a timeout this
+        // spins forever if the Worker never publishes a Speaker, hiding the real failure.
+        float elapsed = 0f;
+        const float timeout = 30f;
+        while (elapsed < timeout)
+        {
+            foreach (var pvv in FindObjectsByType<PhotonVoiceView>(FindObjectsSortMode.None))
+            {
+                if (pvv.GetComponent<PhotonView>()?.IsMine == false && pvv.SpeakerInUse != null)
+                {
+                    var src = pvv.SpeakerInUse.GetComponent<AudioSource>();
+                    if (src != null) { src.volume = 3f; src.spatialBlend = 0f; }
+                    voiceRecorder?.AttachRemoteCapture(pvv.SpeakerInUse);
+                    _speakerSearchCoroutine = null;
+                    yield break;
+                }
+            }
+            yield return new WaitForSeconds(0.5f);
+            elapsed += 0.5f;
+        }
+        _speakerSearchCoroutine = null;
+        Debug.LogWarning($"[RemoteExpertSetup] Worker Speaker not found within {timeout:F0}s — remote audio capture not started.");
+        FileLogger.Log("Setup", "[RemoteExpertSetup] WaitForWorkerSpeaker timed out.");
     }
 
     private void OnDestroy()
     {
-        videoTransport?.StopReceiver();
-        audioTransport?.StopSender();
-        audioTransport?.StopReceiver();
+        PhotonNetwork.RemoveCallbackTarget(this);
     }
 }
