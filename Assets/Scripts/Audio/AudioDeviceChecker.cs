@@ -71,7 +71,10 @@ public class AudioDeviceChecker : MonoBehaviour
         _countdown -= Time.deltaTime;
 
         bool ovrBtn = false;
-#if !UNITY_EDITOR
+#if UNITY_ANDROID && !UNITY_EDITOR
+        // OVRInput is only available on actual Android/Quest builds.
+        // Meta Link / Simulator runs in the Editor and does not provide OVRInput,
+        // so the block is excluded there — the auto-countdown will still fire.
         try { ovrBtn = OVRInput.GetDown(OVRInput.Button.One) || OVRInput.GetDown(OVRInput.Button.Three); }
         catch { }
 #endif
@@ -181,7 +184,7 @@ public class AudioDeviceChecker : MonoBehaviour
         _confirmed = true;
         StopTest();
         string dev = _devices.Length > 0 ? _devices[_selectedIndex] : "";
-        Debug.Log($"[AudioDeviceChecker] Confirmed device: '{(string.IsNullOrEmpty(dev) ? "(default)" : dev)}'");
+        FileLogger.Log("AudioDeviceChecker", $"Confirmed device: '{(string.IsNullOrEmpty(dev) ? "(default)" : dev)}'");
         OnDeviceConfirmed?.Invoke(dev);
         Destroy(this);
     }
