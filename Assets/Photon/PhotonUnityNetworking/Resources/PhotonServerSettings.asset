@@ -16,7 +16,7 @@ MonoBehaviour:
     AppIdRealtime: 467a46c0-e6bf-4077-9be0-e0d77930f735
     AppIdFusion: 
     AppIdChat: 
-    AppIdVoice: 
+    AppIdVoice: fd5103cb-f3bb-4f41-b90a-2d95243a57a6
     AppVersion: 0.1
     UseNameServer: 1
     FixedRegion: asia
@@ -40,6 +40,12 @@ MonoBehaviour:
   - Fire
   - RespawnSpaceship
   - RPC_ReceiveMeshTransform
+  - RPC_IdentificationDone
+  - RPC_QuestionnaireComplete
+  - RPC_ReceiveQRMarker
+  - CantHearYou
+  - ChangeColour
+  - HeresWhy
   DisableAutoOpenWizard: 1
   ShowSettings: 1
   DevRegionSetOnce: 0

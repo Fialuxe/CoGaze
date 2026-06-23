@@ -1,5 +1,8 @@
 {
   "dependencies": {
+    "com.codemaestroai.advancedunitymcp": "https://github.com/codemaestroai/advanced-unity-mcp.git?path=Unity6",
+    "com.unity.webrtc": "3.0.0",
+    "com.whinarn.unitymeshsimplifier": "https://github.com/Whinarn/UnityMeshSimplifier.git",
     "com.meta.xr.mrutilitykit": "201.0.0",
     "com.meta.xr.sdk.all": "201.0.0",
     "com.meta.xr.sdk.core": "201.0.0",
