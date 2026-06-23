@@ -14,14 +14,26 @@ using Newtonsoft.Json;
 /// to frames.csv, and a per-trial replay JSON file. Also receives Worker hand bone data
 /// via Photon event 44 and embeds it in the replay JSON.
 /// Added via AddComponent in RemoteExpertSetup.Initialize().
+///
+/// CSV schema (trials.csv):
+///   trial_id, participant, condition_index, gaze_mode, noise_level,
+///   task_type, condition_name,
+///   step_type, step_index, start_ms, end_ms, duration_ms
+///
+/// CSV schema (frames.csv):
+///   trial_id, t_ms, elapsed_s, gaze_x, gaze_y, blink,
+///   worker_px, worker_py, worker_pz, worker_rx, worker_ry, worker_rz, worker_rw,
+///   expert_px, expert_py, expert_pz, expert_rx, expert_ry, expert_rz, expert_rw,
+///   osc_certainty
 /// </summary>
 public class ExperimentLogger : MonoBehaviour, IOnEventCallback
 {
     private const byte HAND_EVENT = 44;
 
-    private ExperimentManager expManager;
+    private ExperimentManager2 expManager;
     private int               participantNumber;
     private string            logDir;
+    private string            _participantId = "P00";
     private StreamWriter      framesWriter;
 
     // Per-trial state
@@ -35,6 +47,10 @@ public class ExperimentLogger : MonoBehaviour, IOnEventCallback
     private List<ReplayFrameData> replayFrames;
     private Coroutine             frameCoroutine;
 
+    // Per-trial extra metadata set via public API before / at trial start
+    private string trialTaskType      = "";
+    private string trialConditionName = "";
+
     private const string MESH_NAME = "SharedMesh";
 
     // Cached component references (searched lazily)
@@ -47,14 +63,46 @@ public class ExperimentLogger : MonoBehaviour, IOnEventCallback
     // Latest hand data received from WorkerHandBroadcaster via event 44
     private float[] latestHandL;
     private float[] latestHandR;
+    private int     _frameFlushCounter = 0;
 
-    // Voice audio offset — resolved lazily in BeginTrial
-    private VoiceCommunicator voiceCommunicator;
+    // Latest OSC certainty value received from /gaze message (mesh_certainty).
+    // -1.0 means no value has been received yet in this trial.
+    private float latestOscCertainty = -1f;
+
+    // Voice audio offset (legacy voice transport removed — always 0)
     private float             trialVoiceStartSeconds;
 
-    public void Initialize(ExperimentManager mgr, int participant, string logBaseDirectory = "")
+    // -------------------------------------------------------------------------
+    // Public API — optional setters called before/during a trial
+    // -------------------------------------------------------------------------
+
+    /// <summary>
+    /// Set the task type label written to trials.csv ("task" or "assembly").
+    /// Call before the state transitions to TaskRunning, or omit to leave blank.
+    /// </summary>
+    public void LogTrialStart(string taskType = "", string conditionName = "")
+    {
+        trialTaskType      = taskType      ?? "";
+        trialConditionName = conditionName ?? "";
+    }
+
+    /// <summary>
+    /// Push a fresh OSC certainty value so the next CaptureFrame() picks it up.
+    /// Corresponds to the mesh_certainty field in the /gaze OSC message.
+    /// </summary>
+    public void SetOscCertainty(float certainty)
+    {
+        latestOscCertainty = certainty;
+    }
+
+    // -------------------------------------------------------------------------
+    // Initialization
+    // -------------------------------------------------------------------------
+
+    public void Initialize(ExperimentManager2 mgr, int participant, string logBaseDirectory = "")
     {
         expManager        = mgr;
+        _participantId    = mgr.participantId;
         participantNumber = participant;
 
         string baseDir = !string.IsNullOrEmpty(logBaseDirectory)
@@ -80,6 +128,7 @@ public class ExperimentLogger : MonoBehaviour, IOnEventCallback
             {
                 File.WriteAllText(trialsPath,
                     "trial_id,participant,condition_index,gaze_mode,noise_level," +
+                    "task_type,condition_name," +
                     "step_type,step_index,start_ms,end_ms,duration_ms\n",
                     Encoding.UTF8);
             }
@@ -102,7 +151,8 @@ public class ExperimentLogger : MonoBehaviour, IOnEventCallback
                 framesWriter.WriteLine(
                     "trial_id,t_ms,elapsed_s,gaze_x,gaze_y,blink," +
                     "worker_px,worker_py,worker_pz,worker_rx,worker_ry,worker_rz,worker_rw," +
-                    "expert_px,expert_py,expert_pz,expert_rx,expert_ry,expert_rz,expert_rw");
+                    "expert_px,expert_py,expert_pz,expert_rx,expert_ry,expert_rz,expert_rw," +
+                    "osc_certainty");
         }
         catch (Exception ex)
         {
@@ -112,8 +162,12 @@ public class ExperimentLogger : MonoBehaviour, IOnEventCallback
         PhotonNetwork.AddCallbackTarget(this);
         expManager.OnStateChanged += OnStateChanged;
 
-        Debug.Log($"[ExperimentLogger] Initialized. Logs → {logDir}");
+        FileLogger.Log("ExperimentLogger", $"Initialized. Logs → {logDir}");
     }
+
+    // -------------------------------------------------------------------------
+    // State machine
+    // -------------------------------------------------------------------------
 
     private void OnStateChanged(ExperimentState state)
     {
@@ -133,14 +187,25 @@ public class ExperimentLogger : MonoBehaviour, IOnEventCallback
         trialStartMs     = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
         trialStepIndex   = expManager.CurrentStepIndex;
         trialStepType    = expManager.CurrentStepType;
+
+        // Auto-populate fields that LogTrialStart() was supposed to set but was never called.
+        trialTaskType = trialStepType == StepType.Task     ? "task"
+                      : trialStepType == StepType.Assembly ? "assembly"
+                      : trialStepType.ToString().ToLowerInvariant();
+        int ci = expManager.CurrentConditionIndex;
+        if (ci >= 0)
+        {
+            var (gaze, noise) = expManager.GetConditionInfo(ci);
+            trialConditionName = $"{gaze}_{noise}";
+        }
+
         replayFrames     = new List<ReplayFrameData>();
         latestHandL      = null;
         latestHandR      = null;
+        latestOscCertainty = -1f;
         findAttempts     = 0;
 
-        if (voiceCommunicator == null)
-            voiceCommunicator = GetComponent<VoiceCommunicator>();
-        trialVoiceStartSeconds = voiceCommunicator?.CurrentRecordingSeconds ?? 0f;
+        trialVoiceStartSeconds = 0f;
 
         // Snapshot mesh transform at trial start
         var meshObj = GameObject.Find(MESH_NAME);
@@ -161,7 +226,7 @@ public class ExperimentLogger : MonoBehaviour, IOnEventCallback
         if (frameCoroutine != null) StopCoroutine(frameCoroutine);
         frameCoroutine = StartCoroutine(FrameLoop());
 
-        Debug.Log($"[ExperimentLogger] Trial started: id={currentTrialId} step={trialStepIndex} type={trialStepType}");
+        FileLogger.Log("ExperimentLogger", $"Trial started: id={currentTrialId} step={trialStepIndex} type={trialStepType} taskType={trialTaskType} conditionName={trialConditionName}");
     }
 
     private void EndTrial()
@@ -182,9 +247,10 @@ public class ExperimentLogger : MonoBehaviour, IOnEventCallback
         try { framesWriter?.Flush(); }
         catch (Exception ex) { Debug.LogWarning($"[ExperimentLogger] Flush error: {ex.Message}"); }
 
-        // Append trial row
+        // Append trial row — includes task_type and condition_name
         string trialsPath = Path.Combine(logDir, "trials.csv");
-        string row = $"{currentTrialId},{participantNumber},{condIdx},{gazeMode},{noiseLevel}," +
+        string row = $"{currentTrialId},{_participantId},{condIdx},{gazeMode},{noiseLevel}," +
+                     $"{trialTaskType},{trialConditionName}," +
                      $"{trialStepType},{trialStepIndex},{trialStartMs},{endMs},{durationMs}\n";
         try
         {
@@ -198,9 +264,11 @@ public class ExperimentLogger : MonoBehaviour, IOnEventCallback
         // Serialize replay JSON
         SaveReplayJson(condIdx, gazeMode.ToString(), noiseLevel);
 
-        Debug.Log($"[ExperimentLogger] Trial ended: id={currentTrialId} frames={replayFrames?.Count} duration={durationMs}ms");
-        currentTrialId = null;
-        replayFrames   = null;
+        FileLogger.Log("ExperimentLogger", $"Trial ended: id={currentTrialId} frames={replayFrames?.Count} duration={durationMs}ms");
+        currentTrialId     = null;
+        replayFrames       = null;
+        trialTaskType      = "";
+        trialConditionName = "";
     }
 
     private void SaveReplayJson(int condIdx, string gazeMode, string noiseLevel)
@@ -222,7 +290,7 @@ public class ExperimentLogger : MonoBehaviour, IOnEventCallback
                 meshPos   = new[] { trialMeshPos.x,   trialMeshPos.y,   trialMeshPos.z },
                 meshRot   = new[] { trialMeshRot.x,   trialMeshRot.y,   trialMeshRot.z,   trialMeshRot.w },
                 meshScale = new[] { trialMeshScale.x, trialMeshScale.y, trialMeshScale.z },
-                voiceWavPath      = voiceCommunicator?.LocalWavPath,
+                voiceWavPath      = null,
                 voiceStartSeconds = trialVoiceStartSeconds
             },
             frames = replayFrames
@@ -233,13 +301,17 @@ public class ExperimentLogger : MonoBehaviour, IOnEventCallback
         {
             var settings = new JsonSerializerSettings { NullValueHandling = NullValueHandling.Ignore };
             File.WriteAllText(path, JsonConvert.SerializeObject(data, settings), Encoding.UTF8);
-            Debug.Log($"[ExperimentLogger] Replay → {path}");
+            FileLogger.Log("ExperimentLogger", $"Replay → {path}");
         }
         catch (Exception ex)
         {
             Debug.LogWarning($"[ExperimentLogger] Replay JSON write failed: {ex.Message}");
         }
     }
+
+    // -------------------------------------------------------------------------
+    // Frame capture
+    // -------------------------------------------------------------------------
 
     private IEnumerator FrameLoop()
     {
@@ -255,7 +327,12 @@ public class ExperimentLogger : MonoBehaviour, IOnEventCallback
         }
     }
 
-    private void CaptureFrame()
+    /// <summary>
+    /// Capture one frame to CSV and replay buffer.
+    /// oscCertainty: optional override for this specific frame's certainty value.
+    /// When omitted, uses the last value set via SetOscCertainty() (default -1).
+    /// </summary>
+    private void CaptureFrame(float oscCertainty = float.NaN)
     {
         // Lazy component search with retry cap
         if (expertGazeHandler == null && findAttempts < MAX_FIND_ATTEMPTS)
@@ -291,7 +368,10 @@ public class ExperimentLogger : MonoBehaviour, IOnEventCallback
         Vector3    expertPos  = expertPostureHandler != null ? expertPostureHandler.transform.position    : Vector3.zero;
         Quaternion expertRot  = expertPostureHandler != null ? expertPostureHandler.transform.rotation    : Quaternion.identity;
 
-        // CSV row
+        // Resolve certainty: prefer per-frame override, fall back to latest pushed value
+        float certainty = float.IsNaN(oscCertainty) ? latestOscCertainty : oscCertainty;
+
+        // CSV row — osc_certainty appended as last column
         if (framesWriter != null)
         {
             try
@@ -302,7 +382,13 @@ public class ExperimentLogger : MonoBehaviour, IOnEventCallback
                     $"{workerPos.x:F4},{workerPos.y:F4},{workerPos.z:F4}," +
                     $"{workerRot.x:F4},{workerRot.y:F4},{workerRot.z:F4},{workerRot.w:F4}," +
                     $"{expertPos.x:F4},{expertPos.y:F4},{expertPos.z:F4}," +
-                    $"{expertRot.x:F4},{expertRot.y:F4},{expertRot.z:F4},{expertRot.w:F4}");
+                    $"{expertRot.x:F4},{expertRot.y:F4},{expertRot.z:F4},{expertRot.w:F4}," +
+                    $"{certainty:F4}");
+                if (++_frameFlushCounter >= 30)
+                {
+                    framesWriter.Flush();
+                    _frameFlushCounter = 0;
+                }
             }
             catch (Exception ex)
             {
@@ -342,6 +428,10 @@ public class ExperimentLogger : MonoBehaviour, IOnEventCallback
         return result;
     }
 
+    // -------------------------------------------------------------------------
+    // Photon events
+    // -------------------------------------------------------------------------
+
     public void OnEvent(EventData ev)
     {
         if (ev.Code != HAND_EVENT) return;
@@ -368,6 +458,10 @@ public class ExperimentLogger : MonoBehaviour, IOnEventCallback
             Debug.LogWarning($"[ExperimentLogger] Hand event parse error: {ex.Message}");
         }
     }
+
+    // -------------------------------------------------------------------------
+    // Lifecycle
+    // -------------------------------------------------------------------------
 
     private void OnDestroy()
     {

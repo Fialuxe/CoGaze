@@ -16,16 +16,16 @@ public class WorkerHandBroadcaster : MonoBehaviour
     private const byte HAND_EVENT     = 44;
     private const float SEND_INTERVAL = 1f / 30f;
 
-    private ExperimentManager expManager;
-    private bool              isSending;
-    private float             sendTimer;
+    private ExperimentManager2 expManager;
+    private bool               isSending;
+    private float              sendTimer;
 
 #if UNITY_ANDROID && !UNITY_EDITOR
     private OVRSkeleton leftSkeleton;
     private OVRSkeleton rightSkeleton;
 #endif
 
-    public void Initialize(ExperimentManager mgr)
+    public void Initialize(ExperimentManager2 mgr)
     {
         expManager = mgr;
         expManager.OnStateChanged += OnStateChanged;

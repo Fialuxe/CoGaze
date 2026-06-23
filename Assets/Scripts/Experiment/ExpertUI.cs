@@ -107,13 +107,13 @@ public class ExpertUI : MonoBehaviour
         row1Go.AddComponent<RectTransform>();
 
         headerText = MakeText(go.transform, new Vector2(0.01f, 0.93f), new Vector2(0.52f, 1.00f),
-            "ステップ  -/-", 24, TextAnchor.MiddleLeft, Color.cyan);
+            CoGazeStrings.Expert_HeaderDefault, 24, TextAnchor.MiddleLeft, Color.cyan);
 
         stateText = MakeText(go.transform, new Vector2(0.52f, 0.93f), new Vector2(0.76f, 1.00f),
-            "待機中", 22, TextAnchor.MiddleCenter, new Color(1f, 0.85f, 0.2f));
+            CoGazeStrings.Expert_StateIdle, 22, TextAnchor.MiddleCenter, new Color(1f, 0.85f, 0.2f));
 
         timerText = MakeText(go.transform, new Vector2(0.76f, 0.93f), new Vector2(0.99f, 1.00f),
-            "--:--", 26, TextAnchor.MiddleRight, Color.white);
+            CoGazeStrings.Expert_TimerDefault, 26, TextAnchor.MiddleRight, Color.white);
 
         // ── Row 2 group (instruction + hint) ──────────────────────────────
         row2Go = new GameObject("Row2");
@@ -121,12 +121,12 @@ public class ExpertUI : MonoBehaviour
         row2Go.AddComponent<RectTransform>();
 
         instructionText = MakeText(go.transform, new Vector2(0.01f, 0.86f), new Vector2(0.75f, 0.93f),
-            "instructions.txt を読み込んでいます...", 26, TextAnchor.MiddleLeft, Color.white);
+            CoGazeStrings.Expert_LoadingInstruction, 26, TextAnchor.MiddleLeft, Color.white);
         instructionText.horizontalOverflow = HorizontalWrapMode.Wrap;
         instructionText.verticalOverflow   = VerticalWrapMode.Truncate;
 
         hintText = MakeText(go.transform, new Vector2(0.75f, 0.86f), new Vector2(0.99f, 0.93f),
-            "[Enter] 開始", 18, TextAnchor.MiddleRight, new Color(0.6f, 0.6f, 0.6f));
+            CoGazeStrings.Expert_HintStart, 18, TextAnchor.MiddleRight, new Color(0.6f, 0.6f, 0.6f));
     }
 
     // ── Event Handlers ────────────────────────────────────────────────────
@@ -136,70 +136,70 @@ public class ExpertUI : MonoBehaviour
         switch (state)
         {
             case ExperimentState.Idle:
-                stateText.text       = "待機中";
+                stateText.text       = CoGazeStrings.Expert_StateIdle;
                 stateText.color      = new Color(1f, 0.85f, 0.2f);
-                instructionText.text = "参加者の接続を待っています...";
+                instructionText.text = CoGazeStrings.Expert_InstructionIdle;
                 hintText.text        = string.Empty;
-                timerText.text       = "--:--";
+                timerText.text       = CoGazeStrings.Expert_TimerDefault;
                 timerText.color      = Color.white;
                 break;
 
             case ExperimentState.Ready:
-                stateText.text       = "準備完了";
+                stateText.text       = CoGazeStrings.Expert_StateReady;
                 stateText.color      = Color.green;
-                instructionText.text = "メッシュのキャリブレーションが終わっているかを確認し、[Enter] を押して実験を開始してください";
-                hintText.text        = "[Enter] 開始";
-                timerText.text       = "--:--";
+                instructionText.text = CoGazeStrings.Expert_InstructionReady;
+                hintText.text        = CoGazeStrings.Expert_HintStart;
+                timerText.text       = CoGazeStrings.Expert_TimerDefault;
                 timerText.color      = Color.white;
                 break;
 
             case ExperimentState.WhiteNoise:
-                stateText.text       = "■ ノイズ再生中";
+                stateText.text       = CoGazeStrings.Expert_StateWhiteNoise;
                 stateText.color      = Color.yellow;
-                instructionText.text = "ホワイトノイズ再生中...";
-                hintText.text        = "[Del] スキップ";
+                instructionText.text = CoGazeStrings.Expert_InstructionWhiteNoise;
+                hintText.text        = CoGazeStrings.Expert_HintSkip;
                 timerText.color      = Color.yellow;
                 break;
 
             case ExperimentState.TaskRunning:
-                stateText.text  = "タスク実行中です";
+                stateText.text  = CoGazeStrings.Expert_StateTaskRunning;
                 stateText.color = Color.red;
-                hintText.text   = "[Del] スキップ";
+                hintText.text   = CoGazeStrings.Expert_HintSkip;
                 timerText.color = Color.white;
                 break;
 
             case ExperimentState.Questionnaire:
-                stateText.text  = "アンケートに回答してください";
+                stateText.text  = CoGazeStrings.Expert_StateQuestionnaire;
                 stateText.color = new Color(0.4f, 0.8f, 1f);
-                hintText.text   = "[Enter] 完了";
-                timerText.text  = "--:--";
+                hintText.text   = CoGazeStrings.Expert_HintDone;
+                timerText.text  = CoGazeStrings.Expert_TimerDefault;
                 timerText.color = Color.white;
                 break;
 
             case ExperimentState.TaskComplete:
-                stateText.text       = "タスク終了";
+                stateText.text       = CoGazeStrings.Expert_StateTaskComplete;
                 stateText.color      = new Color(1f, 0.60f, 0.15f); // orange
-                instructionText.text = "タスクが終了しました。アンケートへ回答し、回答が完了したら [Enter] を押してください。";
-                hintText.text        = "[Enter] 次へ";
-                timerText.text       = "00:00";
+                instructionText.text = CoGazeStrings.Expert_InstructionTaskComplete;
+                hintText.text        = CoGazeStrings.Expert_HintNext;
+                timerText.text       = CoGazeStrings.Expert_TimerZero;
                 timerText.color      = Color.white;
                 break;
 
             case ExperimentState.NoiseComplete:
-                stateText.text       = "ノイズ終了";
+                stateText.text       = CoGazeStrings.Expert_StateNoiseComplete;
                 stateText.color      = new Color(1f, 0.60f, 0.15f); // orange
-                instructionText.text = "ホワイトノイズが終了しました。次のステップへ進む場合は [Enter] を押してください。";
-                hintText.text        = "[Enter] 次へ";
-                timerText.text       = "00:00";
+                instructionText.text = CoGazeStrings.Expert_InstructionNoiseComplete;
+                hintText.text        = CoGazeStrings.Expert_HintNext;
+                timerText.text       = CoGazeStrings.Expert_TimerZero;
                 timerText.color      = Color.white;
                 break;
 
             case ExperimentState.Finished:
-                stateText.text       = "終了";
+                stateText.text       = CoGazeStrings.Expert_StateFinished;
                 stateText.color      = Color.gray;
-                instructionText.text = "実験終了。ご協力ありがとうございました。";
+                instructionText.text = CoGazeStrings.Expert_InstructionFinished;
                 hintText.text        = string.Empty;
-                timerText.text       = "00:00";
+                timerText.text       = CoGazeStrings.Expert_TimerZero;
                 timerText.color      = Color.white;
                 break;
         }

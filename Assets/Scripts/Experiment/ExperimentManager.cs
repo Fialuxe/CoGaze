@@ -188,8 +188,8 @@ public class ExperimentManager : MonoBehaviour, IOnEventCallback
         audioSource.playOnAwake  = false;
         audioSource.loop         = true;
 
-        if (isExpert)
-            expertGazeHandler = GetComponent<GazeHandler>();
+        // expertGazeHandler is injected via SetGazeHandler() before Initialize().
+        // GazeHandler lives on the player prefab, not this GameObject.
 
         StartCoroutine(LoadInstructions());
 
