@@ -43,15 +43,11 @@ public class GazeHandler : MonoBehaviourPun, IPunObservable
         }
         else
         {
-            float x = (float)stream.ReceiveNext();
-            float y = (float)stream.ReceiveNext();
+            float x     = (float)stream.ReceiveNext();
+            float y     = (float)stream.ReceiveNext();
             float blink = (float)stream.ReceiveNext();
             receivedGazeData = new Vector3(x, y, blink);
-            
-            if (stream.PeekNext() is int modeInt)
-            {
-                CurrentMode = (VisualizationMode)stream.ReceiveNext();
-            }
+            CurrentMode = (VisualizationMode)(int)stream.ReceiveNext();
         }
     }
 }

@@ -9,18 +9,19 @@ using extOSC;
 public class OscGazeInput : MonoBehaviour, IGazeInput
 {
     [Header("OSC Settings")]
-    [SerializeField] private int localPort = 8000; // Tobii OSC Serverのデフォルト(8000)に合わせる
+    [SerializeField] private int localPort = 9000;
     [SerializeField] private string gazeAddress = "/gaze";
 
     private OSCReceiver oscReceiver;
     private OSCBind gazeBind;
     private Vector3 gazeData = new Vector3(0.5f, 0.5f, 0f);
     private bool isAvailable = false;
+    private int _receiveCount;
 
     public Vector3 GazeData => gazeData;
     public bool IsAvailable => isAvailable;
 
-    private void Start()
+    private void Awake()
     {
         SetupOscReceiver();
     }
@@ -37,7 +38,7 @@ public class OscGazeInput : MonoBehaviour, IGazeInput
         // /gaze アドレスをバインド
         gazeBind = oscReceiver.Bind(gazeAddress, OnGazeMessageReceived);
 
-        Debug.Log($"[OscGazeInput] Listening on port {localPort}, address: {gazeAddress}");
+        FileLogger.Log("OSC", $"OscGazeInput listening on port {localPort}, address: {gazeAddress}");
     }
 
     private void OnGazeMessageReceived(OSCMessage message)
@@ -58,6 +59,11 @@ public class OscGazeInput : MonoBehaviour, IGazeInput
             blink > 0.5f ? 1f : 0f
         );
         isAvailable = true;
+        _receiveCount++;
+        if (_receiveCount == 1)
+            FileLogger.Log("OSC", $"OscGazeInput first message received. x={gazeData.x:F3} y={gazeData.y:F3} blink={gazeData.z}");
+        else if (_receiveCount % 300 == 0)
+            FileLogger.Log("OSC", $"OscGazeInput received {_receiveCount} messages. x={gazeData.x:F3} y={gazeData.y:F3} blink={gazeData.z}");
     }
 
     private void OnDestroy()

@@ -14,7 +14,8 @@ public enum VisualizationMode
 {
     Ray,
     Circle,
-    Frustum
+    Frustum,
+    None    // No gaze visualization (NoGaze condition)
 }
 
 public class GazeVisualizer : MonoBehaviour
@@ -28,11 +29,16 @@ public class GazeVisualizer : MonoBehaviour
 
     // Raycast設定（Quest向け最適化済み）
     private const float MAX_RAY_DISTANCE = 10f;  // 100m→10mに短縮（部屋のスケールで十分）
-    private LayerMask raycastMask = ~0;
+    private LayerMask raycastMask = ~0;           // Initialize to all; narrowed to SharedMesh layer in Initialize()
 
     // パフォーマンス最適化用
     private int frameCounter = 0;
-    private const int RAYCAST_INTERVAL = 3;       // 3フレームに1回だけRaycast実行
+    // On Android (Quest) raycast less frequently — MeshCollider BVH traversal is costlier on mobile.
+#if UNITY_ANDROID && !UNITY_EDITOR
+    private const int RAYCAST_INTERVAL = 6;
+#else
+    private const int RAYCAST_INTERVAL = 3;
+#endif
     private const int FIND_HANDLER_INTERVAL = 30;  // Expert検索は30フレームに1回
     private bool lastHit = false;
     private RaycastHit lastHitInfo;
@@ -45,8 +51,8 @@ public class GazeVisualizer : MonoBehaviour
     private float streamingAspect = 4f / 3f;        // PCA の解像度比 (640x480 = 4:3)
     private bool  isStreamingMode = false;
 
-    // ExperimentManager 参照（FOV 切替用）
-    private ExperimentManager expManager;
+    // ExperimentManager2 参照（FOV 切替用）
+    private ExperimentManager2 expManager;
 
     /// <summary>各Visualizerを初期化する</summary>
     public void Initialize()
@@ -54,6 +60,11 @@ public class GazeVisualizer : MonoBehaviour
         rayVisualizer = gameObject.AddComponent<RayVisualizer>();
         circleVisualizer = gameObject.AddComponent<CircleVisualizer>();
         frustumVisualizer = gameObject.AddComponent<FrustumVisualizer>();
+
+        // Narrow raycast to SharedMesh's layer only — avoids testing every collider in the scene.
+        var sharedMesh = GameObject.Find("SharedMesh");
+        if (sharedMesh != null)
+            raycastMask = 1 << sharedMesh.layer;
 
         SetMode(VisualizationMode.Ray);
         Debug.Log("[GazeVisualizer] Initialized with all sub-visualizers.");
@@ -104,10 +115,10 @@ public class GazeVisualizer : MonoBehaviour
     {
         frameCounter++;
 
-        // ExperimentManager の参照を取得（1回だけ）
+        // ExperimentManager2 の参照を取得（1回だけ）
         if (expManager == null)
         {
-            expManager = FindAnyObjectByType<ExperimentManager>();
+            expManager = FindAnyObjectByType<ExperimentManager2>();
         }
 
         // ExpertのGazeHandlerを探す（重いので30フレームに1回だけ）
@@ -125,16 +136,6 @@ public class GazeVisualizer : MonoBehaviour
         float y = gazeData.y;
         float blink = gazeData.z;
 
-        // デバッグ: 60フレームに1回、データソースと値を表示
-        if (frameCounter % 60 == 0)
-        {
-            var pv = targetGazeHandler.GetComponent<Photon.Pun.PhotonView>();
-            Debug.Log($"[GazeVisualizer] source={targetGazeHandler.name} " +
-                      $"isMine={pv?.IsMine} " +
-                      $"gaze=({x:F3},{y:F3},{blink:F1}) " +
-                      $"camPos={cachedCamera?.transform.position} " +
-                      $"streaming={isStreamingMode}");
-        }
 
         // モードの同期
         if (currentMode != targetGazeHandler.CurrentMode)
