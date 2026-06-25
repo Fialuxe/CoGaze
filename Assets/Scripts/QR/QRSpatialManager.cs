@@ -152,6 +152,7 @@ public class QRSpatialManager : MonoBehaviourPun
     private IEnumerator PeriodicBroadcastLoop()
     {
         var wait = new WaitForSeconds(1f);
+        int pollCount = 0;
         while (true)
         {
             yield return wait;
@@ -167,7 +168,10 @@ public class QRSpatialManager : MonoBehaviourPun
                                 kvp.Value.transform.rotation,
                                 buffered: false);   // AllBuffered は初回検出時のみ。ポーリングは All を使い蓄積を防ぐ
             }
-            FileLogger.Log("QRSpatialManager", $"[Poll] re-broadcast {snapshot.Count} trackable(s).");
+            // ブロードキャスト本体は毎秒のまま。診断ログだけ 30 秒ごとのハートビートに間引いて
+            // 長時間セッションでのデバイスログ肥大・連続ディスク I/O を抑える。
+            if (++pollCount % 30 == 0)
+                FileLogger.Log("QRSpatialManager", $"[Poll] re-broadcast {snapshot.Count} trackable(s) (x{pollCount}).");
         }
     }
 
