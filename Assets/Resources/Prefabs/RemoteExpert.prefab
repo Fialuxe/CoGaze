@@ -15,7 +15,6 @@ GameObject:
   - component: {fileID: 2267861249648274948}
   - component: {fileID: -5432684787605827747}
   - component: {fileID: -1794213672443387608}
-  - component: {fileID: -7084602242656971645}
   - component: {fileID: 4639573206151864132}
   - component: {fileID: 624918834736486458}
   m_Layer: 0
@@ -162,24 +161,6 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 19f511745900cb240a969005802a2b3f, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
---- !u!114 &-7084602242656971645
-MonoBehaviour:
-  m_ObjectHideFlags: 0
-  m_CorrespondingSourceObject: {fileID: 0}
-  m_PrefabInstance: {fileID: 0}
-  m_PrefabAsset: {fileID: 0}
-  m_GameObject: {fileID: 1175756688127322332}
-  m_Enabled: 1
-  m_EditorHideFlags: 0
-  m_Script: {fileID: 11500000, guid: 498515064399a7a488a60dbc5ef1058e, type: 3}
-  m_Name: 
-  m_EditorClassIdentifier: 
-  meshObjectName: SharedMesh
-  moveSpeed: 1
-  rotateSpeed: 45
-  bakedCollisionMeshes: []
-  collisionMeshQuality: 0.03
-  calibrationQRPrefix: calib
 --- !u!114 &4639573206151864132
 MonoBehaviour:
   m_ObjectHideFlags: 0

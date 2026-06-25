@@ -28,6 +28,12 @@ public class QRSpatialManager : MonoBehaviourPun
     // markerId → instantiated GameObject
     private readonly Dictionary<string, GameObject> markerObjects = new();
 
+#if UNITY_ANDROID && !UNITY_EDITOR
+    // markerId → live MRUK trackable. Kept so "QR init" can re-broadcast each QR at its CURRENT
+    // pose (OVR keeps tracking them; MRUK does not re-fire OnTrackableAdded for known markers).
+    private readonly Dictionary<string, Meta.XR.MRUtilityKit.MRUKTrackable> _trackables = new();
+#endif
+
     // ---------------------------------------------------------------
     // Public API
     // ---------------------------------------------------------------
@@ -86,15 +92,9 @@ public class QRSpatialManager : MonoBehaviourPun
         Debug.Log($"[QRSpatialManager] Simulating QR detection: id='{testId}'");
         FileLogger.Log("QRSpatialManager", $"[SIM] Simulated QR: id='{testId}' pos={pos}");
 
-        if (PhotonNetwork.InRoom)
-        {
-            photonView.RPC(nameof(RPC_ReceiveQRMarker), RpcTarget.AllBuffered, testId, pos, rot);
-        }
-        else
-        {
-            Debug.LogWarning("[QRSpatialManager] SimulateQRDetection: not in a Photon room — calling RPC locally.");
-            RPC_ReceiveQRMarker(testId, pos, rot);
-        }
+        // Route through BroadcastMarker so the SharedMesh-relative conversion is applied
+        // identically to the real detection path (in-room or local).
+        BroadcastMarker(testId, pos, rot);
     }
 
     private void OnDestroy()
@@ -155,16 +155,20 @@ public class QRSpatialManager : MonoBehaviourPun
         Debug.Log($"[QRSpatialManager] QR DETECTED on Worker: id='{markerId}' pos={pos} rot={rot.eulerAngles}");
         FileLogger.Log("QRSpatialManager", $"QR detected: id='{markerId}' pos={pos} rot={rot.eulerAngles}");
 
-        // AllBuffered caches the RPC on Photon's server, so an Expert who joins after the
-        // QR was scanned still receives the marker pose without requiring a manual resync.
-        photonView.RPC(nameof(RPC_ReceiveQRMarker), RpcTarget.AllBuffered, markerId, pos, rot);
+        _trackables[markerId] = trackable;   // keep the live trackable for QR-init re-broadcast
+
+        // Broadcast in SharedMesh-relative space so the Expert places the marker correctly.
+        BroadcastMarker(markerId, pos, rot);
     }
 
     private void OnTrackableRemoved(MRUKTrackable trackable)
     {
         if (trackable.MarkerPayloadString != null)
+        {
+            _trackables.Remove(trackable.MarkerPayloadString);
             FileLogger.Log("QRSpatialManager", $"QR lost from tracking: id='{trackable.MarkerPayloadString}'" +
                            " (marker object remains in scene)");
+        }
     }
 #endif
 
@@ -183,22 +187,43 @@ public class QRSpatialManager : MonoBehaviourPun
                 return;
             }
 
+            // The pose was broadcast in SharedMesh-relative (local) space so that it lands
+            // in the same place regardless of each client's tracking origin. Convert it back
+            // to THIS client's world space using the local SharedMesh transform. If SharedMesh
+            // is missing, fall back to treating the values as raw world coords (symmetric with
+            // the sender's fallback in BroadcastMarker).
+            Transform sharedMesh = GetSharedMesh();
+            Vector3    worldPos;
+            Quaternion worldRot;
+            if (sharedMesh != null)
+            {
+                worldPos = sharedMesh.TransformPoint(pos);
+                worldRot = sharedMesh.rotation * rot;
+            }
+            else
+            {
+                worldPos = pos;
+                worldRot = rot;
+            }
+
             if (markerObjects.TryGetValue(markerId, out GameObject existing))
             {
                 // Update pose of a previously known marker
                 if (existing != null)
-                    existing.transform.SetPositionAndRotation(pos, rot);
+                    existing.transform.SetPositionAndRotation(worldPos, worldRot);
             }
             else
             {
                 // First time we've seen this marker — create a visual
-                GameObject marker = CreateMarkerObject(markerId, pos, rot);
+                GameObject marker = CreateMarkerObject(markerId, worldPos, worldRot);
                 markerObjects[markerId] = marker;
             }
 
-            Debug.Log($"[QRSpatialManager] Marker received: id='{markerId}' pos={pos}");
-            FileLogger.Log("QRSpatialManager", $"RPC_ReceiveQRMarker id='{markerId}' pos={pos}");
-            OnMarkerDetected?.Invoke(markerId, pos, rot);
+            Debug.Log($"[QRSpatialManager] Marker received: id='{markerId}' worldPos={worldPos}");
+            FileLogger.Log("QRSpatialManager", $"RPC_ReceiveQRMarker id='{markerId}' worldPos={worldPos}");
+            // Hand subscribers (e.g. MeshHandler QR calibration) WORLD coords — it reads
+            // rot.eulerAngles.y and expects world space.
+            OnMarkerDetected?.Invoke(markerId, worldPos, worldRot);
         }
         catch (Exception ex)
         {
@@ -221,10 +246,12 @@ public class QRSpatialManager : MonoBehaviourPun
         {
             if (kvp.Value == null) continue;
 
+            // Marker objects are stored in world space; BroadcastMarker re-applies the
+            // world→SharedMesh-local conversion before sending.
             Vector3    pos = kvp.Value.transform.position;
             Quaternion rot = kvp.Value.transform.rotation;
 
-            photonView.RPC(nameof(RPC_ReceiveQRMarker), RpcTarget.AllBuffered, kvp.Key, pos, rot);
+            BroadcastMarker(kvp.Key, pos, rot);
             FileLogger.Log("QRSpatialManager", $"ResyncAllMarkers: resent '{kvp.Key}'");
         }
 #else
@@ -233,9 +260,105 @@ public class QRSpatialManager : MonoBehaviourPun
 #endif
     }
 
+    /// <summary>
+    /// Debug action (bound to a DebugHUD button on the Worker): destroy all current marker
+    /// visuals, clear the cache, and re-trigger a device scene scan so QR tracking starts fresh.
+    /// Useful when markers go stale or a code needs re-detecting without restarting the app.
+    /// </summary>
+    public void ClearAndReinitialize()
+    {
+        // 1) Clear marker visuals on ALL clients (Worker + Expert), not just locally.
+        if (PhotonNetwork.InRoom)
+            photonView.RPC(nameof(RPC_ClearMarkers), RpcTarget.All);
+        else
+            RPC_ClearMarkers();
+
+        Debug.Log("[QRSpatialManager] ClearAndReinitialize — markers cleared on all clients.");
+        FileLogger.Log("QRSpatialManager", "ClearAndReinitialize: cleared on all clients.");
+
+#if UNITY_ANDROID && !UNITY_EDITOR
+        // 2) Worker only: drop the stale buffered marker RPCs so they can't resurrect for a
+        //    late-joiner, then re-place every still-tracked QR at its CURRENT pose. OVR keeps
+        //    tracking the codes, so we read each trackable's live transform (MRUK will not
+        //    re-fire OnTrackableAdded for already-known markers).
+        if (PhotonNetwork.InRoom) PhotonNetwork.RemoveRPCs(photonView);
+        foreach (var kvp in _trackables)
+        {
+            if (kvp.Value == null) continue;
+            BroadcastMarker(kvp.Key, kvp.Value.transform.position, kvp.Value.transform.rotation);
+        }
+        FileLogger.Log("QRSpatialManager", $"ClearAndReinitialize: re-broadcast {_trackables.Count} trackable(s).");
+#endif
+    }
+
+    /// <summary>Clears all marker visuals on this client. Invoked on every client by ClearAndReinitialize.</summary>
+    [PunRPC]
+    private void RPC_ClearMarkers()
+    {
+        foreach (var kvp in markerObjects)
+            if (kvp.Value != null) Destroy(kvp.Value);
+        markerObjects.Clear();
+        FileLogger.Log("QRSpatialManager", "RPC_ClearMarkers: marker visuals cleared.");
+    }
+
     // ---------------------------------------------------------------
     // Helpers
     // ---------------------------------------------------------------
+
+    // Cached reference to the shared spatial anchor ("SharedMesh"). Both Worker and Expert
+    // keep this GameObject's transform in sync via MeshHandler.RPC_ReceiveMeshTransform, so it
+    // is the common frame of reference for placing markers consistently across clients.
+    private const string SharedMeshName = "SharedMesh";
+    private Transform _sharedMesh;
+
+    private Transform GetSharedMesh()
+    {
+        // Re-find if never resolved or if the cached object was destroyed.
+        if (_sharedMesh == null)
+        {
+            var go = GameObject.Find(SharedMeshName);
+            _sharedMesh = go != null ? go.transform : null;
+        }
+        return _sharedMesh;
+    }
+
+    /// <summary>
+    /// Converts a world-space marker pose into SharedMesh-relative (local) space and
+    /// broadcasts it. Expressing the pose relative to the shared anchor means it lands at the
+    /// same physical spot on every client regardless of differing tracking origins (the cause
+    /// of the Expert "weird location" bug). If SharedMesh is unavailable, the raw world pose is
+    /// sent as a fallback (the receiver applies the matching fallback).
+    /// </summary>
+    private void BroadcastMarker(string markerId, Vector3 worldPos, Quaternion worldRot)
+    {
+        Transform sharedMesh = GetSharedMesh();
+        Vector3    sendPos;
+        Quaternion sendRot;
+        if (sharedMesh != null)
+        {
+            sendPos = sharedMesh.InverseTransformPoint(worldPos);
+            sendRot = Quaternion.Inverse(sharedMesh.rotation) * worldRot;
+        }
+        else
+        {
+            Debug.LogWarning("[QRSpatialManager] BroadcastMarker: 'SharedMesh' not found — " +
+                             "sending raw world pose (Expert placement may be misaligned).");
+            sendPos = worldPos;
+            sendRot = worldRot;
+        }
+
+        // AllBuffered caches the RPC on Photon's server, so an Expert who joins after the
+        // QR was scanned still receives the marker pose without requiring a manual resync.
+        if (PhotonNetwork.InRoom)
+        {
+            photonView.RPC(nameof(RPC_ReceiveQRMarker), RpcTarget.AllBuffered, markerId, sendPos, sendRot);
+        }
+        else
+        {
+            Debug.LogWarning("[QRSpatialManager] BroadcastMarker: not in a Photon room — calling RPC locally.");
+            RPC_ReceiveQRMarker(markerId, sendPos, sendRot);
+        }
+    }
 
     private GameObject CreateMarkerObject(string markerId, Vector3 pos, Quaternion rot)
     {
@@ -252,14 +375,13 @@ public class QRSpatialManager : MonoBehaviourPun
             marker.transform.SetPositionAndRotation(pos, rot);
             marker.transform.localScale = Vector3.one * 0.2f;
 
-            // Apply red material so it stands out clearly on both Worker and Expert sides
+            // Apply a red, URP-safe material so the sphere is reliably visible on Quest.
+            // The primitive's default sharedMaterial is the Standard/Lit material, which under
+            // URP often renders as invisible or magenta; building from a URP-compatible shader
+            // (with non-URP fallbacks) avoids that.
             var renderer = marker.GetComponent<Renderer>();
             if (renderer != null)
-            {
-                var mat = new Material(renderer.sharedMaterial);
-                mat.color = Color.red;
-                renderer.material = mat;
-            }
+                renderer.material = CreateMarkerMaterial(Color.red);
 
             // Remove collider — these markers are purely visual
             var col = marker.GetComponent<Collider>();
@@ -268,26 +390,83 @@ public class QRSpatialManager : MonoBehaviourPun
 
         marker.name = $"QRMarker_{markerId}";
 
-        AttachLabel(marker, markerId);
+        // Labelling must never prevent the marker from being created/registered.
+        // AttachLabel is already crash-proof, but wrap defensively as a last resort.
+        try
+        {
+            AttachLabel(marker, markerId);
+        }
+        catch (Exception ex)
+        {
+            Debug.LogWarning($"[QRSpatialManager] AttachLabel failed for '{markerId}' (marker kept): {ex.Message}");
+        }
 
         return marker;
     }
 
     /// <summary>
-    /// Adds a floating TextMeshPro label above the marker showing its ID.
-    /// TMP is available via com.unity.ugui so no conditional compilation is needed.
+    /// Builds a flat, unlit, single-colour material from a URP-safe shader so markers
+    /// render correctly under the Universal Render Pipeline on Quest. Falls back to the
+    /// built-in unlit shaders when URP is not present. Sets both <c>_BaseColor</c> (URP)
+    /// and <c>_Color</c> (built-in) so the tint applies regardless of which shader is used.
+    /// </summary>
+    private static Material CreateMarkerMaterial(Color color)
+    {
+        Shader shader = Shader.Find("Universal Render Pipeline/Unlit");
+        if (shader == null) shader = Shader.Find("Unlit/Color");
+        if (shader == null) shader = Shader.Find("Sprites/Default");
+        if (shader == null) shader = Shader.Find("Standard"); // last-ditch: always present
+
+        var mat = new Material(shader);
+
+        // URP/Unlit exposes _BaseColor; built-in unlit/Standard expose _Color.
+        // Set whichever the chosen shader actually has (HasProperty guards both).
+        if (mat.HasProperty("_BaseColor")) mat.SetColor("_BaseColor", color);
+        if (mat.HasProperty("_Color"))     mat.SetColor("_Color", color);
+        // mat.color is a convenience accessor for _Color; harmless if absent.
+        mat.color = color;
+
+        return mat;
+    }
+
+    /// <summary>
+    /// Adds a floating ID label above the marker.
+    ///
+    /// Uses <see cref="TextMeshPro"/> when TMP is available, but TMP throws a
+    /// NullReferenceException on builds where TMP_Settings/essentials were never imported
+    /// (common on the Quest player). In that case we fall back to a legacy 3D
+    /// <see cref="TextMesh"/>, which needs no TMP_Settings. Either way this method must not
+    /// throw — the marker is more important than its label.
     /// </summary>
     private static void AttachLabel(GameObject marker, string markerId)
     {
+        // If TMP settings aren't baked into the build, AddComponent<TextMeshPro>() crashes
+        // inside TMP_Settings. Detect that up front and use the legacy text path instead.
+        bool tmpAvailable = TMP_Settings.instance != null;
+
         var labelGo = new GameObject("Label");
         labelGo.transform.SetParent(marker.transform, false);
         // Float slightly above the sphere surface
         labelGo.transform.localPosition = Vector3.up * 0.12f;
 
-        var tmp = labelGo.AddComponent<TextMeshPro>();
-        tmp.text               = markerId;
-        tmp.fontSize           = 0.05f;
-        tmp.alignment          = TextAlignmentOptions.Center;
-        tmp.textWrappingMode = TMPro.TextWrappingModes.NoWrap;
+        if (tmpAvailable)
+        {
+            var tmp = labelGo.AddComponent<TextMeshPro>();
+            tmp.text             = markerId;
+            tmp.fontSize         = 0.05f;
+            tmp.alignment        = TextAlignmentOptions.Center;
+            tmp.textWrappingMode = TMPro.TextWrappingModes.NoWrap;
+        }
+        else
+        {
+            // Legacy fallback — no TMP_Settings dependency, so it can't hit the crash.
+            var textMesh = labelGo.AddComponent<TextMesh>();
+            textMesh.text          = markerId;
+            textMesh.characterSize = 0.05f;
+            textMesh.fontSize      = 64;
+            textMesh.anchor        = TextAnchor.MiddleCenter;
+            textMesh.alignment     = TextAlignment.Center;
+            textMesh.color         = Color.white;
+        }
     }
 }
