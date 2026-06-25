@@ -243,11 +243,31 @@ public class SceneBootstrapper2 : MonoBehaviourPunCallbacks, IOnEventCallback
         // Connect PunVoiceClient after PUN room join to avoid "Provide an AppId" error
         // that occurs when AutoConnectAndJoin fires before Photon Realtime is connected.
         var pvc = FindAnyObjectByType<PunVoiceClient>();
+        if (pvc != null)
+        {
+            // Assign a known-good Speaker prefab in code so remote voice is audible on both
+            // Android (where SpeakerPrefab is null) and Editor (where the Inspector reference is
+            // wrong-typed and throws InvalidCastException in InstantiateSpeakerPrefab()).
+            // The PV2 demo prefab lives under a Resources/ folder, so it resolves by name.
+            var spk = Resources.Load<GameObject>("Speaker");
+            if (spk != null)
+            {
+                pvc.SpeakerPrefab = spk;
+                FileLogger.Log("Setup", "[SceneBootstrapper2] PunVoiceClient.SpeakerPrefab assigned from Resources/Speaker.");
+            }
+            else
+            {
+                FileLogger.Log("Setup", "[SceneBootstrapper2] Resources.Load<GameObject>(\"Speaker\") returned null; voice playback will be silent.");
+            }
+        }
         if (pvc != null && !pvc.Client.IsConnected)
         {
             FileLogger.Log("Setup", "[SceneBootstrapper2] Connecting PunVoiceClient after room join.");
             pvc.ConnectAndJoinRoom();
         }
+
+        // Periodic position logging (head / players / SharedMesh / QR markers) for offline debug.
+        if (GetComponent<PositionLogger>() == null) gameObject.AddComponent<PositionLogger>();
 
         StartCoroutine(SetupAfterDeviceCheck());
     }
@@ -309,11 +329,32 @@ public class SceneBootstrapper2 : MonoBehaviourPunCallbacks, IOnEventCallback
 
     // ── Main setup ────────────────────────────────────────────────────────
 
+    /// <summary>
+    /// Resolves the microphone device explicitly per platform instead of trusting the
+    /// persisted config blindly.
+    /// - Worker (Quest/Android): the headset has exactly one capture device, so always use it
+    ///   (Microphone.devices[0] = "Android audio input"). A PC device name accidentally left in
+    ///   the Quest config would otherwise select a non-existent device → silent PV2.
+    /// - Expert (PC): honour the StartupUI choice, but only if that device still exists; else
+    ///   fall back to the system default (devices[0]).
+    /// </summary>
+    private string ResolveMicDevice()
+    {
+        var devices = Microphone.devices;
+        if (devices.Length == 0) return "";
+
+        if (Application.platform == RuntimePlatform.Android)
+            return devices[0];
+
+        if (!string.IsNullOrEmpty(_selectedMic) && System.Array.IndexOf(devices, _selectedMic) >= 0)
+            return _selectedMic;
+
+        return devices[0];
+    }
+
     private IEnumerator SetupAfterDeviceCheck()
     {
-        string mic = !string.IsNullOrEmpty(_selectedMic)
-            ? _selectedMic
-            : (Microphone.devices.Length > 0 ? Microphone.devices[0] : "");
+        string mic = ResolveMicDevice();
         FileLogger.Log("Setup", $"[SceneBootstrapper2] Mic: '{(mic == "" ? "(default)" : mic)}'");
 
         bool isExpert = _role == RoleManager.ROLE_EXPERT;
@@ -403,6 +444,10 @@ public class SceneBootstrapper2 : MonoBehaviourPunCallbacks, IOnEventCallback
         var gazeHandler = playerObj.GetComponent<GazeHandler>();
         if (gazeHandler != null) gazeHandler.Initialize(gazeInput);
 
+        // GazeVisualizer — renders the remote Expert's shared gaze on the Worker
+        new GameObject("LocalGazeVisualizer").AddComponent<GazeVisualizer>().Initialize();
+        FileLogger.Log("Setup", "[SceneBootstrapper2] Worker GazeVisualizer spawned.");
+
         // Hide own avatar from self
         foreach (var r in playerObj.GetComponentsInChildren<MeshRenderer>(true))
             r.enabled = false;
@@ -424,13 +469,17 @@ public class SceneBootstrapper2 : MonoBehaviourPunCallbacks, IOnEventCallback
         if (recorder != null)
         {
             recorder.MicrophoneType = Recorder.MicType.Photon;
-            recorder.SetAndroidNativeMicrophoneSettings(aec: true, agc: true, ns: true);
+            // AGC off so VAD threshold is predictable (native AGC raises gain during silence → false triggers)
+            recorder.SetAndroidNativeMicrophoneSettings(aec: true, agc: false, ns: true);
             var dsp = recorder.gameObject.GetComponent<WebRtcAudioDsp>()
                       ?? recorder.gameObject.AddComponent<WebRtcAudioDsp>();
             dsp.AEC = false; dsp.NoiseSuppression = false; dsp.AGC = false;
             recorder.SamplingRate  = SamplingRate.Sampling16000;
             recorder.FrameDuration = OpusCodec.FrameDuration.Frame20ms;
             recorder.Bitrate       = 24000;
+            recorder.VoiceDetection          = true;
+            recorder.VoiceDetectionThreshold = 0.015f;
+            recorder.VoiceDetectionDelayMs   = 500;
         }
 
         // VoiceRecorder — WAV recording independent of PV2
@@ -447,6 +496,23 @@ public class SceneBootstrapper2 : MonoBehaviourPunCallbacks, IOnEventCallback
         s.OnSendOffer  += sdp => RaiseSignal(WebRtcVideoSession.EVT_OFFER,  new[] { sdp });
         s.OnSendAnswer += sdp => RaiseSignal(WebRtcVideoSession.EVT_ANSWER, new[] { sdp });
         s.OnSendIce    += (c, mid, idx) => RaiseSignal(WebRtcVideoSession.EVT_ICE, new[] { c, mid, idx.ToString() });
+
+        // QuestionnaireManager — set participant identity so JSON filenames are correct
+        var qm = FindAnyObjectByType<QuestionnaireManager>();
+        if (qm != null)
+        {
+            qm.participantId     = participantId;
+            qm.participantNumber = participantOrderIndex;
+            FileLogger.Log("Setup", $"[SceneBootstrapper2] QuestionnaireManager participant set: id={participantId} num={participantOrderIndex}");
+        }
+        else
+        {
+            Debug.LogWarning("[SceneBootstrapper2] QuestionnaireManager not found in scene — questionnaire data will use default participant identity.");
+        }
+
+        // WorkerTrackingSync — publishes head/controller pose to Photon custom player properties
+        playerObj.AddComponent<WorkerTrackingSync>();
+        FileLogger.Log("Setup", "[SceneBootstrapper2] WorkerTrackingSync added.");
 
         CheckForExistingExpert();
 
@@ -630,6 +696,11 @@ public class SceneBootstrapper2 : MonoBehaviourPunCallbacks, IOnEventCallback
         participantId = val;
         var expMgr = FindAnyObjectByType<ExperimentManager2>();
         if (expMgr != null) expMgr.participantId = participantId;
+        // Propagate to QuestionnaireManager so its JSON filename uses the correct id
+        // (QM computes the save path lazily on first submit — by that time the Expert-synced
+        //  id must already be set or the file gets the stale name from the Worker's local config).
+        var qm = FindAnyObjectByType<QuestionnaireManager>();
+        if (qm != null) qm.participantId = participantId;
         FileLogger.Log("Setup", $"[SceneBootstrapper2] Worker received participantId={participantId} from room properties.");
     }
 
@@ -675,7 +746,7 @@ public class SceneBootstrapper2 : MonoBehaviourPunCallbacks, IOnEventCallback
                     if (src != null)
                     {
                         if (isExpert) { src.volume = 3f; src.spatialBlend = 0f; }
-                        else          { src.volume = 1f; src.spatialBlend = 1f;
+                        else          { src.volume = 3f; src.spatialBlend = 1f;
                                         src.rolloffMode = AudioRolloffMode.Linear;
                                         src.minDistance = 1f; src.maxDistance = 20f; }
                     }
