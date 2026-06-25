@@ -18,6 +18,15 @@ public class StartupUI : MonoBehaviour
     private int      _micIndex;
     private bool     _offlineMode;
 
+    // ── Live mic test (lets the operator confirm Unity actually captures audio
+    //    from the selected device BEFORE entering the experiment) ──
+    private AudioClip _testClip;
+    private string    _testDevice;
+    private int       _testReadPos;
+    private float     _testLevel;   // smoothed 0..1 for the bar
+    private float     _testPeak;    // raw peak this frame (0 = no signal)
+    private const int TEST_SR = 16000;
+
     private GUIStyle _panelStyle;
     private GUIStyle _titleStyle;
     private GUIStyle _labelStyle;
@@ -26,6 +35,8 @@ public class StartupUI : MonoBehaviour
     private GUIStyle _buttonStyle;
     private GUIStyle _toggleStyle;
     private GUIStyle _micButtonStyle;
+    private Texture2D _barBgTex;
+    private Texture2D _barFillTex;
     private bool     _stylesBuilt;
 
     private const float PANEL_W = 480f;
@@ -46,8 +57,8 @@ public class StartupUI : MonoBehaviour
         // Find saved device index; fall back to 0
         _micIndex = Mathf.Max(0, Array.IndexOf(_micDevices, config.microphoneDevice));
 
-        // Panel height: base layout + 28px per mic device + 40px for offline toggle
-        _panelH = 310f + _micDevices.Length * 28f + 40f;
+        // Panel height: base layout + 28px per mic device + 40px offline toggle + ~70px mic-test meter
+        _panelH = 310f + _micDevices.Length * 28f + 40f + 70f;
     }
 
     private void BuildStyles()
@@ -107,6 +118,9 @@ public class StartupUI : MonoBehaviour
         _toggleStyle.normal.textColor = new Color(1f, 0.8f, 0.3f);
 
         _micButtonStyle = new GUIStyle(GUI.skin.button) { fontSize = 14, alignment = TextAnchor.MiddleLeft };
+
+        _barBgTex   = MakeTex(1, 1, new Color(0.25f, 0.25f, 0.25f, 1f));
+        _barFillTex = MakeTex(1, 1, new Color(0.20f, 0.90f, 0.40f, 1f));
     }
 
     private void OnGUI()
@@ -163,7 +177,21 @@ public class StartupUI : MonoBehaviour
             y += 28f;
         }
         GUI.backgroundColor = Color.white;
-        y += 4f;
+        y += 6f;
+
+        // ── Live mic level meter (test) ───────────────────────
+        GUI.Label(new Rect(x, y, w, 20f), "マイクテスト（喋ってバーが動けばOK）:", _labelStyle);
+        y += 22f;
+        GUI.DrawTexture(new Rect(x, y, w, 16f), _barBgTex);
+        float fill = Mathf.Clamp01(_testLevel);
+        if (fill > 0.02f) GUI.DrawTexture(new Rect(x, y, w * fill, 16f), _barFillTex);
+        y += 20f;
+        bool live = _testClip != null && Microphone.IsRecording(_testDevice);
+        string status = !live          ? "× キャプチャ開始失敗（デバイス/権限）"
+                      : _testPeak <= 0.0002f ? "× 信号ゼロ — Windowsのマイク権限OFF か ミュートの可能性"
+                      : "○ 入力検出中（このデバイスでOK）";
+        GUI.Label(new Rect(x, y, w, 18f), status, _hintStyle);
+        y += 24f;
 
         // ── Offline mode ──────────────────────────────────────
         _offlineMode = GUI.Toggle(new Rect(x, y, w, 28f),
@@ -186,6 +214,54 @@ public class StartupUI : MonoBehaviour
         OnConfirmed?.Invoke();
         Destroy(this);
     }
+
+    // ── Live mic test ─────────────────────────────────────────
+    // Captures from the currently-selected device into a 1s loop clip and
+    // computes a level so the operator can confirm Unity sees real audio.
+    // Released before Confirm() so PV2's Recorder can take the device cleanly.
+    private void Update()
+    {
+        if (_micDevices == null || _micDevices.Length == 0) return;
+        string dev = _micDevices[Mathf.Clamp(_micIndex, 0, _micDevices.Length - 1)];
+        if (dev == "(no microphone found)") { _testLevel = 0f; return; }
+
+        if (dev != _testDevice)   // selection changed → restart capture
+        {
+            StopTestMic();
+            _testDevice = dev;
+            try { _testClip = Microphone.Start(dev, true, 1, TEST_SR); _testReadPos = 0; }
+            catch { _testClip = null; }
+        }
+        if (_testClip == null) return;
+
+        int len = _testClip.samples;
+        if (len <= 0) return;
+        int pos   = Microphone.GetPosition(_testDevice);
+        int avail = (pos - _testReadPos + len) % len;
+        if (avail <= 0) { _testLevel = Mathf.Lerp(_testLevel, 0f, Time.deltaTime * 8f); return; }
+        avail = Mathf.Min(avail, TEST_SR / 10);   // up to 100 ms per frame
+
+        var buf = new float[avail];
+        _testClip.GetData(buf, _testReadPos);
+        _testReadPos = (_testReadPos + avail) % len;
+
+        float sum = 0f, peak = 0f;
+        for (int i = 0; i < avail; i++) { float a = buf[i] < 0 ? -buf[i] : buf[i]; sum += buf[i] * buf[i]; if (a > peak) peak = a; }
+        _testPeak = peak;
+        float target = Mathf.Clamp01(Mathf.Sqrt(sum / avail) * 6f);   // scale RMS for visibility
+        _testLevel = Mathf.Max(target, Mathf.Lerp(_testLevel, target, Time.deltaTime * 10f));
+    }
+
+    private void StopTestMic()
+    {
+        if (!string.IsNullOrEmpty(_testDevice))
+        {
+            try { if (Microphone.IsRecording(_testDevice)) Microphone.End(_testDevice); } catch { }
+        }
+        _testClip = null;
+    }
+
+    private void OnDestroy() => StopTestMic();
 
     private static Texture2D MakeTex(int w, int h, Color col)
     {
