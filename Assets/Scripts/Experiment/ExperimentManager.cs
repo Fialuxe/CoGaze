@@ -34,7 +34,8 @@ public enum ExperimentState : byte
     Questionnaire = 4,
     Finished      = 5,
     TaskComplete  = 6,
-    NoiseComplete = 7
+    NoiseComplete = 7,
+    Setup         = 8
 }
 
 public class ExperimentStep

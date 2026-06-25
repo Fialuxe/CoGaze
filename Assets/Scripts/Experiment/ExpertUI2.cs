@@ -278,6 +278,17 @@ public class ExpertUI2 : MonoBehaviour
     {
         switch (state)
         {
+            case ExperimentState.Setup:
+                SetZoneA("セットアップ", new Color(0.50f, 0.80f, 1.00f),
+                         new Color(0f, 0.06f, 0.12f, 0.85f));
+                SetZoneB("Worker のセットアップ進行中",
+                         "Worker が QR キャリブと\nタスクマーカーを確認しています",
+                         "[Tab] パネル表示切替");
+                timerText.text  = CoGazeStrings.Expert2_TimerBlank;
+                timerText.color = Color.white;
+                conditionLabel.text = "";
+                break;
+
             case ExperimentState.Idle:
                 SetZoneA(MessageBank.Get("ui.idle.state"),
                     new Color(1.00f, 0.85f, 0.20f),

@@ -46,6 +46,13 @@ public class MeshHandler : MonoBehaviourPun
     private Vector3?         _detectedA;
     private Vector3?         _detectedB;
 
+    /// <summary>
+    /// When true, the right-grip manual-calibration toggle is ignored. Set by SetupCoordinator
+    /// during the Setup state, where the right grip is repurposed for manual QR registration.
+    /// Rising-edge state is still tracked so no stale edge fires when this clears.
+    /// </summary>
+    public bool SuppressManualCalibGrip = false;
+
     /// <summary>true when both indicatorA and indicatorB are assigned — uses 2-QR alignment.</summary>
     public bool             IsDualQRMode          => indicatorA != null && indicatorB != null;
     /// <summary>Current step of the dual-QR calibration state machine.</summary>
@@ -57,6 +64,8 @@ public class MeshHandler : MonoBehaviourPun
     public event System.Action                  OnCalibrationConfirmed;
     /// <summary>Fired on the Worker at each dual-QR calibration step (NeedsA → NeedsB → Complete).</summary>
     public event System.Action<DualQRCalibState> OnDualQRCalibStep;
+    /// <summary>Fired on ALL clients via RPC when dual-QR calibration completes.</summary>
+    public event System.Action                   OnCalibCompleteNotified;
 
     private void Start()
     {
@@ -153,7 +162,9 @@ public class MeshHandler : MonoBehaviourPun
 
         // Right grip — TOGGLE calibration mode (press once = in, press again = out)
         bool gripDown = OVRInput.Get(OVRInput.Axis1D.PrimaryHandTrigger, OVRInput.Controller.RTouch) > TriggerThreshold;
-        if (gripDown && !_gripWasDown)
+        // Suppress (but still track the edge) while SetupCoordinator owns the grip for manual QR
+        // registration during Setup — otherwise a registration grip would also flip calibration mode.
+        if (gripDown && !_gripWasDown && !SuppressManualCalibGrip)
         {
             isCalibrating = !isCalibrating;
             OnCalibrationChanged?.Invoke(isCalibrating);
@@ -237,6 +248,13 @@ public class MeshHandler : MonoBehaviourPun
         foreach (var r in meshObject.GetComponentsInChildren<MeshRenderer>(true))
             r.enabled = visible;
         Debug.Log($"[MeshHandler] RPC_SetMeshVisible → {visible}");
+    }
+
+    [PunRPC]
+    private void RPC_NotifyCalibComplete()
+    {
+        OnCalibCompleteNotified?.Invoke();
+        Debug.Log("[MeshHandler] RPC_NotifyCalibComplete: dual-QR calibration complete.");
     }
 
     public void SendMeshTransform()
@@ -334,8 +352,11 @@ public class MeshHandler : MonoBehaviourPun
 
             meshObject.transform.SetPositionAndRotation(newPos, newRot);
             SendMeshTransform();
-            _dualCalibState = DualQRCalibState.Complete;
+            _dualCalibState = DualQRCalibState.Complete;  // guard must be set before ResyncAllMarkers
             OnDualQRCalibStep?.Invoke(DualQRCalibState.Complete);
+            photonView.RPC(nameof(RPC_NotifyCalibComplete), RpcTarget.All);
+            _qrManager?.StopPeriodicBroadcast();  // 較正完了 → ポーリング不要
+            _qrManager?.ResyncAllMarkers();  // 較正前に検出済みのQRを新フレームで再送
             Debug.Log($"[MeshHandler] Dual-QR complete: pos={newPos} yaw={newRot.eulerAngles.y:F1}°");
         }
     }
@@ -352,6 +373,7 @@ public class MeshHandler : MonoBehaviourPun
         _detectedA      = null;
         _detectedB      = null;
         OnDualQRCalibStep?.Invoke(DualQRCalibState.NeedsA);
+        _qrManager?.StartPeriodicBroadcast();  // リセット → ポーリング再開
         Debug.Log("[MeshHandler] Dual-QR calibration reset — Worker can re-scan QR-A.");
     }
 

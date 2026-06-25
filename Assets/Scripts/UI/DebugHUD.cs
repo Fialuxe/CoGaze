@@ -32,7 +32,6 @@ public class DebugHUD : MonoBehaviour
     // Android mic contention) + QR detection feedback so testers can see both work in-headset.
     private Recorder _recorder;
     private Speaker  _remoteSpeaker;   // remote peer's voice playback (RX indicator)
-    private QuestionnairePokeInput _debugPoke;  // poke on this HUD canvas (QR RESET button)
     private QRSpatialManager _qr;
     private int    _qrCount;
     private string _qrLast = "";
@@ -57,14 +56,6 @@ public class DebugHUD : MonoBehaviour
         if (_qr != null && _qrCb != null) _qr.OnMarkerDetected -= _qrCb;
     }
 
-    private void ReinitQR()
-    {
-        if (_qr == null) _qr = FindAnyObjectByType<QRSpatialManager>();
-        if (_qr == null) return;
-        _qr.ClearAndReinitialize();
-        _qrCount = 0; _qrLast = ""; _qrLastTime = "";
-    }
-
     private void OnLogMessage(string condition, string stackTrace, LogType type)
     {
         if (type != LogType.Error && type != LogType.Exception && type != LogType.Warning) return;
@@ -80,14 +71,9 @@ public class DebugHUD : MonoBehaviour
 #if UNITY_ANDROID && !UNITY_EDITOR
         if (OVRInput.GetDown(OVRInput.Button.Two, OVRInput.Controller.LTouch))
             SetVisible(!_visible);
-        // While the overlay is open, right-hand B re-initializes QR tracking (clears markers + re-scan).
-        if (_visible && OVRInput.GetDown(OVRInput.Button.Two, OVRInput.Controller.RTouch))
-            ReinitQR();
 #else
         if (Input.GetKeyDown(KeyCode.Tab))
             SetVisible(!_visible);
-        if (_visible && Input.GetKeyDown(KeyCode.R))
-            ReinitQR();
 #endif
         if (!_visible) return;
         if (Time.time - _lastRefresh < RefreshInterval) return;
@@ -168,16 +154,10 @@ public class DebugHUD : MonoBehaviour
                 : "none yet (look at QR; tracking on)");
         else
             sb.AppendLine("(manager not found)");
-        sb.AppendLine("      re-init QR: B (right) / R key");
 
         // [Poke] — QuestionnairePokeInput status so testers can confirm touch input works
-        sb.Append("[Poke] HUD:");
-        if (_debugPoke != null)
-            sb.Append(_debugPoke.IsEngaged ? "ENGAGED" : "idle");
-        else
-            sb.Append("none");
         var qpGo = GameObject.Find("QuestionnairePoke");
-        sb.Append("  QS:");
+        sb.Append("[Poke] QS:");
         if (qpGo == null)
             sb.AppendLine("not created");
         else if (!qpGo.activeInHierarchy)
@@ -235,39 +215,10 @@ public class DebugHUD : MonoBehaviour
         _text.horizontalOverflow = HorizontalWrapMode.Wrap;
         _text.verticalOverflow   = VerticalWrapMode.Overflow;
         var textRt = textGo.GetComponent<RectTransform>();
-        textRt.anchorMin = new Vector2(0f, 0.16f);   // leave the bottom strip for the touch button
+        textRt.anchorMin = new Vector2(0f, 0f);
         textRt.anchorMax = Vector2.one;
         textRt.offsetMin = new Vector2(8f,  4f);
         textRt.offsetMax = new Vector2(-8f, -8f);
-
-        // Poke-able "QR RESET" button — low-frequency actions are easier by touch than by a
-        // controller button. Reuses QuestionnairePokeInput (fingertip / controller-tip poke).
-        var btnGo  = new GameObject("QRResetButton");
-        btnGo.transform.SetParent(go.transform, false);
-        var btnImg = btnGo.AddComponent<Image>();
-        btnImg.color = new Color(0.55f, 0.20f, 0.20f, 0.95f);
-        var btnRt  = btnGo.GetComponent<RectTransform>();
-        btnRt.anchorMin = new Vector2(0.05f, 0.02f);
-        btnRt.anchorMax = new Vector2(0.95f, 0.14f);
-        btnRt.offsetMin = btnRt.offsetMax = Vector2.zero;
-        var btn = btnGo.AddComponent<Button>();
-        btn.targetGraphic = btnImg;
-        btn.onClick.AddListener(ReinitQR);
-
-        var lblGo = new GameObject("Label");
-        lblGo.transform.SetParent(btnGo.transform, false);
-        var lbl = lblGo.AddComponent<Text>();
-        lbl.text = "QR RESET (touch / B)";
-        lbl.font = _text.font;
-        lbl.fontSize = 18;
-        lbl.alignment = TextAnchor.MiddleCenter;
-        lbl.color = Color.white;
-        var lblRt = lblGo.GetComponent<RectTransform>();
-        lblRt.anchorMin = Vector2.zero; lblRt.anchorMax = Vector2.one;
-        lblRt.offsetMin = lblRt.offsetMax = Vector2.zero;
-
-        _debugPoke = go.AddComponent<QuestionnairePokeInput>();
-        _debugPoke.Configure(go.GetComponent<RectTransform>(), rig);
 
         go.SetActive(false);
         Debug.Log("[DebugHUD] Ready — press Y (left controller) to toggle.");

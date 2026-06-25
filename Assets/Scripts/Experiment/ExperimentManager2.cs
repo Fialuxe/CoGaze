@@ -110,6 +110,7 @@ public class ExperimentManager2 : MonoBehaviour, IOnEventCallback
     public void Initialize(bool isExpert)
     {
         IsExpert = isExpert;
+        CurrentState = ExperimentState.Setup;
         PhotonNetwork.AddCallbackTarget(this);
 
         audioSource = GetComponent<AudioSource>();
@@ -294,6 +295,17 @@ public class ExperimentManager2 : MonoBehaviour, IOnEventCallback
         if (_oscSession != null && !_firstPongReceived) return;
         if (CurrentState == ExperimentState.Idle)
             Transition(ExperimentState.Ready);
+    }
+
+    /// <summary>
+    /// Expert calls this once Worker setup is verified — transitions Setup → Idle → Ready.
+    /// </summary>
+    public void TriggerSetupComplete()
+    {
+        if (!IsExpert) return;
+        if (CurrentState != ExperimentState.Setup) return;
+        Transition(ExperimentState.Idle);
+        TryTransitionToReady();
     }
 
     private void HandleCalibrationResult(int quality, float errX, float errY)

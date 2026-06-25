@@ -32,6 +32,7 @@ public class QRSpatialManager : MonoBehaviourPun
     // markerId → live MRUK trackable. Kept so "QR init" can re-broadcast each QR at its CURRENT
     // pose (OVR keeps tracking them; MRUK does not re-fire OnTrackableAdded for known markers).
     private readonly Dictionary<string, Meta.XR.MRUtilityKit.MRUKTrackable> _trackables = new();
+    private Coroutine _periodicBroadcastCoroutine;
 #endif
 
     // ---------------------------------------------------------------
@@ -133,6 +134,8 @@ public class QRSpatialManager : MonoBehaviourPun
         MRUK.Instance.LoadSceneFromDevice();
         Debug.Log("[QRSpatialManager] EnableQRTracking: LoadSceneFromDevice called. Listening for QR trackables.");
         FileLogger.Log("QRSpatialManager", "QR tracking enabled.");
+
+        _periodicBroadcastCoroutine = StartCoroutine(PeriodicBroadcastLoop());
     }
 
     private void DisableQRTracking()
@@ -140,12 +143,66 @@ public class QRSpatialManager : MonoBehaviourPun
         if (MRUK.Instance == null) return;
         MRUK.Instance.SceneSettings.TrackableAdded.RemoveListener(OnTrackableAdded);
         MRUK.Instance.SceneSettings.TrackableRemoved.RemoveListener(OnTrackableRemoved);
+        StopPeriodicBroadcast();
+    }
+
+    // 既知 trackable を 1 秒ごとに再ブロードキャストして検出むらを補う。
+    // OnTrackableAdded は一度しか発火しないが MRUK は内部でポーズを更新し続けるため、
+    // ここで現在座標を読み直して送ることで常に最新位置が全クライアントに届く。
+    private IEnumerator PeriodicBroadcastLoop()
+    {
+        var wait = new WaitForSeconds(1f);
+        while (true)
+        {
+            yield return wait;
+            if (_trackables.Count == 0) continue;
+
+            // コピーしてからイテレート（ループ中に _trackables が変更されても安全）
+            var snapshot = new Dictionary<string, MRUKTrackable>(_trackables);
+            foreach (var kvp in snapshot)
+            {
+                if (kvp.Value == null) continue;
+                BroadcastMarker(kvp.Key,
+                                kvp.Value.transform.position,
+                                kvp.Value.transform.rotation,
+                                buffered: false);   // AllBuffered は初回検出時のみ。ポーリングは All を使い蓄積を防ぐ
+            }
+            FileLogger.Log("QRSpatialManager", $"[Poll] re-broadcast {snapshot.Count} trackable(s).");
+        }
+    }
+
+    [ContextMenu("Stop Periodic QR Broadcast")]
+    public void StopPeriodicBroadcast()
+    {
+        if (_periodicBroadcastCoroutine == null) return;
+        StopCoroutine(_periodicBroadcastCoroutine);
+        _periodicBroadcastCoroutine = null;
+        Debug.Log("[QRSpatialManager] Periodic QR broadcast stopped.");
+        FileLogger.Log("QRSpatialManager", "Periodic QR broadcast stopped.");
+    }
+
+    [ContextMenu("Start Periodic QR Broadcast")]
+    public void StartPeriodicBroadcast()
+    {
+        if (_periodicBroadcastCoroutine != null) return;  // already running
+        _periodicBroadcastCoroutine = StartCoroutine(PeriodicBroadcastLoop());
+        Debug.Log("[QRSpatialManager] Periodic QR broadcast restarted.");
+        FileLogger.Log("QRSpatialManager", "Periodic QR broadcast restarted.");
     }
 
     private void OnTrackableAdded(MRUKTrackable trackable)
     {
-        // Only handle QR / marker trackables (MarkerPayloadString is null for non-markers)
-        if (trackable.MarkerPayloadString == null) return;
+        // Only handle QR / marker trackables (MarkerPayloadString is null for non-markers).
+        // Diagnostic: a QR that is physically seen but whose payload failed to decode (e.g. a
+        // floor code viewed at a grazing angle) arrives here with a null payload. Log it so we
+        // can tell "never seen" apart from "seen but undecoded" instead of dropping it silently.
+        if (trackable.MarkerPayloadString == null)
+        {
+            FileLogger.Log("QRSpatialManager",
+                $"Trackable added with NULL payload (non-marker, or QR seen but undecoded) " +
+                $"type={trackable.GetType().Name} pos={trackable.transform.position}");
+            return;
+        }
 
         string     markerId = trackable.MarkerPayloadString;
         Vector3    pos      = trackable.transform.position;
@@ -261,44 +318,21 @@ public class QRSpatialManager : MonoBehaviourPun
     }
 
     /// <summary>
-    /// Debug action (bound to a DebugHUD button on the Worker): destroy all current marker
-    /// visuals, clear the cache, and re-trigger a device scene scan so QR tracking starts fresh.
-    /// Useful when markers go stale or a code needs re-detecting without restarting the app.
+    /// Worker-side: manually register a QR marker at a given world pose. For codes MRUK fails to
+    /// auto-detect on Quest (slow/unreliable passthrough detection — e.g. floor codes seen at
+    /// steep angles, or small/dense codes). The marker is
+    /// stored and broadcast exactly like a detected one so the Expert sees it and IdentificationTask
+    /// can match it — but it is deliberately NOT added to <c>_trackables</c> (it has no live MRUK
+    /// pose), so it never consumes an MRUK tracking slot and PeriodicBroadcastLoop won't touch it.
+    /// Re-calling with a known id overwrites its position (RPC_ReceiveQRMarker updates in place),
+    /// so a mis-placed marker can be corrected by touching + gripping again.
     /// </summary>
-    public void ClearAndReinitialize()
+    public void RegisterManualMarker(string markerId, Vector3 worldPos, Quaternion worldRot)
     {
-        // 1) Clear marker visuals on ALL clients (Worker + Expert), not just locally.
-        if (PhotonNetwork.InRoom)
-            photonView.RPC(nameof(RPC_ClearMarkers), RpcTarget.All);
-        else
-            RPC_ClearMarkers();
-
-        Debug.Log("[QRSpatialManager] ClearAndReinitialize — markers cleared on all clients.");
-        FileLogger.Log("QRSpatialManager", "ClearAndReinitialize: cleared on all clients.");
-
-#if UNITY_ANDROID && !UNITY_EDITOR
-        // 2) Worker only: drop the stale buffered marker RPCs so they can't resurrect for a
-        //    late-joiner, then re-place every still-tracked QR at its CURRENT pose. OVR keeps
-        //    tracking the codes, so we read each trackable's live transform (MRUK will not
-        //    re-fire OnTrackableAdded for already-known markers).
-        if (PhotonNetwork.InRoom) PhotonNetwork.RemoveRPCs(photonView);
-        foreach (var kvp in _trackables)
-        {
-            if (kvp.Value == null) continue;
-            BroadcastMarker(kvp.Key, kvp.Value.transform.position, kvp.Value.transform.rotation);
-        }
-        FileLogger.Log("QRSpatialManager", $"ClearAndReinitialize: re-broadcast {_trackables.Count} trackable(s).");
-#endif
-    }
-
-    /// <summary>Clears all marker visuals on this client. Invoked on every client by ClearAndReinitialize.</summary>
-    [PunRPC]
-    private void RPC_ClearMarkers()
-    {
-        foreach (var kvp in markerObjects)
-            if (kvp.Value != null) Destroy(kvp.Value);
-        markerObjects.Clear();
-        FileLogger.Log("QRSpatialManager", "RPC_ClearMarkers: marker visuals cleared.");
+        if (string.IsNullOrEmpty(markerId)) return;
+        Debug.Log($"[QRSpatialManager] Manual marker register: id='{markerId}' worldPos={worldPos}");
+        FileLogger.Log("QRSpatialManager", $"Manual register: id='{markerId}' worldPos={worldPos}");
+        BroadcastMarker(markerId, worldPos, worldRot);
     }
 
     // ---------------------------------------------------------------
@@ -329,7 +363,9 @@ public class QRSpatialManager : MonoBehaviourPun
     /// of the Expert "weird location" bug). If SharedMesh is unavailable, the raw world pose is
     /// sent as a fallback (the receiver applies the matching fallback).
     /// </summary>
-    private void BroadcastMarker(string markerId, Vector3 worldPos, Quaternion worldRot)
+    // buffered=true（デフォルト）: AllBuffered — 遅延参加の Expert にも届く（初回検出時に使用）
+    // buffered=false: All のみ — ポーリング再送時に使用（Photon バッファへの蓄積を防ぐ）
+    private void BroadcastMarker(string markerId, Vector3 worldPos, Quaternion worldRot, bool buffered = true)
     {
         Transform sharedMesh = GetSharedMesh();
         Vector3    sendPos;
@@ -347,11 +383,10 @@ public class QRSpatialManager : MonoBehaviourPun
             sendRot = worldRot;
         }
 
-        // AllBuffered caches the RPC on Photon's server, so an Expert who joins after the
-        // QR was scanned still receives the marker pose without requiring a manual resync.
+        var target = buffered ? RpcTarget.AllBuffered : RpcTarget.All;
         if (PhotonNetwork.InRoom)
         {
-            photonView.RPC(nameof(RPC_ReceiveQRMarker), RpcTarget.AllBuffered, markerId, sendPos, sendRot);
+            photonView.RPC(nameof(RPC_ReceiveQRMarker), target, markerId, sendPos, sendRot);
         }
         else
         {

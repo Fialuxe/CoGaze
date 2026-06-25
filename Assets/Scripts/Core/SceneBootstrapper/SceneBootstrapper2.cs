@@ -32,6 +32,12 @@ public class SceneBootstrapper2 : MonoBehaviourPunCallbacks, IOnEventCallback
     public int    participantOrderIndex = 0;
     public string participantId        = "P00";
 
+    [Header("Setup")]
+    [Tooltip("Total number of task QR markers in the room. Their ids are assumed to be single " +
+             "letters 'A'..('A'+count-1). All must be present (auto-detected or manually registered " +
+             "via controller grip) before the Expert can approve.")]
+    public int requiredTaskQRCount = 5;
+
 #if UNITY_EDITOR
     [Header("Editor Debug")]
     [Tooltip("Force Worker role in Play Mode for testing without Android build.")]
@@ -459,6 +465,10 @@ public class SceneBootstrapper2 : MonoBehaviourPunCallbacks, IOnEventCallback
         var hud = playerObj.AddComponent<WorkerHUD2>();
         hud.Initialize(expMgr);
 
+        // SetupCoordinator — drives setup progress UI and tracks calib + task QR conditions
+        var setupCoord = playerObj.AddComponent<SetupCoordinator>();
+        setupCoord.Initialize(isWorker: true, expMgr, requiredTaskQRCount);
+
         // Photon Voice 2 — Recorder must be on the prefab; we configure it here
         var recorder = playerObj.GetComponentInChildren<Recorder>();
         if (recorder != null && !string.IsNullOrEmpty(micDevice))
@@ -623,6 +633,10 @@ public class SceneBootstrapper2 : MonoBehaviourPunCallbacks, IOnEventCallback
         // ExpertUI2
         var ui = playerObj.AddComponent<ExpertUI2>();
         ui.Initialize(expMgr);
+
+        // SetupCoordinator — shows Worker status panel and approve button during Setup state
+        var setupCoord = playerObj.AddComponent<SetupCoordinator>();
+        setupCoord.Initialize(isWorker: false, expMgr, requiredTaskQRCount);
 
         // Photon Voice 2 — Recorder must be on the prefab; configure it here
         var recorder = playerObj.GetComponentInChildren<Recorder>();

@@ -436,6 +436,12 @@ public class WorkerHUD2 : MonoBehaviour
 
         switch (state)
         {
+            case ExperimentState.Setup:
+                SetState("セットアップ中...", new Color(0.5f, 0.8f, 1f));
+                SetTimer(CoGazeStrings.Worker_TimerEmpty, Color.white);
+                SetPanelMode(true);
+                break;
+
             case ExperimentState.Idle:
                 SetState(CoGazeStrings.Worker_Idle, new Color(1f, 0.85f, 0.2f));
                 SetTimer(CoGazeStrings.Worker_TimerEmpty, Color.white);
