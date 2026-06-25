@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using UnityEngine;
 using UnityEngine.UI;
+using UnityEngine.EventSystems;   // EventSystem, BaseInputModule, OVRInputModule (Meta XR Core declares OVRInputModule in this namespace)
 using Photon.Pun;
 
 /// <summary>
@@ -13,9 +14,11 @@ using Photon.Pun;
 /// - Attach this script to a GameObject that also has a PhotonView.
 ///   Either place it on a scene object with a fixed ViewID, or use
 ///   PhotonNetwork.Instantiate so both clients own the same view.
-/// - The scene must have an EventSystem with a VR input module (e.g. OVRInputModule)
-///   for the buttons to receive pointer events on Quest. A GraphicRaycaster is
-///   added to the canvas at runtime.
+/// - VR pointer input is set up automatically at runtime on the Worker:
+///   an OVRRaycaster is added to the canvas, and an EventSystem carrying an
+///   OVRInputModule (rayTransform = active controller anchor, click = trigger)
+///   is created/reused so the buttons receive controller-laser pointer events on
+///   Quest. Direct-touch (poke) input is also set up. No scene wiring is required.
 ///
 /// Usage (called by SceneBootstrapper / LocalWorkerSetup):
 ///   questionnaireManager.participantNumber = participantNumber;
@@ -146,6 +149,14 @@ public class QuestionnaireManager : MonoBehaviourPun
     private Button     _nextButton;
     private Text       _nextButtonLabel;
 
+    // VR pointer (Worker only). Created/reused at runtime so pointer events
+    // reach the UI buttons. We never destroy a shared EventSystem; only
+    // the poke input is torn down on hide.
+    private OVRInputModule         _ovrInputModule;
+    private BaseInputModule[]      _suspendedModules;   // sibling modules we disabled to avoid conflicts
+    private QuestionnairePokeInput  _poke;       // direct-touch ("touch panel") input
+    private GameObject             _pokeGo;
+
     // ─── Lifecycle ────────────────────────────────────────────────────────────
 
     private void Awake()
@@ -180,6 +191,7 @@ public class QuestionnaireManager : MonoBehaviourPun
         _answers        = new int[NasaLabels.Length];
 
         EnsureCanvas();
+        SetupVRPointer();                                // controller-laser clicks
         BuildItemLayout(maxScore: 6, buttonCount: 7);   // scores 0-6
         ShowItem(0);
         SetVisible(true);
@@ -197,6 +209,7 @@ public class QuestionnaireManager : MonoBehaviourPun
         _answers     = new int[SsqLabels.Length];
 
         EnsureCanvas();
+        SetupVRPointer();                                // controller-laser clicks
         BuildItemLayout(maxScore: 3, buttonCount: 4);   // scores 0-3
         ShowItem(0);
         SetVisible(true);
@@ -214,6 +227,10 @@ public class QuestionnaireManager : MonoBehaviourPun
         // Smoothly follow the camera while the questionnaire panel is visible.
         if (!_isVisible || _canvasGo == null || _camTransform == null) return;
 
+        // Freeze the follow while the user is reaching in to touch, so the panel does not
+        // drift out from under their fingertip.
+        if (_poke != null && _poke.IsEngaged) return;
+
         Vector3 fwd = Vector3.ProjectOnPlane(_camTransform.forward, Vector3.up);
         if (fwd == Vector3.zero) fwd = _camTransform.forward;
         fwd = fwd.normalized;
@@ -229,6 +246,13 @@ public class QuestionnaireManager : MonoBehaviourPun
     {
         // Clear all subscribers to prevent stale delegate invocations
         OnQuestionnaireComplete = null;
+
+        // Restore any input modules we suspended, then drop our poke input. We do NOT
+        // destroy the EventSystem / OVRInputModule — they may be shared and the
+        // module installs a static singleton.
+        TeardownVRPointer();
+        if (_pokeGo != null) Destroy(_pokeGo);
+
         if (_buttonRow != null) Destroy(_buttonRow);
         if (_canvasGo != null) Destroy(_canvasGo);
     }
@@ -254,8 +278,22 @@ public class QuestionnaireManager : MonoBehaviourPun
         var canvas = _canvasGo.AddComponent<Canvas>();
         canvas.renderMode = RenderMode.WorldSpace;
 
-        // GraphicRaycaster is required for Unity UI buttons to receive VR pointer events.
-        _canvasGo.AddComponent<GraphicRaycaster>();
+        // OVRRaycaster (a GraphicRaycaster subclass) is required so OVRInputModule's
+        // world-space ray can hit these UI buttons. It replaces the plain
+        // GraphicRaycaster — do NOT add both.
+        _canvasGo.AddComponent<OVRRaycaster>();
+
+        // OVRRaycaster.eventCamera returns canvas.worldCamera and uses it for
+        // WorldToScreenPoint, so assign it deterministically (don't rely on
+        // OVRRaycaster.Start auto-filling it). Use the center-eye camera if present.
+        var camRig = FindAnyObjectByType<OVRCameraRig>();
+        if (camRig != null && camRig.centerEyeAnchor != null)
+        {
+            var eyeCam = camRig.centerEyeAnchor.GetComponent<Camera>();
+            if (eyeCam != null) canvas.worldCamera = eyeCam;
+        }
+        if (canvas.worldCamera == null && Camera.main != null)
+            canvas.worldCamera = Camera.main;
 
         var rt = _canvasGo.GetComponent<RectTransform>();
         rt.sizeDelta = panelSizeMm;
@@ -295,6 +333,129 @@ public class QuestionnaireManager : MonoBehaviourPun
             "", 20, TextAnchor.MiddleCenter, Color.white);
 
         questionnaireCanvas = canvas;
+    }
+
+    // ─── VR pointer (Worker only) ─────────────────────────────────────────────
+
+    /// <summary>
+    /// Ensure the questionnaire canvas can receive controller-laser pointer clicks:
+    ///  1. Make sure the canvas has an OVRRaycaster (so OVRInputModule can hit it).
+    ///  2. Reuse or create exactly ONE EventSystem carrying an OVRInputModule, with
+    ///     rayTransform pointed at the active controller anchor and the click bound
+    ///     to the index trigger.
+    /// Idempotent and self-contained — safe to call every time the panel is shown.
+    /// </summary>
+    private void SetupVRPointer()
+    {
+        if (_canvasGo == null) return;
+
+        // 1) Guarantee an OVRRaycaster on the active canvas. Covers the
+        //    Inspector-assigned-canvas path (where EnsureCanvas returns early and
+        //    never adds one). OVRRaycaster requires a Canvas, which is present here.
+        if (_canvasGo.GetComponent<OVRRaycaster>() == null)
+        {
+            // Remove a plain GraphicRaycaster if one snuck in, so we don't run two.
+            var plain = _canvasGo.GetComponent<GraphicRaycaster>();
+            if (plain != null && !(plain is OVRRaycaster)) Destroy(plain);
+            _canvasGo.AddComponent<OVRRaycaster>();
+        }
+
+        // Ensure the canvas has an event camera for screen-space conversion.
+        var canvas = _canvasGo.GetComponent<Canvas>();
+        var camRig = FindAnyObjectByType<OVRCameraRig>();
+        if (canvas != null && canvas.worldCamera == null)
+        {
+            if (camRig != null && camRig.centerEyeAnchor != null)
+            {
+                var eyeCam = camRig.centerEyeAnchor.GetComponent<Camera>();
+                if (eyeCam != null) canvas.worldCamera = eyeCam;
+            }
+            if (canvas.worldCamera == null && Camera.main != null)
+                canvas.worldCamera = Camera.main;
+        }
+
+        // 2) Reuse an existing EventSystem if present; otherwise create one.
+        //    NEVER create a duplicate EventSystem.
+        EventSystem eventSystem = EventSystem.current;
+        if (eventSystem == null) eventSystem = FindAnyObjectByType<EventSystem>();
+
+        if (eventSystem == null)
+        {
+            var esGo = new GameObject("QuestionnaireEventSystem");
+            eventSystem = esGo.AddComponent<EventSystem>();
+        }
+
+        // Add (or reuse) an OVRInputModule on the EventSystem. Disable any other
+        // BaseInputModule siblings (e.g. the scene's InputSystemUIInputModule or a
+        // StandaloneInputModule) so they don't fight over input. We remember them
+        // so they can be restored when the panel hides.
+        _ovrInputModule = eventSystem.GetComponent<OVRInputModule>();
+        if (_ovrInputModule == null)
+            _ovrInputModule = eventSystem.gameObject.AddComponent<OVRInputModule>();
+
+        var siblings = eventSystem.GetComponents<BaseInputModule>();
+        var suspended = new List<BaseInputModule>();
+        foreach (var m in siblings)
+        {
+            if (m == null || m == _ovrInputModule) continue;
+            if (m.enabled)
+            {
+                m.enabled = false;
+                suspended.Add(m);
+            }
+        }
+        _suspendedModules = suspended.ToArray();
+
+        _ovrInputModule.enabled = true;
+        // Required so the module activates on Android/Quest (no mouse present):
+        _ovrInputModule.allowActivationOnMobileDevice = true;
+        // Click with the controller index trigger (better laser UX than A/X).
+        _ovrInputModule.joyPadClickButton = OVRInput.Button.PrimaryIndexTrigger;
+
+        // Point the ray at the best available anchor right away so the very first
+        // frame has a valid rayTransform. The laser keeps this updated thereafter.
+        if (camRig != null)
+        {
+            Transform anchor = null;
+            if (camRig.rightControllerAnchor != null) anchor = camRig.rightControllerAnchor;
+            else if (camRig.leftControllerAnchor != null) anchor = camRig.leftControllerAnchor;
+            else if (camRig.centerEyeAnchor != null) anchor = camRig.centerEyeAnchor;
+            if (anchor != null) _ovrInputModule.rayTransform = anchor;
+        }
+
+        // 3) Visible laser line — DISABLED. The laser was confusing and did not operate
+        // reliably; the questionnaire is now touch-only (QuestionnaireLaserInput removed).
+
+        // 4) Direct-touch ("touch panel") input — poke buttons with a fingertip or controller tip.
+        if (_pokeGo == null)
+        {
+            _pokeGo = new GameObject("QuestionnairePoke");
+            _poke   = _pokeGo.AddComponent<QuestionnairePokeInput>();
+        }
+        if (_poke != null) _poke.Configure(_canvasGo.GetComponent<RectTransform>(), camRig);
+        _pokeGo.SetActive(true);
+    }
+
+    /// <summary>
+    /// Deactivate poke input and re-enable any input modules we suspended.
+    /// The EventSystem / OVRInputModule may be shared, so it is left in
+    /// place (OVRInputModule.Awake also installs a static singleton).
+    /// </summary>
+    private void TeardownVRPointer()
+    {
+        if (_pokeGo != null) _pokeGo.SetActive(false);
+
+        // Disable our OVR module BEFORE re-enabling the scene's own module(s), so
+        // the EventSystem returns to exactly its prior state (one active module).
+        // This avoids input contention during the task between questionnaire rounds.
+        if (_ovrInputModule != null) _ovrInputModule.enabled = false;
+
+        if (_suspendedModules != null)
+        {
+            foreach (var m in _suspendedModules)
+                if (m != null) m.enabled = true;
+            _suspendedModules = null;
+        }
     }
 
     /// <summary>
@@ -535,9 +696,11 @@ public class QuestionnaireManager : MonoBehaviourPun
         // Re-sync participant_id in case it was set after Awake.
         _data.participant_id = !string.IsNullOrEmpty(participantId) ? participantId : $"P{participantNumber:D2}";
 
+        string json = JsonUtility.ToJson(_data, prettyPrint: true);
+
+        // Local save (HMD backup — crash-safe atomic write).
         try
         {
-            string json    = JsonUtility.ToJson(_data, prettyPrint: true);
             string tmpPath = _saveFilePath + ".tmp";
             File.WriteAllText(tmpPath, json);
             if (File.Exists(_saveFilePath)) File.Delete(_saveFilePath);
@@ -546,8 +709,12 @@ public class QuestionnaireManager : MonoBehaviourPun
         }
         catch (Exception ex)
         {
-            Debug.LogError($"[QuestionnaireManager] Save failed: {ex.Message}");
+            Debug.LogError($"[QuestionnaireManager] Local save failed: {ex.Message}");
         }
+
+        // Forward to Expert (PC) so the researcher can access the data without ADB.
+        if (PhotonNetwork.InRoom && photonView != null)
+            photonView.RPC(nameof(RPC_ForwardQuestionnaireJson), RpcTarget.Others, json, _data.participant_id);
     }
 
     // ─── Photon RPC ──────────────────────────────────────────────────────────
@@ -561,6 +728,32 @@ public class QuestionnaireManager : MonoBehaviourPun
     {
         Debug.Log("[QuestionnaireManager] RPC_QuestionnaireComplete received.");
         OnQuestionnaireComplete?.Invoke();
+    }
+
+    /// <summary>
+    /// Received by the Expert (PC) each time the Worker saves a questionnaire snapshot.
+    /// Writes the JSON to the PC's data directory so researchers can access it without ADB.
+    /// The file is overwritten on each submit, so only the final cumulative JSON persists.
+    /// </summary>
+    [PunRPC]
+    private void RPC_ForwardQuestionnaireJson(string json, string pid)
+    {
+        if (RoleManager.LocalRole != RoleManager.ROLE_EXPERT) return;
+
+        // Mirror the same base-directory logic used by FileLogger on PC.
+        string dir = Application.platform == RuntimePlatform.Android
+            ? Application.persistentDataPath
+            : Path.Combine(Application.dataPath, "..");
+        string path = Path.Combine(dir, $"questionnaire_{pid}.json");
+        try
+        {
+            File.WriteAllText(path, json);
+            Debug.Log($"[QuestionnaireManager] PC copy saved → {path}");
+        }
+        catch (Exception ex)
+        {
+            Debug.LogError($"[QuestionnaireManager] PC save failed: {ex.Message}");
+        }
     }
 
     // ─── WorldSpace canvas positioning ───────────────────────────────────────
@@ -592,6 +785,9 @@ public class QuestionnaireManager : MonoBehaviourPun
                 _camTransform = camTransform;
             }
         }
+
+        // Deactivate poke input (and restore suspended input modules) when hiding.
+        if (!visible) TeardownVRPointer();
 
         _isVisible = visible;
         _canvasGo.SetActive(visible);
