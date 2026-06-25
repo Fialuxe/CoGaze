@@ -19,7 +19,7 @@ public class WorkerHUD2 : MonoBehaviour
 
     [Header("HUD position relative to center eye (metres)")]
     public Vector3 hudOffset  = new Vector3(-0.30f, 0.3f, 0.7f);
-    public Vector2 hudSizeMm  = new Vector2(240f, 92f);
+    public Vector2 hudSizeMm  = new Vector2(480f, 92f);
     public float   hudScaleM  = 0.001f;
 
     [Header("Alert Marker")]
@@ -82,6 +82,54 @@ public class WorkerHUD2 : MonoBehaviour
         if (meshHandler == null) return;
         _meshHandler = meshHandler;
         meshHandler.OnCalibrationChanged += OnCalibrationChanged;
+        meshHandler.OnDualQRCalibStep    += OnDualQRCalibStep;
+
+        // Immediately show initial dual-QR step so the Worker knows what to do from app launch.
+        if (meshHandler.IsDualQRMode && _calibText != null)
+        {
+            _calibText.gameObject.SetActive(true);
+            OnDualQRCalibStep(meshHandler.CurrentDualCalibState);
+        }
+    }
+
+    private void OnDualQRCalibStep(DualQRCalibState step)
+    {
+        if (_calibText == null) return;
+        switch (step)
+        {
+            case DualQRCalibState.NeedsA:
+                _calibText.gameObject.SetActive(true);
+                _calibText.text = CoGazeStrings.DualCalib_NeedsA;
+                break;
+            case DualQRCalibState.NeedsB:
+                _calibText.gameObject.SetActive(true);
+                _calibText.text = CoGazeStrings.DualCalib_NeedsB;
+                break;
+            case DualQRCalibState.Complete:
+                StartCoroutine(FlashDualCalibComplete());
+                break;
+        }
+    }
+
+    private System.Collections.IEnumerator FlashDualCalibComplete()
+    {
+        if (_calibText == null) yield break;
+        Color orig = _calibText.color;
+        _calibText.gameObject.SetActive(true);
+        _calibText.text  = CoGazeStrings.DualCalib_Complete;
+        _calibText.color = new Color(0.3f, 1f, 0.5f);
+#if UNITY_ANDROID && !UNITY_EDITOR
+        OVRInput.SetControllerVibration(0.5f, 1.0f, OVRInput.Controller.LTouch);
+        OVRInput.SetControllerVibration(0.5f, 1.0f, OVRInput.Controller.RTouch);
+        yield return new WaitForSeconds(0.3f);
+        OVRInput.SetControllerVibration(0f, 0f, OVRInput.Controller.LTouch);
+        OVRInput.SetControllerVibration(0f, 0f, OVRInput.Controller.RTouch);
+#else
+        yield return new WaitForSeconds(0.3f);
+#endif
+        yield return new WaitForSeconds(2.0f);
+        _calibText.color = orig;
+        _calibText.gameObject.SetActive(false);
     }
 
     private void OnCalibrationChanged(bool active)
@@ -183,7 +231,11 @@ public class WorkerHUD2 : MonoBehaviour
         }
         // MeshHandler/IdentificationTask survive a HUD teardown (e.g. reconnect), so leaving
         // these subscribed would leak and double-fire into the destroyed HUD.
-        if (_meshHandler != null) _meshHandler.OnCalibrationChanged -= OnCalibrationChanged;
+        if (_meshHandler != null)
+        {
+            _meshHandler.OnCalibrationChanged -= OnCalibrationChanged;
+            _meshHandler.OnDualQRCalibStep    -= OnDualQRCalibStep;
+        }
         if (_idTask != null && _qrHandler != null) _idTask.OnQRStateChanged -= _qrHandler;
         if (alertMarkerGo != null) Destroy(alertMarkerGo);
         if (_discTex != null) Destroy(_discTex);

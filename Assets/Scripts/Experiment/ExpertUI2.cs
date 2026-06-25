@@ -40,6 +40,10 @@ public class ExpertUI2 : MonoBehaviour
     // ── Zone D (bottom bar) ───────────────────────────────────────────────
     private Text bottomHintText;
 
+    // ── Remote mesh visibility ────────────────────────────────────────────
+    private MeshHandler _meshHandler;
+    private bool        _meshVisible = false;
+
     // ── State ─────────────────────────────────────────────────────────────
     private bool manualHideOverride;
 
@@ -126,6 +130,10 @@ public class ExpertUI2 : MonoBehaviour
             manualHideOverride = currentlyVisible; // visible → hide; hidden → clear override and show
             if (zoneBPanel != null) zoneBPanel.SetActive(!manualHideOverride);
         }
+
+        // M key: toggle SharedMesh visibility on Worker's Quest for calibration verification.
+        if (kb != null && kb.mKey.wasPressedThisFrame)
+            ToggleRemoteMesh();
 
         if (_oscSession != null && Time.time >= _nextPing)
         {
@@ -592,6 +600,28 @@ public class ExpertUI2 : MonoBehaviour
         yield return new WaitForSeconds(delay);
         if (zoneBPanel != null) zoneBPanel.SetActive(false);
         _autoHideCoroutine = null;
+    }
+
+    // ── Remote mesh toggle ────────────────────────────────────────────────
+
+    private void ToggleRemoteMesh()
+    {
+        // Lazy lookup: Worker must have joined and instantiated LocalWorker before MeshHandler exists.
+        if (_meshHandler == null)
+            _meshHandler = Object.FindAnyObjectByType<MeshHandler>();
+        if (_meshHandler == null)
+        {
+            Debug.LogWarning("[ExpertUI2] ToggleRemoteMesh: MeshHandler not found — is Worker connected?");
+            return;
+        }
+        _meshVisible = !_meshVisible;
+        _meshHandler.RequestSetMeshVisible(_meshVisible);
+        Debug.Log($"[ExpertUI2] Remote mesh → {(_meshVisible ? "ON" : "OFF")}");
+
+        if (instructionText != null)
+        {
+            instructionText.text = $"[キャリブ確認] Workerメッシュ表示: {(_meshVisible ? "ON ▶ 映像で位置確認してください" : "OFF")}   (M キーで切替)";
+        }
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────

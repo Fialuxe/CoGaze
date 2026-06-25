@@ -1,6 +1,9 @@
 using UnityEngine;
 using Photon.Pun;
 
+/// <summary>State machine for the two-QR automatic calibration flow.</summary>
+public enum DualQRCalibState { NeedsA, NeedsB, Complete }
+
 public class MeshHandler : MonoBehaviourPun
 {
     [Header("Scene内の事前配置メッシュのオブジェクト名")]
@@ -17,20 +20,43 @@ public class MeshHandler : MonoBehaviourPun
     [Range(0f, 1f)]
     [SerializeField] private float collisionMeshQuality = 0.03f;
 
-    [Header("QR Calibration")]
-    [Tooltip("QRコードのmarkerId がこの文字列で始まる場合、メッシュの初期位置として自動セットする。例: 'calib'")]
-    [SerializeField] private string calibrationQRPrefix = "calib";
+    [Header("Single-QR Calibration (legacy; overridden when both Dual-QR indicators are assigned)")]
+    [Tooltip("QRコードのmarkerId がこの文字列で始まる場合、メッシュの初期位置として自動セットする。例: 'QR_CALIB'")]
+    [SerializeField] private string calibrationQRPrefix = "QR_CALIB";
+    [Tooltip("QR検出時にこのTransformがQR位置へ来るようメッシュを移動する。未設定時はSharedMesh原点をQR位置に合わせる。")]
+    [SerializeField] private Transform calibrationAnchor;
+
+    [Header("Dual-QR Calibration (active when both indicatorA and indicatorB are assigned)")]
+    [Tooltip("QR-A の markerId（例: 'QR_CALIB_A'）。indicatorA/B が両方設定されている場合に使用。")]
+    [SerializeField] private string calibrationQRIdA = "QR_CALIB_A";
+    [Tooltip("QR-B の markerId（例: 'QR_CALIB_B'）。")]
+    [SerializeField] private string calibrationQRIdB = "QR_CALIB_B";
+    [Tooltip("SharedMesh の子として置いたQR-A位置インジケーター Transform。")]
+    [SerializeField] private Transform indicatorA;
+    [Tooltip("SharedMesh の子として置いたQR-B位置インジケーター Transform。")]
+    [SerializeField] private Transform indicatorB;
 
     private GameObject meshObject;
     private bool isCalibrating = false;
     private bool _qrCalibrated = false;
     private QRSpatialManager _qrManager;
 
-    /// <summary>Fired on the Worker when calibration mode is toggled on (true) or off (false).</summary>
-    public event System.Action<bool> OnCalibrationChanged;
+    // ── Dual-QR state ─────────────────────────────────────────────────────
+    private DualQRCalibState _dualCalibState = DualQRCalibState.NeedsA;
+    private Vector3?         _detectedA;
+    private Vector3?         _detectedB;
 
+    /// <summary>true when both indicatorA and indicatorB are assigned — uses 2-QR alignment.</summary>
+    public bool             IsDualQRMode          => indicatorA != null && indicatorB != null;
+    /// <summary>Current step of the dual-QR calibration state machine.</summary>
+    public DualQRCalibState CurrentDualCalibState => _dualCalibState;
+
+    /// <summary>Fired on the Worker when calibration mode is toggled on (true) or off (false).</summary>
+    public event System.Action<bool>            OnCalibrationChanged;
     /// <summary>Fired on the Worker when calibration is confirmed (A button).</summary>
-    public event System.Action OnCalibrationConfirmed;
+    public event System.Action                  OnCalibrationConfirmed;
+    /// <summary>Fired on the Worker at each dual-QR calibration step (NeedsA → NeedsB → Complete).</summary>
+    public event System.Action<DualQRCalibState> OnDualQRCalibStep;
 
     private void Start()
     {
@@ -167,6 +193,10 @@ public class MeshHandler : MonoBehaviourPun
         if (OVRInput.GetDown(OVRInput.Button.One, OVRInput.Controller.RTouch))
         {
             SendMeshTransform();
+            // Re-broadcast known QR markers now that the SharedMesh is calibrated & synced, so any
+            // markers scanned BEFORE this confirm are re-placed correctly on the Expert (their
+            // Expert-side position is derived from the shared SharedMesh frame).
+            _qrManager?.ResyncAllMarkers();
             OnCalibrationConfirmed?.Invoke();
             OVRInput.SetControllerVibration(0.5f, 0.8f, OVRInput.Controller.RTouch);
             StartCoroutine(StopVibration(0.2f));
@@ -188,6 +218,25 @@ public class MeshHandler : MonoBehaviourPun
         bool next = !renderers[0].enabled;
         foreach (var r in renderers) r.enabled = next;
         Debug.Log($"[MeshHandler] Mesh visibility → {next}");
+    }
+
+    /// <summary>
+    /// Expert side: sends RPC to show/hide SharedMesh on ALL clients (Worker passthrough + Expert screen).
+    /// Call via FindAnyObjectByType&lt;MeshHandler&gt;().RequestSetMeshVisible(true/false) from ExpertUI2.
+    /// </summary>
+    public void RequestSetMeshVisible(bool visible)
+    {
+        photonView.RPC(nameof(RPC_SetMeshVisible), RpcTarget.All, visible);
+    }
+
+    [PunRPC]
+    private void RPC_SetMeshVisible(bool visible)
+    {
+        if (meshObject == null) meshObject = GameObject.Find(meshObjectName);
+        if (meshObject == null) return;
+        foreach (var r in meshObject.GetComponentsInChildren<MeshRenderer>(true))
+            r.enabled = visible;
+        Debug.Log($"[MeshHandler] RPC_SetMeshVisible → {visible}");
     }
 
     public void SendMeshTransform()
@@ -217,16 +266,93 @@ public class MeshHandler : MonoBehaviourPun
 #if UNITY_ANDROID && !UNITY_EDITOR
     private void OnQRMarkerDetected(string markerId, Vector3 pos, Quaternion rot)
     {
+        if (IsDualQRMode)
+            HandleDualQRDetection(markerId, pos);
+        else
+            HandleSingleQRDetection(markerId, pos, rot);
+    }
+
+    private void HandleSingleQRDetection(string markerId, Vector3 pos, Quaternion rot)
+    {
         if (_qrCalibrated) return;
         if (!markerId.StartsWith(calibrationQRPrefix)) return;
 
-        // QRの位置をそのまま使い、Y軸回転のみ採用してメッシュを起こしたまま保つ
-        meshObject.transform.position = pos;
-        meshObject.transform.rotation = Quaternion.Euler(0f, rot.eulerAngles.y, 0f);
+        // SharedMesh の yaw = QR yaw − GridOrigin の local yaw
+        float anchorLocalYaw = calibrationAnchor != null ? calibrationAnchor.localEulerAngles.y : 0f;
+        Quaternion newRot = Quaternion.Euler(0f, rot.eulerAngles.y - anchorLocalYaw, 0f);
+        meshObject.transform.rotation = newRot;
+
+        if (calibrationAnchor != null)
+        {
+            Vector3 anchorLocal = meshObject.transform.InverseTransformPoint(calibrationAnchor.position);
+            meshObject.transform.position = pos - newRot * anchorLocal;
+        }
+        else
+        {
+            meshObject.transform.position = pos;
+        }
 
         SendMeshTransform();
         _qrCalibrated = true;
-        Debug.Log($"[MeshHandler] QR calibration applied: id='{markerId}' pos={pos} yaw={rot.eulerAngles.y:F1}°");
+        Debug.Log($"[MeshHandler] Single-QR calib: id='{markerId}' anchor={calibrationAnchor?.name ?? "none"} pos={pos} meshYaw={newRot.eulerAngles.y:F1}°");
+    }
+
+    private void HandleDualQRDetection(string markerId, Vector3 pos)
+    {
+        if (_dualCalibState == DualQRCalibState.Complete) return;
+
+        if (markerId == calibrationQRIdA)
+        {
+            _detectedA = pos;
+            Debug.Log($"[MeshHandler] Dual-QR: QR-A detected at {pos}");
+        }
+        else if (markerId == calibrationQRIdB)
+        {
+            _detectedB = pos;
+            Debug.Log($"[MeshHandler] Dual-QR: QR-B detected at {pos}");
+        }
+        else return;
+
+        // Advance state machine for HUD guidance: one QR seen but not both → instruct on the other.
+        // Uses XOR so B-before-A also advances (avoids HUD staying on "NeedsA" when B is detected first).
+        if (_dualCalibState == DualQRCalibState.NeedsA && (_detectedA.HasValue != _detectedB.HasValue))
+        {
+            _dualCalibState = DualQRCalibState.NeedsB;
+            OnDualQRCalibStep?.Invoke(DualQRCalibState.NeedsB);
+        }
+
+        if (_detectedA.HasValue && _detectedB.HasValue)
+        {
+            if (meshObject == null) return;
+            // Indicators must be direct children of SharedMesh (uniform scale assumed = photogrammetry export).
+            // InverseTransformPoint is used (vs localPosition) to correctly handle any nesting depth.
+            Vector3 aLocal = meshObject.transform.InverseTransformPoint(indicatorA.position);
+            Vector3 bLocal = meshObject.transform.InverseTransformPoint(indicatorB.position);
+
+            var (newPos, newRot) = DualQRCalibration.ComputePose(
+                aLocal, bLocal, _detectedA.Value, _detectedB.Value);
+
+            meshObject.transform.SetPositionAndRotation(newPos, newRot);
+            SendMeshTransform();
+            _dualCalibState = DualQRCalibState.Complete;
+            OnDualQRCalibStep?.Invoke(DualQRCalibState.Complete);
+            Debug.Log($"[MeshHandler] Dual-QR complete: pos={newPos} yaw={newRot.eulerAngles.y:F1}°");
+        }
+    }
+
+    /// <summary>
+    /// Resets the dual-QR calibration state so the Worker can re-scan both QR codes.
+    /// Call via RPC from Expert if visual verification reveals bad alignment.
+    /// Has no effect in single-QR (legacy) mode.
+    /// </summary>
+    public void ResetDualCalibration()
+    {
+        if (!IsDualQRMode) return;
+        _dualCalibState = DualQRCalibState.NeedsA;
+        _detectedA      = null;
+        _detectedB      = null;
+        OnDualQRCalibStep?.Invoke(DualQRCalibState.NeedsA);
+        Debug.Log("[MeshHandler] Dual-QR calibration reset — Worker can re-scan QR-A.");
     }
 
     private void ApplyBakedCollisionMeshes(GameObject target)
