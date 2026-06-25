@@ -54,11 +54,13 @@ public class ExperimentLogger : MonoBehaviour, IOnEventCallback
     private const string MESH_NAME = "SharedMesh";
 
     // Cached component references (searched lazily)
-    private GazeHandler    expertGazeHandler;
-    private PostureHandler workerPostureHandler;
-    private PostureHandler expertPostureHandler;
-    private int            findAttempts;
-    private const int      MAX_FIND_ATTEMPTS = 90; // 3 s at 30 fps
+    private GazeHandler        expertGazeHandler;
+    private PostureHandler     workerPostureHandler;
+    private PostureHandler     expertPostureHandler;
+    private IdentificationTask _identTask;
+    private VoiceRecorder      _voiceRecorder;
+    private int                findAttempts;
+    private const int          MAX_FIND_ATTEMPTS = 90; // 3 s at 30 fps
 
     // Latest hand data received from WorkerHandBroadcaster via event 44
     private float[] latestHandL;
@@ -129,7 +131,7 @@ public class ExperimentLogger : MonoBehaviour, IOnEventCallback
                 File.WriteAllText(trialsPath,
                     "trial_id,participant,condition_index,gaze_mode,noise_level," +
                     "task_type,condition_name," +
-                    "step_type,step_index,start_ms,end_ms,duration_ms\n",
+                    "step_type,step_index,start_ms,end_ms,duration_ms,identified_marker\n",
                     Encoding.UTF8);
             }
             catch (Exception ex)
@@ -152,7 +154,7 @@ public class ExperimentLogger : MonoBehaviour, IOnEventCallback
                     "trial_id,t_ms,elapsed_s,gaze_x,gaze_y,blink," +
                     "worker_px,worker_py,worker_pz,worker_rx,worker_ry,worker_rz,worker_rw," +
                     "expert_px,expert_py,expert_pz,expert_rx,expert_ry,expert_rz,expert_rw," +
-                    "osc_certainty");
+                    "osc_certainty,ctrl_px,ctrl_py,ctrl_pz");
         }
         catch (Exception ex)
         {
@@ -204,6 +206,11 @@ public class ExperimentLogger : MonoBehaviour, IOnEventCallback
         latestHandR      = null;
         latestOscCertainty = -1f;
         findAttempts     = 0;
+        if (_identTask == null)
+            _identTask = FindAnyObjectByType<IdentificationTask>();
+        if (_voiceRecorder == null)
+            _voiceRecorder = GetComponent<VoiceRecorder>();
+        trialVoiceStartSeconds = _voiceRecorder?.RecordingSeconds ?? 0f;
 
         trialVoiceStartSeconds = 0f;
 
@@ -248,10 +255,12 @@ public class ExperimentLogger : MonoBehaviour, IOnEventCallback
         catch (Exception ex) { Debug.LogWarning($"[ExperimentLogger] Flush error: {ex.Message}"); }
 
         // Append trial row — includes task_type and condition_name
-        string trialsPath = Path.Combine(logDir, "trials.csv");
+        string trialsPath   = Path.Combine(logDir, "trials.csv");
+        string markerResult = _identTask?.CompletedMarkerId ?? "";
         string row = $"{currentTrialId},{_participantId},{condIdx},{gazeMode},{noiseLevel}," +
                      $"{trialTaskType},{trialConditionName}," +
-                     $"{trialStepType},{trialStepIndex},{trialStartMs},{endMs},{durationMs}\n";
+                     $"{trialStepType},{trialStepIndex},{trialStartMs},{endMs},{durationMs}," +
+                     $"{markerResult}\n";
         try
         {
             File.AppendAllText(trialsPath, row, Encoding.UTF8);
@@ -290,7 +299,7 @@ public class ExperimentLogger : MonoBehaviour, IOnEventCallback
                 meshPos   = new[] { trialMeshPos.x,   trialMeshPos.y,   trialMeshPos.z },
                 meshRot   = new[] { trialMeshRot.x,   trialMeshRot.y,   trialMeshRot.z,   trialMeshRot.w },
                 meshScale = new[] { trialMeshScale.x, trialMeshScale.y, trialMeshScale.z },
-                voiceWavPath      = null,
+                voiceWavPath      = _voiceRecorder?.LocalWavPath,
                 voiceStartSeconds = trialVoiceStartSeconds
             },
             frames = replayFrames
@@ -367,6 +376,7 @@ public class ExperimentLogger : MonoBehaviour, IOnEventCallback
         Quaternion workerRot  = workerPostureHandler != null ? workerPostureHandler.transform.rotation    : Quaternion.identity;
         Vector3    expertPos  = expertPostureHandler != null ? expertPostureHandler.transform.position    : Vector3.zero;
         Quaternion expertRot  = expertPostureHandler != null ? expertPostureHandler.transform.rotation    : Quaternion.identity;
+        bool       hasCtrl    = WorkerTrackingReader.TryGetControllerPosition(out Vector3 ctrlPos);
 
         // Resolve certainty: prefer per-frame override, fall back to latest pushed value
         float certainty = float.IsNaN(oscCertainty) ? latestOscCertainty : oscCertainty;
@@ -383,7 +393,8 @@ public class ExperimentLogger : MonoBehaviour, IOnEventCallback
                     $"{workerRot.x:F4},{workerRot.y:F4},{workerRot.z:F4},{workerRot.w:F4}," +
                     $"{expertPos.x:F4},{expertPos.y:F4},{expertPos.z:F4}," +
                     $"{expertRot.x:F4},{expertRot.y:F4},{expertRot.z:F4},{expertRot.w:F4}," +
-                    $"{certainty:F4}");
+                    $"{certainty:F4}," +
+                    $"{ctrlPos.x:F4},{ctrlPos.y:F4},{ctrlPos.z:F4}");
                 if (++_frameFlushCounter >= 30)
                 {
                     framesWriter.Flush();
@@ -413,8 +424,9 @@ public class ExperimentLogger : MonoBehaviour, IOnEventCallback
                     p = new[] { expertPos.x, expertPos.y, expertPos.z },
                     r = new[] { expertRot.x, expertRot.y, expertRot.z, expertRot.w }
                 },
-                handL = UnpackBones(latestHandL),
-                handR = UnpackBones(latestHandR)
+                handL      = UnpackBones(latestHandL),
+                handR      = UnpackBones(latestHandR),
+                workerCtrl = hasCtrl ? new[] { ctrlPos.x, ctrlPos.y, ctrlPos.z } : null
             });
         }
     }

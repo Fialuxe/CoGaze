@@ -7,6 +7,8 @@ public class IdentificationTask : MonoBehaviourPun
     public event System.Action<bool> OnQRStateChanged;
 
     private ExperimentManager2 experimentManager2;
+    public string CompletedMarkerId { get; private set; }
+
     private bool               _doneSent       = false;
     private bool               _qrScanned      = false;
     private bool               _workerInitDone = false;
@@ -61,7 +63,7 @@ public class IdentificationTask : MonoBehaviourPun
     private void OnQRMarkerDetected(string markerId, Vector3 pos, Quaternion rot)
     {
         if (_qrScanned) return;
-        if (markerId.StartsWith("calib")) return;
+        if (markerId.StartsWith("QR_CALIB")) return;
         _qrScanned = true;
         OnQRStateChanged?.Invoke(true);
         Debug.Log($"[IdentificationTask] QR confirmed (id='{markerId}') — squeeze grip near it to complete.");
@@ -81,6 +83,7 @@ public class IdentificationTask : MonoBehaviourPun
     {
         Debug.Log("[IdentificationTask] StartTask");
         _qrScanned = false;
+        CompletedMarkerId = null;
         OnQRStateChanged?.Invoke(false);
 #if UNITY_ANDROID && !UNITY_EDITOR
         _gripWasDown = false;
@@ -111,7 +114,7 @@ public class IdentificationTask : MonoBehaviourPun
         Vector3 controllerPos = GetRightControllerWorldPos();
         foreach (var kvp in _qrManager.DetectedMarkers)
         {
-            if (kvp.Key.StartsWith("calib")) continue;
+            if (kvp.Key.StartsWith("QR_CALIB")) continue;
             if (kvp.Value == null) continue;
             if (Vector3.Distance(controllerPos, kvp.Value.transform.position) < ProximityThreshold)
             {
@@ -141,13 +144,14 @@ public class IdentificationTask : MonoBehaviourPun
         if (_doneSent) return;
         _doneSent = true;
         Debug.Log($"[IdentificationTask] Completion confirmed near QR '{markerId}' — sending RPC.");
-        photonView.RPC(nameof(RPC_IdentificationDone), RpcTarget.All);
+        photonView.RPC(nameof(RPC_IdentificationDone), RpcTarget.All, markerId);
     }
 
     [PunRPC]
-    private void RPC_IdentificationDone()
+    private void RPC_IdentificationDone(string markerId)
     {
-        Debug.Log("[IdentificationTask] RPC_IdentificationDone received.");
+        CompletedMarkerId = markerId;
+        Debug.Log($"[IdentificationTask] RPC_IdentificationDone received. markerId='{markerId}'");
         OnTaskComplete?.Invoke();
         SetTaskEnabled(false);
     }
