@@ -391,6 +391,7 @@ public class SceneBootstrapper2 : MonoBehaviourPunCallbacks, IOnEventCallback
             yield break;
         }
         expMgr.participantOrderIndex = participantOrderIndex;
+        expMgr.participantNumber     = participantOrderIndex;  // was unset → BuildConditionOrder logged "P0"
         expMgr.participantId         = participantId;
 
         GameObject playerObj;
