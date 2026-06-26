@@ -46,12 +46,12 @@ public static partial class CoGazeStrings
     // ── Alert marker ─────────────────────────────────────────────────────
     public const string Worker_AlertExclamation = "!";
 
-    // ── Manual calibration hints (grip-mode) ─────────────────────────────
-    public const string Calib_MoveXZ      = "スティック → XZ 移動";
-    public const string Calib_AdjustHeight = "トリガー + スティックY → 高さ調整";
-    public const string Calib_Rotate       = "トリガー + スティックX → 回転";
-    public const string Calib_Confirm      = "A ボタン → 位置を確定・送信";
-    public const string Calib_FullHint     = "GRIP: スティック=移動  /  トリガー+スティック=高さ・回転  /  A=確定";
+    // ── Manual calibration hints (hold-X mode) ───────────────────────────
+    public const string Calib_MoveXZ      = "グリップで掴んでメッシュを移動";
+    public const string Calib_AdjustHeight = "手を動かすと位置が変わります";
+    public const string Calib_Rotate       = "右スティック → 回転";
+    public const string Calib_Confirm      = "X を離すと位置を確定・送信";
+    public const string Calib_FullHint     = "X長押し中｜グリップ=掴んで移動  /  スティック=回転  /  離す=確定";
     public const string Calib_Sent         = "✓ 送信完了";
 
     // ── Dual-QR automatic calibration steps ──────────────────────────────

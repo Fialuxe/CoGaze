@@ -10,7 +10,6 @@ public class MeshHandler : MonoBehaviourPun
     [SerializeField] private string meshObjectName = "SharedMesh";
 
     [Header("Calibration Settings")]
-    [SerializeField] private float moveSpeed = 1.0f;
     [SerializeField] private float rotateSpeed = 45f;
 
     [Header("Android Collision Mesh Simplification")]
@@ -234,15 +233,6 @@ public class MeshHandler : MonoBehaviourPun
             r.enabled = visible;
     }
 #endif
-
-    private void ToggleMeshVisibility()
-    {
-        var renderers = meshObject.GetComponentsInChildren<MeshRenderer>(true);
-        if (renderers.Length == 0) return;
-        bool next = !renderers[0].enabled;
-        foreach (var r in renderers) r.enabled = next;
-        Debug.Log($"[MeshHandler] Mesh visibility → {next}");
-    }
 
     /// <summary>
     /// Expert side: sends RPC to show/hide SharedMesh on ALL clients (Worker passthrough + Expert screen).
