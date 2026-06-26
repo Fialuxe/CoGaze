@@ -288,6 +288,14 @@ public class ExperimentManager2 : MonoBehaviour, IOnEventCallback
         }
     }
 
+    /// <summary>
+    /// True once the Expert's own setup prerequisites are met: instruction template loaded and
+    /// (if an OSC/Python session exists) the first pong received. Computed locally — no network read.
+    /// Used to gate the Setup approval button so the operator can't approve before their own side
+    /// is ready (root cause #2 in the operator runbook). Meaningful on the Expert only.
+    /// </summary>
+    public bool IsExpertSelfReady => _templateLoaded && (_oscSession == null || _firstPongReceived);
+
     private void TryTransitionToReady()
     {
         if (!IsExpert) return;

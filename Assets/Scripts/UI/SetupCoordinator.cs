@@ -160,10 +160,20 @@ public class SetupCoordinator : MonoBehaviour
 
     // ── Worker manual registration (grip) ──────────────────────────────────
 
-#if UNITY_ANDROID && !UNITY_EDITOR
     private void Update()
     {
-        if (!_isWorker || _manager == null) return;
+        if (_manager == null) return;
+
+        // Expert: the approve gate also depends on the Expert's own readiness (template + OSC pong),
+        // which can flip without any calib/marker event. Poll-refresh during Setup so the approve
+        // button enables on time (root cause #2). Cheap (text-only) and Setup-scoped.
+        if (!_isWorker)
+        {
+            if (_manager.CurrentState == ExperimentState.Setup) RefreshUI();
+            return;
+        }
+
+#if UNITY_ANDROID && !UNITY_EDITOR
         if (_manager.CurrentState != ExperimentState.Setup) return;
 
         string nextMissing = FirstMissingId();
@@ -181,8 +191,10 @@ public class SetupCoordinator : MonoBehaviour
 
         OVRInput.SetControllerVibration(0.5f, 0.8f, OVRInput.Controller.RTouch);
         StartCoroutine(StopVibration(0.2f));
+#endif
     }
 
+#if UNITY_ANDROID && !UNITY_EDITOR
     private Vector3 GetRightControllerWorldPos()
     {
         if (_ovrRig == null) _ovrRig = Object.FindAnyObjectByType<OVRCameraRig>();
@@ -254,7 +266,11 @@ public class SetupCoordinator : MonoBehaviour
                 _expertTaskLine.text = $"{taskIcon} タスクQR  {detected} / {_expectedTaskIds.Count}{miss}";
             }
 
-            bool canApprove = _calibDone && taskDone;
+            // Gate also on the Expert's OWN readiness (template + OSC pong) so the operator can't
+            // approve before their side is ready. Read locally from the manager — no network. If
+            // the manager is somehow absent, fall back to the prior calib+task gate (never deadlock).
+            bool selfReady  = _manager == null || _manager.IsExpertSelfReady;
+            bool canApprove = _calibDone && taskDone && selfReady;
             if (_approveButton != null)
             {
                 _approveButton.interactable = canApprove;
@@ -265,7 +281,13 @@ public class SetupCoordinator : MonoBehaviour
                         : new Color(0.20f, 0.22f, 0.22f);
             }
             if (_approveLabel != null)
-                _approveLabel.color = canApprove ? Color.white : new Color(0.5f, 0.5f, 0.5f);
+            {
+                // Surface WHY approval is blocked instead of an inert grey button.
+                if (canApprove)                    _approveLabel.text = "承認して実験開始";
+                else if (!_calibDone || !taskDone) _approveLabel.text = "Worker のセットアップ待ち";
+                else                               _approveLabel.text = "自分の準備中…(テンプレ/OSC)";
+                _approveLabel.color = canApprove ? Color.white : new Color(0.6f, 0.6f, 0.6f);
+            }
         }
     }
 
