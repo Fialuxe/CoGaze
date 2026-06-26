@@ -108,6 +108,10 @@ public class IdentificationTask : MonoBehaviourPun
         bool  justPressed = gripDown && !_gripWasDown;
         _gripWasDown = gripDown;
 
+        // While the left X button is held the right grip is calibrating the mesh (MeshHandler) —
+        // don't also complete the task with the same grip press.
+        if (OVRInput.Get(OVRInput.Button.One, OVRInput.Controller.LTouch)) return;
+
         if (!justPressed) return;
         if (_qrManager == null) return;
 

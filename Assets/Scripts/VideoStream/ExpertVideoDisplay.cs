@@ -17,6 +17,7 @@ public class ExpertVideoDisplay : MonoBehaviour
     private RawImage           videoImage;
     private ExperimentManager2 expManager;
     private WebRtcVideoSession session;
+    private bool               _showWanted;   // does the current state (or V-toggle) want the video?
 
     // ── Init ────────────────────────────────────────────────────────────────
 
@@ -29,6 +30,11 @@ public class ExpertVideoDisplay : MonoBehaviour
         session = gameObject.AddComponent<WebRtcVideoSession>();
         session.StartAsAnswerer(OnFrameReceived);
 
+        // Prime: Setup is set by direct assignment in ExperimentManager2.Initialize (not via
+        // Transition()), so OnStateChanged never fires for it — without this the Setup video
+        // would never show.
+        OnStateChanged(expManager.CurrentState);
+
         FileLogger.Log("Transport", "[ExpertVideoDisplay] Initialized.");
     }
 
@@ -39,6 +45,7 @@ public class ExpertVideoDisplay : MonoBehaviour
     private void OnFrameReceived(Texture tex)
     {
         videoImage.texture = tex;
+        ApplyVisibility();   // a RawImage with a null texture renders a white quad — only show once a frame exists
     }
 
     // ── UI ──────────────────────────────────────────────────────────────────
@@ -73,21 +80,30 @@ public class ExpertVideoDisplay : MonoBehaviour
     {
         var kb = Keyboard.current;
         if (kb != null && kb.vKey.wasPressedThisFrame)
-            canvas.gameObject.SetActive(!canvas.gameObject.activeSelf);
+        {
+            _showWanted = !_showWanted;
+            ApplyVisibility();
+        }
     }
 
     // ── Experiment state ─────────────────────────────────────────────────────
 
     private void OnStateChanged(ExperimentState state)
     {
-        bool show =
-            // During Setup, show the Worker's HMD camera so the operator can watch calibration /
-            // QR placement progress. The Setup panel (sortingOrder 20) renders above this video
-            // canvas (5), so the calib/QR status and approve button stay visible on top.
+        // During Setup, show the Worker's HMD camera so the operator can watch calibration / QR
+        // placement. The Setup panel (sortingOrder 20) renders above this video canvas (5), so the
+        // calib/QR status and approve button stay visible on top.
+        _showWanted =
             state == ExperimentState.Setup
          || (state == ExperimentState.TaskRunning   && expManager.CurrentStepType == StepType.Assembly)
          || (state == ExperimentState.Questionnaire && expManager.CurrentStepType == StepType.Alignment);
-        if (canvas != null) canvas.gameObject.SetActive(show);
+        ApplyVisibility();
+    }
+
+    private void ApplyVisibility()
+    {
+        if (canvas != null)
+            canvas.gameObject.SetActive(_showWanted && videoImage != null && videoImage.texture != null);
     }
 
     private void OnDestroy()

@@ -49,6 +49,15 @@ public class MeshHandler : MonoBehaviourPun
     /// <summary>Current step of the dual-QR calibration state machine.</summary>
     public DualQRCalibState CurrentDualCalibState => _dualCalibState;
 
+    /// <summary>
+    /// True once RPC_NotifyCalibComplete has been received — durable, so a late-subscribing
+    /// SetupCoordinator (Expert joining AFTER the Worker calibrated, where the buffered RPC is
+    /// flushed before Initialize subscribes) can seed _calibDone from it instead of depending on
+    /// catching the one-shot event. On the Expert, _dualCalibState is never advanced, so this flag
+    /// is the only durable record of completion.
+    /// </summary>
+    public bool CalibCompleteReceived { get; private set; }
+
     /// <summary>Fired on the Worker when calibration mode is toggled on (true) or off (false).</summary>
     public event System.Action<bool>            OnCalibrationChanged;
     /// <summary>Fired on the Worker when calibration is confirmed (A button).</summary>
@@ -256,6 +265,7 @@ public class MeshHandler : MonoBehaviourPun
     [PunRPC]
     private void RPC_NotifyCalibComplete()
     {
+        CalibCompleteReceived = true;   // durable — survives a late-subscribing SetupCoordinator
         OnCalibCompleteNotified?.Invoke();
         Debug.Log("[MeshHandler] RPC_NotifyCalibComplete: dual-QR calibration complete.");
     }
@@ -280,7 +290,10 @@ public class MeshHandler : MonoBehaviourPun
     public void RebroadcastCalibration()
     {
         if (!PhotonNetwork.InRoom || meshObject == null) return;
-        if (IsDualQRMode && _dualCalibState != DualQRCalibState.Complete) return;  // not calibrated yet
+        // Nothing to rebroadcast until calibration has actually happened in the ACTIVE mode —
+        // otherwise single-QR mode would push the default scene pose + a false calib-complete.
+        if (IsDualQRMode  && _dualCalibState != DualQRCalibState.Complete) return;
+        if (!IsDualQRMode && !_qrCalibrated)                              return;
 
         SendMeshTransform();
         photonView.RPC(nameof(RPC_NotifyCalibComplete), RpcTarget.AllBuffered);

@@ -62,7 +62,12 @@ public class SetupCoordinator : MonoBehaviour
 
         if (_meshHandler != null && _meshHandler.IsDualQRMode)
         {
-            if (_meshHandler.CurrentDualCalibState == DualQRCalibState.Complete)
+            // Seed from a durable flag too: if the Expert joined AFTER the Worker calibrated, the
+            // buffered RPC_NotifyCalibComplete is flushed before we subscribe below, so the event
+            // alone would be missed and the approve gate would deadlock. (CurrentDualCalibState is
+            // never Complete on the Expert — it doesn't run the dual-QR state machine.)
+            if (_meshHandler.CurrentDualCalibState == DualQRCalibState.Complete
+                || _meshHandler.CalibCompleteReceived)
                 _calibDone = true;
             _meshHandler.OnCalibCompleteNotified += OnCalibComplete;
         }
