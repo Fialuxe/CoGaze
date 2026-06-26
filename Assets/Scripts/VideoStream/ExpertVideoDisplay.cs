@@ -81,7 +81,11 @@ public class ExpertVideoDisplay : MonoBehaviour
     private void OnStateChanged(ExperimentState state)
     {
         bool show =
-            (state == ExperimentState.TaskRunning   && expManager.CurrentStepType == StepType.Assembly)
+            // During Setup, show the Worker's HMD camera so the operator can watch calibration /
+            // QR placement progress. The Setup panel (sortingOrder 20) renders above this video
+            // canvas (5), so the calib/QR status and approve button stay visible on top.
+            state == ExperimentState.Setup
+         || (state == ExperimentState.TaskRunning   && expManager.CurrentStepType == StepType.Assembly)
          || (state == ExperimentState.Questionnaire && expManager.CurrentStepType == StepType.Alignment);
         if (canvas != null) canvas.gameObject.SetActive(show);
     }
