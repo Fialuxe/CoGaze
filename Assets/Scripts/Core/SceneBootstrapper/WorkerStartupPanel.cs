@@ -14,9 +14,10 @@ public class WorkerStartupPanel : MonoBehaviour
     /// <summary>Set true once the participant confirms (A button) and no Fatal check blocks it.</summary>
     public bool Confirmed { get; private set; }
 
-    private Font _font;
-    private Text _hintText;
-    private bool _hasFatal;
+    private Font       _font;
+    private Text       _hintText;
+    private bool       _hasFatal;
+    private GameObject _panelGo;   // canvas root (parented to centerEyeAnchor, NOT to this object)
 
     public void Initialize(StartupConfig config)
     {
@@ -44,6 +45,7 @@ public class WorkerStartupPanel : MonoBehaviour
         }
 
         var go = new GameObject("WorkerStartupPanel_Canvas");
+        _panelGo = go;
         go.transform.SetParent(anchor, false);
         go.transform.localPosition = new Vector3(0f, 0.05f, 1.0f);
         go.transform.localRotation = Quaternion.identity;
@@ -117,9 +119,17 @@ public class WorkerStartupPanel : MonoBehaviour
             StartCoroutine(StopVibration(0.2f));
 #endif
             if (_hintText != null) { _hintText.text = "開始します…"; _hintText.color = Color.white; }
-            var canvas = GetComponentInChildren<Canvas>();
-            if (canvas != null) Destroy(canvas.gameObject, 0.4f);
+            // The canvas lives under centerEyeAnchor (a different hierarchy), so destroy the stored
+            // root explicitly — GetComponentInChildren on this object would never find it.
+            if (_panelGo != null) Destroy(_panelGo, 0.4f);
         }
+    }
+
+    // Safety net: if the component is destroyed (e.g. SceneBootstrapper2 cleans it up) the canvas
+    // is in a separate hierarchy and would otherwise linger.
+    private void OnDestroy()
+    {
+        if (_panelGo != null) Destroy(_panelGo);
     }
 
 #if UNITY_ANDROID && !UNITY_EDITOR

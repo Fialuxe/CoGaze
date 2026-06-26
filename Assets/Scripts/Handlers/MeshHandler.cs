@@ -354,7 +354,12 @@ public class MeshHandler : MonoBehaviourPun
             SendMeshTransform();
             _dualCalibState = DualQRCalibState.Complete;  // guard must be set before ResyncAllMarkers
             OnDualQRCalibStep?.Invoke(DualQRCalibState.Complete);
-            photonView.RPC(nameof(RPC_NotifyCalibComplete), RpcTarget.All);
+            // AllBuffered (not All): the Expert may join AFTER the Worker calibrates (e.g. Editor
+            // started later, or reconnect). The mesh transform is already AllBuffered
+            // (RPC_ReceiveMeshTransform), so without buffering this notify the Expert would have a
+            // correctly-placed mesh but never flip _calibDone — the Setup UI/approve gate would show
+            // calibration as incomplete. Replaying is idempotent (just re-sets _calibDone).
+            photonView.RPC(nameof(RPC_NotifyCalibComplete), RpcTarget.AllBuffered);
             _qrManager?.StopPeriodicBroadcast();  // 較正完了 → ポーリング不要
             _qrManager?.ResyncAllMarkers();  // 較正前に検出済みのQRを新フレームで再送
             Debug.Log($"[MeshHandler] Dual-QR complete: pos={newPos} yaw={newRot.eulerAngles.y:F1}°");
