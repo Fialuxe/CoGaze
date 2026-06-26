@@ -57,6 +57,8 @@ public class SceneBootstrapper2 : MonoBehaviourPunCallbacks, IOnEventCallback
     private VoiceRecorder      _voiceRecorder;
     private bool               _offerTriggered;
     private bool               _expertAudioAttached;
+    private SetupCoordinator   _workerSetupCoord;          // Worker side — routes Expert setup-readiness to its panel
+    private bool?              _publishedExpertSetupReady;  // Expert side — last published "expertSetupReady" (idempotency)
 
     // ── Awake ─────────────────────────────────────────────────────────────
 
@@ -374,6 +376,7 @@ public class SceneBootstrapper2 : MonoBehaviourPunCallbacks, IOnEventCallback
         // SetupCoordinator — drives setup progress UI and tracks calib + task QR conditions
         var setupCoord = playerObj.AddComponent<SetupCoordinator>();
         setupCoord.Initialize(isWorker: true, expMgr, requiredTaskQRCount);
+        _workerSetupCoord = setupCoord;   // so OnPlayerPropertiesUpdate can forward Expert setup-readiness
 
         // Photon Voice 2 — Recorder must be on the prefab; we configure it here
         var recorder = playerObj.GetComponentInChildren<Recorder>();
@@ -476,6 +479,12 @@ public class SceneBootstrapper2 : MonoBehaviourPunCallbacks, IOnEventCallback
     private static bool IsExpertReady(Player player) =>
         player.CustomProperties.TryGetValue("expertReady", out var v) && v is bool b && b;
 
+    private static bool GetExpertSetupReady(Player player) =>
+        player.CustomProperties.TryGetValue("expertSetupReady", out var v) && v is bool b && b;
+
+    // Worker side: forward the Expert's granular setup-readiness to the Worker's setup panel.
+    private void ApplyExpertSetupReady(bool ready) => _workerSetupCoord?.SetExpertSetupReady(ready);
+
     private void TriggerOfferOnce()
     {
         if (_offerTriggered) return;
@@ -492,6 +501,8 @@ public class SceneBootstrapper2 : MonoBehaviourPunCallbacks, IOnEventCallback
             if (RoleManager.GetPlayerRole(player) != RoleManager.ROLE_EXPERT) continue;
             if (!_expertAudioAttached) { _expertAudioAttached = true; StartSpeakerSearch(false); }
             if (IsExpertReady(player)) TriggerOfferOnce();
+            // Seed the Expert's setup-readiness in case it was published before the Worker joined.
+            ApplyExpertSetupReady(GetExpertSetupReady(player));
             return;
         }
     }
@@ -507,6 +518,33 @@ public class SceneBootstrapper2 : MonoBehaviourPunCallbacks, IOnEventCallback
             FileLogger.Log("Setup", "[SceneBootstrapper2] Expert signaled ready — triggering offer.");
             if (!_expertAudioAttached) { _expertAudioAttached = true; StartSpeakerSearch(false); }
             TriggerOfferOnce();
+        }
+        // Mirror the Expert's granular setup-readiness onto the Worker's setup panel.
+        if (changedProps.TryGetValue("expertSetupReady", out var sr) && sr is bool srb)
+            ApplyExpertSetupReady(srb);
+    }
+
+    /// <summary>
+    /// Expert side: publish ExperimentManager2.IsExpertSelfReady to the Worker as the Photon player
+    /// property "expertSetupReady" (Worker shows 実験者 準備中/準備完了). That flag flips asynchronously
+    /// after SetupExpert (instruction template load + first OSC pong) and there is no event for it in
+    /// this class, so poll it. Idempotent — only SetCustomProperties when the value actually changes.
+    /// The flag is monotonic (false→true once), so stop polling once true has been published.
+    /// </summary>
+    private IEnumerator PublishExpertSetupReadyLoop(ExperimentManager2 expMgr)
+    {
+        var wait = new WaitForSeconds(0.5f);
+        while (expMgr != null)
+        {
+            bool ready = expMgr.IsExpertSelfReady;
+            if (_publishedExpertSetupReady != ready)
+            {
+                _publishedExpertSetupReady = ready;
+                PhotonNetwork.LocalPlayer.SetCustomProperties(new Hashtable { ["expertSetupReady"] = ready });
+                FileLogger.Log("Setup", $"[SceneBootstrapper2] Published expertSetupReady={ready}.");
+            }
+            if (ready) yield break;   // monotonic — final value sent; stop polling
+            yield return wait;
         }
     }
 
@@ -594,6 +632,8 @@ public class SceneBootstrapper2 : MonoBehaviourPunCallbacks, IOnEventCallback
         {
             Debug.Log("[SceneBootstrapper2] Setting expertReady=true — Worker can now send WebRTC offer.");
             PhotonNetwork.LocalPlayer.SetCustomProperties(new Hashtable { ["expertReady"] = true });
+            // Publish granular self-readiness so the Worker's setup panel shows 実験者 準備中/準備完了.
+            StartCoroutine(PublishExpertSetupReadyLoop(expMgr));
         }
 
         // ExperimentLogger — writes trials.csv / frames.csv / replay JSON

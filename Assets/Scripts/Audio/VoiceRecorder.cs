@@ -14,7 +14,9 @@ using Photon.Voice.Unity;
 public class VoiceRecorder : MonoBehaviour
 {
     private const int SAMPLE_RATE         = 16000;
-    private const int RECORDING_CAPACITY  = SAMPLE_RATE * 60 * 30;
+    // Initial buffer reservation per session. Audio is flushed + cleared at each condition boundary
+    // (see SaveSession), so a single session never approaches the old 30-minute whole-run size.
+    private const int RECORDING_CAPACITY  = SAMPLE_RATE * 60 * 10;
 
     private string saveDir;
     private string micDevice;
@@ -28,8 +30,14 @@ public class VoiceRecorder : MonoBehaviour
     private List<float>   remoteSamples = new List<float>(RECORDING_CAPACITY);
     internal readonly object remoteLock = new object();
 
-    public string LocalWavPath => string.IsNullOrEmpty(saveDir) ? null
-        : Path.Combine(saveDir, $"voice_local_{wavTimestamp}.wav");
+    private ExperimentManager2 _experiment;
+    private int                _sessionIndex;
+    private string             _lastLocalWavPath;
+
+    // Path of the most recently written per-session local WAV (falls back to the first session's
+    // name until anything is saved, so a consumer reading it early still gets a sensible path).
+    public string LocalWavPath => _lastLocalWavPath ?? (string.IsNullOrEmpty(saveDir) ? null
+        : Path.Combine(saveDir, $"voice_local_{wavTimestamp}_s01.wav"));
 
     public float RecordingSeconds => localSamples.Count / (float)SAMPLE_RATE;
 
@@ -39,6 +47,13 @@ public class VoiceRecorder : MonoBehaviour
         wavTimestamp = DateTime.Now.ToString("yyyyMMdd_HHmmss");
         StartMic(preferredDevice);
         StartCoroutine(CaptureLoop());
+
+        // Flush one WAV per condition (root-cause fix: previously the whole session was buffered in
+        // RAM and written only in OnDestroy, so any crash/force-quit lost all audio).
+        _experiment = FindAnyObjectByType<ExperimentManager2>();
+        if (_experiment != null) _experiment.OnStateChanged += OnExperimentStateChanged;
+        else Debug.LogWarning("[VoiceRecorder] ExperimentManager2 not found — per-session save disabled (will still save on destroy).");
+
         Debug.Log($"[VoiceRecorder] Ready  mic={micDevice ?? "(default)"}  dir={saveDir}");
     }
 
@@ -91,17 +106,43 @@ public class VoiceRecorder : MonoBehaviour
         }
     }
 
-    public void SaveRecordings()
+    /// <summary>
+    /// Save the audio buffered since the last call to a numbered per-session WAV pair, then clear the
+    /// buffers. Called at each condition boundary (Questionnaire) and on Finished/destroy, so a crash
+    /// or force-quit loses at most the current session, and RAM does not grow across a long run.
+    /// </summary>
+    public void SaveSession()
     {
         if (string.IsNullOrEmpty(saveDir)) return;
+
+        // Snapshot + clear. localSamples is touched only on the main thread (CaptureLoop coroutine +
+        // this call); remoteSamples is also written from the audio thread — so lock only that one.
+        var localSnap = new List<float>(localSamples);
+        localSamples.Clear();
+        List<float> remoteSnap;
+        lock (remoteLock) { remoteSnap = new List<float>(remoteSamples); remoteSamples.Clear(); }
+
+        if (localSnap.Count == 0 && remoteSnap.Count == 0) return; // nothing buffered this session
+
         try   { Directory.CreateDirectory(saveDir); }
         catch (Exception ex) { Debug.LogWarning($"[VoiceRecorder] Cannot create dir: {ex.Message}"); return; }
 
-        WriteWav(localSamples, Path.Combine(saveDir, $"voice_local_{wavTimestamp}.wav"));
+        _sessionIndex++;
+        string tag = $"{wavTimestamp}_s{_sessionIndex:D2}";
+        _lastLocalWavPath = Path.Combine(saveDir, $"voice_local_{tag}.wav");
+        WriteWav(localSnap,  _lastLocalWavPath);
+        WriteWav(remoteSnap, Path.Combine(saveDir, $"voice_remote_{tag}.wav"));
+    }
 
-        List<float> snap;
-        lock (remoteLock) snap = new List<float>(remoteSamples);
-        WriteWav(snap, Path.Combine(saveDir, $"voice_remote_{wavTimestamp}.wav"));
+    private void OnExperimentStateChanged(ExperimentState state)
+    {
+        // One WAV per condition. Flush at the per-condition NASA-TLX questionnaire (the only
+        // Questionnaire-state entry that is exactly one-per-condition — ConditionStart, Alignment and
+        // Rest also transition to the Questionnaire state), and at Finished (end of run / SSQ).
+        bool perConditionQuestionnaire = state == ExperimentState.Questionnaire
+            && _experiment != null && _experiment.CurrentStepType == StepType.Questionnaire;
+        if (perConditionQuestionnaire || state == ExperimentState.Finished)
+            SaveSession();
     }
 
     private static void WriteWav(List<float> samples, string path)
@@ -131,7 +172,8 @@ public class VoiceRecorder : MonoBehaviour
     private void OnDestroy()
     {
         isCapturing = false;
+        if (_experiment != null) _experiment.OnStateChanged -= OnExperimentStateChanged;
         try { if (micClip != null) Microphone.End(micDevice); } catch { }
-        try { SaveRecordings(); } catch { }
+        try { SaveSession(); } catch { }   // persist whatever remains in the final, unflushed session
     }
 }

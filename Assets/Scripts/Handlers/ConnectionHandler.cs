@@ -35,11 +35,16 @@ public class ConnectionHandler : MonoBehaviour
 
     private void Start()
     {
-        // Lock gaze mode keys during a running task
+        // Lock the manual gaze-mode keys (1/2/3) for the WHOLE experiment run. They are an Idle/Setup
+        // debug affordance only — during the run the gaze mode is authoritative from the condition
+        // table, so a stray 1/2/3 in a ConditionStart / interval / questionnaire gate would silently
+        // overwrite the next condition's gaze format (a hard-to-notice contamination). Unlock only in
+        // Idle/Setup (was: unlocked everywhere except TaskRunning).
         _expMgr = FindAnyObjectByType<ExperimentManager2>();
         if (_expMgr != null)
         {
-            _onStateChanged = state => LockGazeModeKeys = state == ExperimentState.TaskRunning;
+            _onStateChanged = state => LockGazeModeKeys =
+                state != ExperimentState.Idle && state != ExperimentState.Setup;
             _expMgr.OnStateChanged += _onStateChanged;
         }
 

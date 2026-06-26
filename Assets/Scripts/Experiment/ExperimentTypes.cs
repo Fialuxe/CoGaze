@@ -12,6 +12,7 @@ public enum StepType : byte
     Alignment      = 4,  // position-alignment gate — video feed ON, no timer, Enter to advance
     ConditionStart = 5,  // auto-generated: switches gaze mode, then questionnaire gate
     Launch         = 6,  // launches Python script, auto-advances immediately
+    Rest           = 7,  // auto-inserted break between conditions — gate, Enter to resume
 }
 
 public enum ExperimentState : byte

@@ -45,7 +45,7 @@ public static partial class CoGazeStrings
 
     // ── Bottom bar hint ───────────────────────────────────────────────────
     public const string Expert2_BottomHint =
-        "[Tab] 左パネル切替  ／  [Del] スキップ  ／  [Enter] 確定";
+        "[Tab] 左パネル切替  ／  [Del]長押し スキップ  ／  [Enter] 確定";
 
     // ═══════════════════════════════════════════════════════════════════════
     //  WorkerHUD2
@@ -82,8 +82,11 @@ public static partial class CoGazeStrings
     public const string Worker_ConditionStartSuffix = " を開始します..";
 
     // ── QR identification task ────────────────────────────────────────────
-    public const string Worker_QRFound    = "QRコード確認済\nコントローラーをQRに近づけてグリップを押してください";
-    public const string Worker_QRSearching = "識別課題: QRマーカーを探して正面を向いてください";
+    // Answer = bring the controller near the target QR and pull the INDEX TRIGGER (was grip).
+    // Worker_QRFound is shown for the whole task now (IdentificationTask fires the "found" state at
+    // task start), so it must be self-contained; Worker_QRSearching is no longer shown at runtime.
+    public const string Worker_QRFound    = "識別課題: 対象のQRにコントローラーを近づけて\n人差し指トリガーを引いてください";
+    public const string Worker_QRSearching = "識別課題: 対象のQRを探してください";
 
     // ── Breathing guide ───────────────────────────────────────────────────
     public const string Worker_BreathIn            = "ゆっくり 吸って";
@@ -92,6 +95,14 @@ public static partial class CoGazeStrings
 
     // ── Alert marker ─────────────────────────────────────────────────────
     public const string Worker_AlertExclamation = "!";
+
+    // ── Rest break (auto-inserted every few conditions; operator resumes with Enter) ──────
+    public const string Rest_Worker = "休憩中です\n準備ができたら担当者にお知らせください";
+    public const string Rest_Expert = "休憩中 — 再開するには Enter を押してください";
+
+    // ── Expert setup readiness, shown on the Worker during Setup ──────────
+    public const string Worker_ExpertPreparing = "実験者: 準備中…";
+    public const string Worker_ExpertReady     = "実験者: 準備完了";
 
     // ═══════════════════════════════════════════════════════════════════════
     //  Calibration (Worker)

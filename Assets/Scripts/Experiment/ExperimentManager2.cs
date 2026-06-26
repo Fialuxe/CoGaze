@@ -207,14 +207,20 @@ public class ExperimentManager2 : MonoBehaviour, IOnEventCallback
 
     private float _lastEnterTime = -1f;
 
+    // Del is destructive (force-skip a trial / force-advance a frozen questionnaire); require a
+    // deliberate hold rather than a single tap so an accidental keypress can't destroy a trial.
+    private const float DelHoldSeconds = 0.8f;
+    private float       _delHeldSince  = -1f;
+    private bool        _delFired      = false;
+
     private void Update()
     {
         if (!IsExpert) return;
         var kb = Keyboard.current;
         if (kb == null) return;
 
-        bool enter = kb.enterKey.wasPressedThisFrame || kb.numpadEnterKey.wasPressedThisFrame;
-        bool del   = kb.deleteKey.wasPressedThisFrame;
+        bool enter   = kb.enterKey.wasPressedThisFrame || kb.numpadEnterKey.wasPressedThisFrame;
+        bool delHeld = kb.deleteKey.isPressed;
 
         // 500ms debounce prevents accidental double-advance from a single key bounce.
         if (enter && Time.time - _lastEnterTime > 0.5f)
@@ -252,17 +258,24 @@ public class ExperimentManager2 : MonoBehaviour, IOnEventCallback
             _oscSession.StartCalibration();
         }
 
-        if (del)
+        // Hold-to-confirm: fire once when Del has been held continuously for DelHoldSeconds.
+        if (delHeld)
         {
-            if (CurrentState == ExperimentState.TaskRunning || CurrentState == ExperimentState.WhiteNoise)
-                ForceSkip();
-            else if (CurrentState == ExperimentState.Questionnaire)
+            if (_delHeldSince < 0f) _delHeldSince = Time.time;
+            if (!_delFired && Time.time - _delHeldSince >= DelHoldSeconds)
             {
-                // Emergency: Worker is frozen on questionnaire — hide it and force advance.
-                questionnaireManager?.Hide();
-                AdvanceStep();
+                _delFired = true;
+                if (CurrentState == ExperimentState.TaskRunning || CurrentState == ExperimentState.WhiteNoise)
+                    ForceSkip();
+                else if (CurrentState == ExperimentState.Questionnaire)
+                {
+                    // Emergency: Worker is frozen on questionnaire — hide it and force advance.
+                    questionnaireManager?.Hide();
+                    AdvanceStep();
+                }
             }
         }
+        else { _delHeldSince = -1f; _delFired = false; }
     }
 
     // -----------------------------------------------------------------------
@@ -431,6 +444,13 @@ public class ExperimentManager2 : MonoBehaviour, IOnEventCallback
 
             case StepType.Alignment:
                 if (IsExpert) AlignToWorker();
+                Transition(ExperimentState.Questionnaire);
+                break;
+
+            case StepType.Rest:
+                // Reuse the Questionnaire gate state: no questionnaire UI is shown (that happens only
+                // for StepType.Questionnaire), the rest instruction is broadcast via Transition, and
+                // the Enter handler advances on Questionnaire state — so Enter resumes the experiment.
                 Transition(ExperimentState.Questionnaire);
                 break;
 
@@ -930,8 +950,22 @@ public class ExperimentManager2 : MonoBehaviour, IOnEventCallback
             return;
         }
 
+        const int restEveryNConditions = 3; // insert a break every 3 conditions (≈ every 3-4 sessions)
+
         for (int c = 0; c < total; c++)
         {
+            // Operator-gated rest break BETWEEN conditions (not before the first). Modeled on the
+            // Alignment gate: no timer, Enter resumes. Worker sees the rest instruction text.
+            if (c > 0 && c % restEveryNConditions == 0)
+            {
+                steps.Add(new ExperimentStep
+                {
+                    Type             = StepType.Rest,
+                    Instruction      = CoGazeStrings.Rest_Expert,
+                    LocalInstruction = CoGazeStrings.Rest_Worker,
+                });
+            }
+
             int condIdx = conditionOrder[c];
             var cond    = ExperimentDesign.Conditions[condIdx];
 

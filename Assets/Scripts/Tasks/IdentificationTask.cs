@@ -17,12 +17,12 @@ public class IdentificationTask : MonoBehaviourPun
     private bool IsWorker => RoleManager.LocalRole == RoleManager.ROLE_WORKER;
 
 #if UNITY_ANDROID && !UNITY_EDITOR
-    // Analog grip threshold — same value as MeshHandler to handle Touch Plus axis
-    // inconsistency on both MQ3 and MQ3S (identical Touch Plus controllers, but
-    // firmware versions differ and the raw axis value at "fully squeezed" varies).
-    private const float GripThreshold      = OVRInputThresholds.Grip;
+    // Analog index-trigger threshold. Reuses the shared grip threshold value because the
+    // same Touch Plus axis inconsistency (MQ3 vs MQ3S — identical controllers, differing
+    // firmware, differing raw value at "fully pressed") applies to the index trigger too.
+    private const float IndexThreshold     = OVRInputThresholds.Grip;
     private const float ProximityThreshold = 0.20f; // 20 cm
-    private bool         _gripWasDown      = false;
+    private bool         _triggerWasDown   = false;
     private OVRCameraRig _ovrRig;
 #endif
 
@@ -66,7 +66,7 @@ public class IdentificationTask : MonoBehaviourPun
         if (markerId.StartsWith("QR_CALIB")) return;
         _qrScanned = true;
         OnQRStateChanged?.Invoke(true);
-        Debug.Log($"[IdentificationTask] QR confirmed (id='{markerId}') — squeeze grip near it to complete.");
+        Debug.Log($"[IdentificationTask] QR confirmed (id='{markerId}') — pull the index trigger near it to complete.");
     }
 
     private void OnStateChanged(ExperimentState newState)
@@ -84,9 +84,15 @@ public class IdentificationTask : MonoBehaviourPun
         Debug.Log("[IdentificationTask] StartTask");
         _qrScanned = false;
         CompletedMarkerId = null;
-        OnQRStateChanged?.Invoke(false);
+        // Detection-based arming was removed: the periodic QR re-broadcast stops after
+        // dual-QR calibration, so marker-detected events may never re-fire during a trial.
+        // Markers found during Setup persist in QRSpatialManager.DetectedMarkers with stable
+        // SharedMesh-anchored positions, so the index trigger completes the task by proximity
+        // at trigger time. Show the "approach + pull trigger" hint immediately rather than
+        // waiting for a detection event that may never come.
+        OnQRStateChanged?.Invoke(true);
 #if UNITY_ANDROID && !UNITY_EDITOR
-        _gripWasDown = false;
+        _triggerWasDown = false;
 #endif
         SetTaskEnabled(true);
     }
@@ -101,15 +107,15 @@ public class IdentificationTask : MonoBehaviourPun
     private void Update()
     {
         if (!IsWorker) return;
-        if (!_qrScanned) return;
 
-        float grip        = OVRInput.Get(OVRInput.Axis1D.PrimaryHandTrigger, OVRInput.Controller.RTouch);
-        bool  gripDown    = grip > GripThreshold;
-        bool  justPressed = gripDown && !_gripWasDown;
-        _gripWasDown = gripDown;
+        float trigger     = OVRInput.Get(OVRInput.Axis1D.PrimaryIndexTrigger, OVRInput.Controller.RTouch);
+        bool  triggerDown = trigger > IndexThreshold;
+        bool  justPressed = triggerDown && !_triggerWasDown;
+        _triggerWasDown = triggerDown;
 
-        // While the left X button is held the right grip is calibrating the mesh (MeshHandler) —
-        // don't also complete the task with the same grip press.
+        // While the left X button is held the right grip is calibrating the mesh (MeshHandler).
+        // The answer action is now the index trigger so it no longer shares the grip, but keep
+        // this guard so an answer can't be registered during a hold-X calibration grab.
         if (OVRInput.Get(OVRInput.Button.One, OVRInput.Controller.LTouch)) return;
 
         if (!justPressed) return;
@@ -127,7 +133,7 @@ public class IdentificationTask : MonoBehaviourPun
             }
         }
 
-        Debug.Log($"[IdentificationTask] Grip pressed but no QR within {ProximityThreshold * 100:F0} cm.");
+        Debug.Log($"[IdentificationTask] Index trigger pulled but no QR within {ProximityThreshold * 100:F0} cm.");
     }
 
     private Vector3 GetRightControllerWorldPos()

@@ -35,9 +35,11 @@ public class SetupCoordinator : MonoBehaviour
 
     // ── Worker VR UI ───────────────────────────────────────────────────────
     private GameObject _workerPanel;
+    private Text       _workerExpertReadyLine;
     private Text       _workerCalibLine;
     private Text       _workerTaskLine;
     private Text       _workerHintLine;
+    private bool       _expertSetupReady = false;   // mirrors the Expert's IsExpertSelfReady (via Photon prop)
 
     // ── Expert UI ─────────────────────────────────────────────────────────
     private GameObject _expertPanel;
@@ -313,20 +315,51 @@ public class SetupCoordinator : MonoBehaviour
         art.offsetMin = Vector2.zero; art.offsetMax = new Vector2(4f, 0f);
 
         MakeText("Header", _workerPanel.transform,
-            new Vector2(0.04f, 0.80f), new Vector2(0.96f, 0.98f),
+            new Vector2(0.04f, 0.83f), new Vector2(0.96f, 0.99f),
             "セットアップ中", 22, TextAnchor.MiddleLeft, new Color(0.5f, 0.8f, 1f));
 
+        // Expert setup-readiness — fed from SceneBootstrapper2 via the "expertSetupReady" Photon prop.
+        _workerExpertReadyLine = MakeText("ExpertReadyLine", _workerPanel.transform,
+            new Vector2(0.04f, 0.67f), new Vector2(0.96f, 0.83f),
+            CoGazeStrings.Worker_ExpertPreparing, 18, TextAnchor.MiddleLeft, new Color(1f, 0.85f, 0.3f));
+
         _workerCalibLine = MakeText("CalibLine", _workerPanel.transform,
-            new Vector2(0.04f, 0.62f), new Vector2(0.96f, 0.80f),
+            new Vector2(0.04f, 0.51f), new Vector2(0.96f, 0.67f),
             "⬜ キャリブレーション", 20, TextAnchor.MiddleLeft, Color.white);
 
         _workerTaskLine = MakeText("TaskLine", _workerPanel.transform,
-            new Vector2(0.04f, 0.44f), new Vector2(0.96f, 0.62f),
+            new Vector2(0.04f, 0.35f), new Vector2(0.96f, 0.51f),
             "⬜ タスクマーカー  0 / ?", 20, TextAnchor.MiddleLeft, Color.white);
 
         _workerHintLine = MakeText("HintLine", _workerPanel.transform,
-            new Vector2(0.04f, 0.02f), new Vector2(0.96f, 0.44f),
+            new Vector2(0.04f, 0.02f), new Vector2(0.96f, 0.35f),
             "QR-A と QR-B を見てください", 17, TextAnchor.UpperLeft, new Color(1f, 0.85f, 0.3f));
+
+        RefreshExpertReadyLine();
+    }
+
+    // ── Expert setup-readiness (Worker display) ─────────────────────────────
+
+    /// <summary>
+    /// Worker side: receive the Expert's granular setup-readiness (routed from SceneBootstrapper2 via
+    /// the "expertSetupReady" Photon player property) and reflect it on the setup panel. The panel is
+    /// only visible during Setup, so this is implicitly Setup-scoped.
+    /// </summary>
+    public void SetExpertSetupReady(bool ready)
+    {
+        _expertSetupReady = ready;
+        RefreshExpertReadyLine();
+    }
+
+    private void RefreshExpertReadyLine()
+    {
+        if (_workerExpertReadyLine == null) return;
+        _workerExpertReadyLine.text  = _expertSetupReady
+            ? CoGazeStrings.Worker_ExpertReady
+            : CoGazeStrings.Worker_ExpertPreparing;
+        _workerExpertReadyLine.color = _expertSetupReady
+            ? new Color(0.3f, 1f, 0.5f)
+            : new Color(1f, 0.85f, 0.3f);
     }
 
     // ── Build Expert UI ────────────────────────────────────────────────────
