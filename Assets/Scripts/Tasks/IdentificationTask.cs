@@ -20,7 +20,7 @@ public class IdentificationTask : MonoBehaviourPun
     // Analog grip threshold — same value as MeshHandler to handle Touch Plus axis
     // inconsistency on both MQ3 and MQ3S (identical Touch Plus controllers, but
     // firmware versions differ and the raw axis value at "fully squeezed" varies).
-    private const float GripThreshold      = 0.7f;
+    private const float GripThreshold      = OVRInputThresholds.Grip;
     private const float ProximityThreshold = 0.20f; // 20 cm
     private bool         _gripWasDown      = false;
     private OVRCameraRig _ovrRig;

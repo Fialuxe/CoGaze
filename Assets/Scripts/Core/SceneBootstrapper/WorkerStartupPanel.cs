@@ -115,8 +115,7 @@ public class WorkerStartupPanel : MonoBehaviour
         {
             Confirmed = true;
 #if UNITY_ANDROID && !UNITY_EDITOR
-            OVRInput.SetControllerVibration(0.5f, 0.8f, OVRInput.Controller.RTouch);
-            StartCoroutine(StopVibration(0.2f));
+            OvrHaptics.Pulse(this, 0.5f, 0.8f, 0.2f, OVRInput.Controller.RTouch);
 #endif
             if (_hintText != null) { _hintText.text = "開始します…"; _hintText.color = Color.white; }
             // The canvas lives under centerEyeAnchor (a different hierarchy), so destroy the stored
@@ -131,14 +130,6 @@ public class WorkerStartupPanel : MonoBehaviour
     {
         if (_panelGo != null) Destroy(_panelGo);
     }
-
-#if UNITY_ANDROID && !UNITY_EDITOR
-    private System.Collections.IEnumerator StopVibration(float delay)
-    {
-        yield return new WaitForSeconds(delay);
-        OVRInput.SetControllerVibration(0f, 0f, OVRInput.Controller.RTouch);
-    }
-#endif
 
     private Text MakeText(string name, Transform parent, Vector2 anchorMin, Vector2 anchorMax,
                           string text, int fontSize, TextAnchor alignment, Color color)

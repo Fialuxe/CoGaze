@@ -133,120 +133,6 @@ public class SceneBootstrapper2 : MonoBehaviourPunCallbacks, IOnEventCallback
         }
     }
 
-    // ── ShowStartupPanel ───────────────────────────────────────────────────
-
-    private void ShowStartupPanel(StartupConfig config, System.Action onConfirm)
-    {
-        // Create Screen Space Overlay Canvas
-        var canvasObj = new GameObject("StartupConfigCanvas");
-        var canvas = canvasObj.AddComponent<Canvas>();
-        canvas.renderMode = RenderMode.ScreenSpaceOverlay;
-        canvas.sortingOrder = 100;
-        canvasObj.AddComponent<CanvasScaler>();
-        canvasObj.AddComponent<GraphicRaycaster>();
-
-        // Background panel
-        var bgObj = new GameObject("Background");
-        bgObj.transform.SetParent(canvasObj.transform, false);
-        var bgImage = bgObj.AddComponent<Image>();
-        bgImage.color = new Color(0f, 0f, 0f, 0.75f);
-        var bgRect = bgObj.GetComponent<RectTransform>();
-        bgRect.anchorMin = Vector2.zero;
-        bgRect.anchorMax = Vector2.one;
-        bgRect.offsetMin = Vector2.zero;
-        bgRect.offsetMax = Vector2.zero;
-
-        // Centered panel
-        var panelObj = new GameObject("Panel");
-        panelObj.transform.SetParent(canvasObj.transform, false);
-        var panelImage = panelObj.AddComponent<Image>();
-        panelImage.color = new Color(0.15f, 0.15f, 0.15f, 0.95f);
-        var panelRect = panelObj.GetComponent<RectTransform>();
-        panelRect.anchorMin = new Vector2(0.5f, 0.5f);
-        panelRect.anchorMax = new Vector2(0.5f, 0.5f);
-        panelRect.pivot = new Vector2(0.5f, 0.5f);
-        panelRect.sizeDelta = new Vector2(800f, 400f);
-        panelRect.anchoredPosition = Vector2.zero;
-
-        // Title text
-        var titleObj = new GameObject("Title");
-        titleObj.transform.SetParent(panelObj.transform, false);
-        var titleText = titleObj.AddComponent<Text>();
-        titleText.text = CoGazeStrings.Boot_Title;
-        titleText.font = Resources.GetBuiltinResource<Font>("LegacyRuntime.ttf");
-        titleText.fontSize = 28;
-        titleText.fontStyle = FontStyle.Bold;
-        titleText.alignment = TextAnchor.MiddleCenter;
-        titleText.color = Color.white;
-        var titleRect = titleObj.GetComponent<RectTransform>();
-        titleRect.anchorMin = new Vector2(0f, 1f);
-        titleRect.anchorMax = new Vector2(1f, 1f);
-        titleRect.pivot = new Vector2(0.5f, 1f);
-        titleRect.offsetMin = new Vector2(0f, -60f);
-        titleRect.offsetMax = new Vector2(0f, 0f);
-
-        // ParticipantConfigUI sub-panel
-        var participantPanelObj = new GameObject("ParticipantConfigPanel");
-        participantPanelObj.transform.SetParent(panelObj.transform, false);
-        participantPanelObj.AddComponent<Image>().color = Color.clear;
-        var participantRect = participantPanelObj.GetComponent<RectTransform>();
-        participantRect.anchorMin = new Vector2(0f, 0.5f);
-        participantRect.anchorMax = new Vector2(0.5f, 1f);
-        participantRect.offsetMin = new Vector2(10f, -180f);
-        participantRect.offsetMax = new Vector2(-5f, -60f);
-        var participantUI = participantPanelObj.AddComponent<ParticipantConfigUI>();
-        participantUI.Initialize(config);
-
-        // ConnectionConfigUI sub-panel
-        var connectionPanelObj = new GameObject("ConnectionConfigPanel");
-        connectionPanelObj.transform.SetParent(panelObj.transform, false);
-        connectionPanelObj.AddComponent<Image>().color = Color.clear;
-        var connectionRect = connectionPanelObj.GetComponent<RectTransform>();
-        connectionRect.anchorMin = new Vector2(0.5f, 0.5f);
-        connectionRect.anchorMax = new Vector2(1f, 1f);
-        connectionRect.offsetMin = new Vector2(5f, -180f);
-        connectionRect.offsetMax = new Vector2(-10f, -60f);
-        var connectionUI = connectionPanelObj.AddComponent<ConnectionConfigUI>();
-        connectionUI.Initialize(config);
-
-        // Start button
-        var buttonObj = new GameObject("StartButton");
-        buttonObj.transform.SetParent(panelObj.transform, false);
-        var button = buttonObj.AddComponent<Button>();
-        var buttonImage = buttonObj.AddComponent<Image>();
-        buttonImage.color = new Color(0.2f, 0.6f, 1f, 1f);
-        button.targetGraphic = buttonImage;
-        var buttonRect = buttonObj.GetComponent<RectTransform>();
-        buttonRect.anchorMin = new Vector2(0.5f, 0f);
-        buttonRect.anchorMax = new Vector2(0.5f, 0f);
-        buttonRect.pivot = new Vector2(0.5f, 0f);
-        buttonRect.sizeDelta = new Vector2(200f, 50f);
-        buttonRect.anchoredPosition = new Vector2(0f, 20f);
-
-        var buttonTextObj = new GameObject("Text");
-        buttonTextObj.transform.SetParent(buttonObj.transform, false);
-        var buttonText = buttonTextObj.AddComponent<Text>();
-        buttonText.text = CoGazeStrings.Boot_Start;
-        buttonText.font = Resources.GetBuiltinResource<Font>("LegacyRuntime.ttf");
-        buttonText.fontSize = 22;
-        buttonText.fontStyle = FontStyle.Bold;
-        buttonText.alignment = TextAnchor.MiddleCenter;
-        buttonText.color = Color.white;
-        var buttonTextRect = buttonTextObj.GetComponent<RectTransform>();
-        buttonTextRect.anchorMin = Vector2.zero;
-        buttonTextRect.anchorMax = Vector2.one;
-        buttonTextRect.offsetMin = Vector2.zero;
-        buttonTextRect.offsetMax = Vector2.zero;
-
-        button.onClick.AddListener(() =>
-        {
-            participantUI.Apply(config);
-            connectionUI.Apply(config);
-            Destroy(canvasObj);
-            onConfirm();
-        });
-    }
-
     // ── OnRoomJoined ──────────────────────────────────────────────────────
 
     private void OnRoomJoined()
@@ -604,7 +490,7 @@ public class SceneBootstrapper2 : MonoBehaviourPunCallbacks, IOnEventCallback
         foreach (var player in PhotonNetwork.PlayerListOthers)
         {
             if (RoleManager.GetPlayerRole(player) != RoleManager.ROLE_EXPERT) continue;
-            if (!_expertAudioAttached) { _expertAudioAttached = true; StartCoroutine(WaitForRemoteSpeaker(false)); }
+            if (!_expertAudioAttached) { _expertAudioAttached = true; StartSpeakerSearch(false); }
             if (IsExpertReady(player)) TriggerOfferOnce();
             return;
         }
@@ -619,7 +505,7 @@ public class SceneBootstrapper2 : MonoBehaviourPunCallbacks, IOnEventCallback
         {
             Debug.Log("[SceneBootstrapper2] Expert signaled ready — triggering WebRTC offer.");
             FileLogger.Log("Setup", "[SceneBootstrapper2] Expert signaled ready — triggering offer.");
-            if (!_expertAudioAttached) { _expertAudioAttached = true; StartCoroutine(WaitForRemoteSpeaker(false)); }
+            if (!_expertAudioAttached) { _expertAudioAttached = true; StartSpeakerSearch(false); }
             TriggerOfferOnce();
         }
     }
@@ -680,7 +566,7 @@ public class SceneBootstrapper2 : MonoBehaviourPunCallbacks, IOnEventCallback
         string logDir = System.IO.Path.Combine(Application.persistentDataPath, "logs", participantId);
         _voiceRecorder = playerObj.AddComponent<VoiceRecorder>();
         _voiceRecorder.Initialize(true, logDir, micDevice);
-        StartCoroutine(WaitForRemoteSpeaker(true));
+        StartSpeakerSearch(true);
 
         // GazeVisualizer (self-view)
         new GameObject("LocalGazeVisualizer").AddComponent<GazeVisualizer>().Initialize();
@@ -753,18 +639,25 @@ public class SceneBootstrapper2 : MonoBehaviourPunCallbacks, IOnEventCallback
         if (_role == RoleManager.ROLE_EXPERT
             && RoleManager.GetPlayerRole(newPlayer) == RoleManager.ROLE_WORKER)
         {
-            StartCoroutine(WaitForRemoteSpeaker(true));
+            StartSpeakerSearch(true);
         }
     }
 
     private Coroutine _speakerSearchCoroutine;
 
-    private IEnumerator WaitForRemoteSpeaker(bool isExpert)
+    // Single owner of _speakerSearchCoroutine: cancel any in-flight search before starting a new
+    // one. The previous code called StartCoroutine(WaitForRemoteSpeaker(...)) directly without
+    // storing the returned handle, so the cancel-guard never fired — reconnects could spawn
+    // several overlapping searches that each re-tuned the remote Speaker's volume/spatialBlend.
+    private void StartSpeakerSearch(bool isExpert)
     {
         if (_speakerSearchCoroutine != null)
             StopCoroutine(_speakerSearchCoroutine);
-        _speakerSearchCoroutine = null;
+        _speakerSearchCoroutine = StartCoroutine(WaitForRemoteSpeaker(isExpert));
+    }
 
+    private IEnumerator WaitForRemoteSpeaker(bool isExpert)
+    {
         // Bounded wait: a remote PhotonVoiceView Speaker normally appears within a few seconds
         // of both peers joining. Without a timeout this coroutine would spin forever (and leak)
         // if the remote never publishes a Speaker — masking the real failure instead of surfacing it.
@@ -785,14 +678,12 @@ public class SceneBootstrapper2 : MonoBehaviourPunCallbacks, IOnEventCallback
                                         src.minDistance = 1f; src.maxDistance = 20f; }
                     }
                     _voiceRecorder?.AttachRemoteCapture(pvv.SpeakerInUse);
-                    _speakerSearchCoroutine = null;
                     yield break;
                 }
             }
             yield return new WaitForSeconds(0.5f);
             elapsed += 0.5f;
         }
-        _speakerSearchCoroutine = null;
         Debug.LogWarning($"[SceneBootstrapper2] Remote Speaker not found within {timeout:F0}s — remote audio capture not started. Check that the remote peer's PunVoiceClient/Recorder is transmitting.");
         FileLogger.Log("Setup", "[SceneBootstrapper2] WaitForRemoteSpeaker timed out.");
     }

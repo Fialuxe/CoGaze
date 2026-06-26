@@ -148,7 +148,7 @@ public class MeshHandler : MonoBehaviourPun
 
 #if UNITY_ANDROID
     // Analog axis threshold — handles Touch Plus axis inconsistency on MQ3 / MQ3S.
-    private const float TriggerThreshold = 0.7f;
+    private const float TriggerThreshold = OVRInputThresholds.Grip;
     private const float StickDeadzone    = 0.15f;
 
     // Grip rising-edge state for toggle detection

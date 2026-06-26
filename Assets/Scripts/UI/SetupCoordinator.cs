@@ -28,7 +28,7 @@ public class SetupCoordinator : MonoBehaviour
     private readonly HashSet<string> _detectedTaskIds  = new();
 
 #if UNITY_ANDROID && !UNITY_EDITOR
-    private const float GripThreshold = 0.7f;
+    private const float GripThreshold = OVRInputThresholds.Grip;
     private bool         _gripWasDown = false;
     private OVRCameraRig _ovrRig;
 #endif
@@ -185,8 +185,7 @@ public class SetupCoordinator : MonoBehaviour
         Quaternion rot = _ovrRig != null ? _ovrRig.rightHandAnchor.rotation : Quaternion.identity;
         _qrManager.RegisterManualMarker(nextMissing, pos, rot);
 
-        OVRInput.SetControllerVibration(0.5f, 0.8f, OVRInput.Controller.RTouch);
-        StartCoroutine(StopVibration(0.2f));
+        OvrHaptics.Pulse(this, 0.5f, 0.8f, 0.2f, OVRInput.Controller.RTouch);
 #endif
     }
 
@@ -196,12 +195,6 @@ public class SetupCoordinator : MonoBehaviour
         if (_ovrRig == null) _ovrRig = Object.FindAnyObjectByType<OVRCameraRig>();
         if (_ovrRig != null) return _ovrRig.rightHandAnchor.position;
         return OVRInput.GetLocalControllerPosition(OVRInput.Controller.RTouch);
-    }
-
-    private IEnumerator StopVibration(float delay)
-    {
-        yield return new WaitForSeconds(delay);
-        OVRInput.SetControllerVibration(0f, 0f, OVRInput.Controller.RTouch);
     }
 #endif
 

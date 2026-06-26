@@ -176,20 +176,12 @@ public class WorkerHUD2 : MonoBehaviour
     public void OnCalibrationConfirmed()
     {
 #if UNITY_ANDROID && !UNITY_EDITOR
-        OVRInput.SetControllerVibration(0.5f, 0.8f, OVRInput.Controller.RTouch);
-        StartCoroutine(StopVibration(0.2f));
+        OvrHaptics.Pulse(this, 0.5f, 0.8f, 0.2f, OVRInput.Controller.RTouch);
 #endif
         if (_calibText != null)
             StartCoroutine(FlashConfirm());
     }
 
-#if UNITY_ANDROID && !UNITY_EDITOR
-    private System.Collections.IEnumerator StopVibration(float delay)
-    {
-        yield return new WaitForSeconds(delay);
-        OVRInput.SetControllerVibration(0f, 0f, OVRInput.Controller.RTouch);
-    }
-#endif
 
     private System.Collections.IEnumerator FlashConfirm()
     {

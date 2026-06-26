@@ -142,9 +142,7 @@ public class QuestionnairePokeInput : MonoBehaviour
 
 #if UNITY_ANDROID && !UNITY_EDITOR
         // Strong haptic pulse on the controllers (hands can't vibrate).
-        OVRInput.SetControllerVibration(0.6f, 0.9f, OVRInput.Controller.RTouch);
-        OVRInput.SetControllerVibration(0.6f, 0.9f, OVRInput.Controller.LTouch);
-        StartCoroutine(StopVibration());
+        OvrHaptics.Pulse(this, 0.6f, 0.9f, 0.08f, OVRInput.Controller.RTouch, OVRInput.Controller.LTouch);
 #endif
     }
 
@@ -157,12 +155,4 @@ public class QuestionnairePokeInput : MonoBehaviour
         if (img != null) img.color = restore;
     }
 
-#if UNITY_ANDROID && !UNITY_EDITOR
-    private IEnumerator StopVibration()
-    {
-        yield return new WaitForSeconds(0.08f);
-        OVRInput.SetControllerVibration(0f, 0f, OVRInput.Controller.RTouch);
-        OVRInput.SetControllerVibration(0f, 0f, OVRInput.Controller.LTouch);
-    }
-#endif
 }
