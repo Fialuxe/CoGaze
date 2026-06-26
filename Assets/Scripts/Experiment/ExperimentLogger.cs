@@ -13,7 +13,7 @@ using Newtonsoft.Json;
 /// Runs on the Expert PC. Records trial metadata to trials.csv, per-frame gaze+head data
 /// to frames.csv, and a per-trial replay JSON file. Also receives Worker hand bone data
 /// via Photon event 44 and embeds it in the replay JSON.
-/// Added via AddComponent in RemoteExpertSetup.Initialize().
+/// Added via AddComponent in SceneBootstrapper2.
 ///
 /// CSV schema (trials.csv):
 ///   trial_id, participant, condition_index, gaze_mode, noise_level,

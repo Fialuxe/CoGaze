@@ -5,7 +5,7 @@ using System;
 
 /// <summary>
 /// Singleton that manages Photon connection and room joining.
-/// Created by SceneBootstrapper in Awake() with DontDestroyOnLoad.
+/// Created by SceneBootstrapper2 in Awake() with DontDestroyOnLoad.
 /// </summary>
 public class NetworkManager : MonoBehaviourPunCallbacks
 {

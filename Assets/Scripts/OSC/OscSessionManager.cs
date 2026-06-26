@@ -24,7 +24,7 @@ using extOSC;
 ///       → StartCalibration → wait for OnCalibrationResult
 ///       → StartTrial.
 ///   Role check is the caller's responsibility; this component is always present
-///   but ExperimentManager should only call its public API on the Expert (PC) side.
+///   but ExperimentManager2 should only call its public API on the Expert (PC) side.
 /// </summary>
 public class OscSessionManager : MonoBehaviour
 {
@@ -183,7 +183,7 @@ public class OscSessionManager : MonoBehaviour
         FileLogger.Log("OSC", $"SEND: {pythonHost}:{sendPort} | RECV: port {sharedReceiver.LocalPort} | Binds: {ADDR_ACK}, {ADDR_CALIB_RESULT}, {ADDR_FACE_METRICS}, {ADDR_PONG}");
     }
 
-    // ── Public API (called by ExperimentManager on the Expert side) ───────────
+    // ── Public API (called by ExperimentManager2 on the Expert side) ───────────
 
     /// <summary>
     /// Tell Python to start a session.

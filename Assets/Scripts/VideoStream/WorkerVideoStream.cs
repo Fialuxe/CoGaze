@@ -58,9 +58,9 @@ public class WorkerVideoStream : MonoBehaviour
     }
 
     /// <summary>
-    /// Called by LocalWorkerSetup once the Expert is in the room.
+    /// Called by SceneBootstrapper2 once the Expert is in the room.
     /// Starts the WebRTC handshake. Signaling callbacks must already be wired
-    /// before this is called (done in LocalWorkerSetup).
+    /// before this is called (done in SceneBootstrapper2).
     /// </summary>
     public void TriggerOffer()
     {

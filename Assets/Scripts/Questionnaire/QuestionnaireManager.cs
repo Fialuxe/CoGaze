@@ -20,7 +20,7 @@ using Photon.Pun;
 ///   is created/reused so the buttons receive controller-laser pointer events on
 ///   Quest. Direct-touch (poke) input is also set up. No scene wiring is required.
 ///
-/// Usage (called by SceneBootstrapper / LocalWorkerSetup):
+/// Usage (called by SceneBootstrapper2):
 ///   questionnaireManager.participantNumber = participantNumber;
 ///   questionnaireManager.ShowNASATLX(conditionIndex, conditionName);
 ///   questionnaireManager.ShowSSQ();
@@ -721,7 +721,7 @@ public class QuestionnaireManager : MonoBehaviourPun
 
     /// <summary>
     /// Called on ALL clients (RpcTarget.All) when the Worker submits a round.
-    /// ExperimentManager subscribes to OnQuestionnaireComplete to advance.
+    /// ExperimentManager2 subscribes to OnQuestionnaireComplete to advance.
     /// </summary>
     [PunRPC]
     private void RPC_QuestionnaireComplete()

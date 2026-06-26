@@ -171,7 +171,7 @@ public class WorkerHUD2 : MonoBehaviour
 
     /// <summary>
     /// UX improvement 2: haptic pulse + flash "送信完了" on confirm.
-    /// Call from LocalWorkerSetup after ConnectMeshHandler.
+    /// Call from SceneBootstrapper2 after ConnectMeshHandler.
     /// </summary>
     public void OnCalibrationConfirmed()
     {

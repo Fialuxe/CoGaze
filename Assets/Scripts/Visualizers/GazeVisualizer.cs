@@ -6,7 +6,7 @@ using Photon.Pun;
 /// SetMode()で指定された方式（Ray / Circle / Frustum）で表示するメインコントローラー。
 /// Start()でRay/Circle/FrustumVisualizerをAddComponentする。
 ///
-/// FOV は ExperimentManager の状態に応じて切り替える:
+/// FOV は ExperimentManager2 の状態に応じて切り替える:
 ///   - Identification タスク: Expert の PC カメラ FOV (60°)
 ///   - Assembly タスク: PCA カメラの FOV (streamingFov)
 /// </summary>
@@ -84,7 +84,7 @@ public class GazeVisualizer : MonoBehaviour
 
     /// <summary>
     /// ストリーミング中の PCA カメラパラメータを設定する。
-    /// Assembly 開始時に ExperimentManager から呼ばれる。
+    /// Assembly 開始時に ExperimentManager2 から呼ばれる。
     /// </summary>
     public void SetStreamingCameraParams(float fov, float aspect)
     {

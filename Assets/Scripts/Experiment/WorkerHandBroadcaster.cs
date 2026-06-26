@@ -9,7 +9,7 @@ using ExitGames.Client.Photon;
 /// Runs on the Worker (Meta Quest 3). Finds OVRSkeleton components automatically,
 /// then broadcasts hand bone world positions to the Expert via Photon event 44
 /// at ~30 fps — but only during Task steps (not Assembly).
-/// Added via AddComponent in LocalWorkerSetup.Initialize().
+/// Added via AddComponent in SceneBootstrapper2.
 /// </summary>
 public class WorkerHandBroadcaster : MonoBehaviour
 {
