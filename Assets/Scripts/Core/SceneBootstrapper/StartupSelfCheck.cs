@@ -1,0 +1,102 @@
+using System.Collections.Generic;
+using System.IO;
+using System.Text;
+using UnityEngine;
+
+/// <summary>
+/// Startup pre-flight checks surfaced on the startup screens (Desktop IMGUI + HMD VR panel)
+/// instead of the Editor console — so a standalone build / headset shows missing instructions,
+/// a duplicate participant log, a missing SharedMesh, etc. before the experiment begins.
+///
+/// Severity: Fatal = block Start/confirm; Warning = allow but flag; Info = neutral status.
+/// Shared by StartupUI (Expert) and WorkerStartupPanel (Worker) so the rules live in one place.
+/// </summary>
+public static class StartupSelfCheck
+{
+    public enum Severity { Fatal, Warning, Info }
+
+    public struct Issue
+    {
+        public Severity Severity;
+        public string   Message;
+        public Issue(Severity s, string m) { Severity = s; Message = m; }
+    }
+
+    /// <param name="includeInstructions">
+    /// Desktop checks the instructions file directly; on Android (Quest) StreamingAssets lives
+    /// inside the APK and isn't a readable File path, so the Worker skips it (the Expert authority
+    /// covers it). Callers pass false on the headset.
+    /// </param>
+    public static List<Issue> Run(string participantId, int orderIndex, bool includeInstructions)
+    {
+        var issues = new List<Issue>();
+
+        // ── participant id (Fatal) ──
+        if (string.IsNullOrWhiteSpace(participantId))
+            issues.Add(new Issue(Severity.Fatal, "参加者IDが未入力です"));
+
+        // ── instructions_new.txt (Fatal, Desktop only) ──
+        if (includeInstructions)
+        {
+            string path = Path.Combine(Application.streamingAssetsPath, "instructions_new.txt");
+            bool ok = false;
+            try { ok = File.Exists(path) && new FileInfo(path).Length > 0; } catch { ok = false; }
+            issues.Add(ok
+                ? new Issue(Severity.Info,  "✓ instructions_new.txt")
+                : new Issue(Severity.Fatal, "instructions_new.txt が見つからない/空です"));
+        }
+
+        // ── SharedMesh / calibration system (Fatal) ──
+        bool meshOk = Object.FindAnyObjectByType<MeshHandler>() != null;
+        issues.Add(meshOk
+            ? new Issue(Severity.Info,  "✓ SharedMesh (MeshHandler)")
+            : new Issue(Severity.Fatal, "SharedMesh/MeshHandler がシーンにありません"));
+
+        // ── existing participant log dir (Warning: CSV append/overwrite) ──
+        if (!string.IsNullOrWhiteSpace(participantId))
+        {
+            string logDir = Path.Combine(Application.persistentDataPath, "logs", participantId);
+            bool exists = false;
+            try { exists = Directory.Exists(logDir); } catch { exists = false; }
+            if (exists)
+                issues.Add(new Issue(Severity.Warning, $"logs/{participantId} が既に存在（CSVに追記されます）"));
+        }
+
+        // ── nature sound (Warning) ──
+        if (Resources.Load<AudioClip>("Audio/rain_loop") == null)
+            issues.Add(new Issue(Severity.Warning, "rain_loop 音源なし（ブラウンノイズのみ）"));
+
+        // ── condition-order preview (Info) ──
+        issues.Add(new Issue(Severity.Info, "条件順: " + ConditionOrderPreview(orderIndex)));
+
+        return issues;
+    }
+
+    public static bool HasFatal(List<Issue> issues)
+    {
+        if (issues == null) return false;
+        foreach (var i in issues) if (i.Severity == Severity.Fatal) return true;
+        return false;
+    }
+
+    public static int CountFatal(List<Issue> issues)
+    {
+        if (issues == null) return 0;
+        int n = 0;
+        foreach (var i in issues) if (i.Severity == Severity.Fatal) n++;
+        return n;
+    }
+
+    /// <summary>participantOrderIndex → readable run order, so a mistyped index is caught early.</summary>
+    public static string ConditionOrderPreview(int orderIndex)
+    {
+        var order = ExperimentDesign.ComputeOrder(orderIndex);
+        var sb = new StringBuilder();
+        for (int i = 0; i < order.Length; i++)
+        {
+            if (i > 0) sb.Append(" → ");
+            sb.Append(ExperimentDesign.Conditions[order[i]].name);
+        }
+        return sb.ToString();
+    }
+}

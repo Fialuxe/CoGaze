@@ -35,9 +35,15 @@ public class StartupUI : MonoBehaviour
     private GUIStyle _buttonStyle;
     private GUIStyle _toggleStyle;
     private GUIStyle _micButtonStyle;
+    private GUIStyle _issueStyle;
     private Texture2D _barBgTex;
     private Texture2D _barFillTex;
     private bool     _stylesBuilt;
+
+    // ── Startup self-check (cached; recomputed only when id/order changes) ──
+    private System.Collections.Generic.List<StartupSelfCheck.Issue> _issues;
+    private string _checkedId    = null;
+    private int    _checkedOrder = int.MinValue;
 
     private const float PANEL_W = 480f;
     private float       _panelH;
@@ -58,7 +64,8 @@ public class StartupUI : MonoBehaviour
         _micIndex = Mathf.Max(0, Array.IndexOf(_micDevices, config.microphoneDevice));
 
         // Panel height: base layout + 28px per mic device + 40px offline toggle + ~70px mic-test meter
-        _panelH = 310f + _micDevices.Length * 28f + 40f + 70f;
+        // + ~230px for the startup self-check section (header + up to ~7 rows + condition preview).
+        _panelH = 310f + _micDevices.Length * 28f + 40f + 70f + 230f;
     }
 
     private void BuildStyles()
@@ -118,6 +125,9 @@ public class StartupUI : MonoBehaviour
         _toggleStyle.normal.textColor = new Color(1f, 0.8f, 0.3f);
 
         _micButtonStyle = new GUIStyle(GUI.skin.button) { fontSize = 14, alignment = TextAnchor.MiddleLeft };
+
+        _issueStyle = new GUIStyle(GUI.skin.label) { fontSize = 13, wordWrap = true, alignment = TextAnchor.UpperLeft };
+        _issueStyle.normal.textColor = Color.white;   // tinted per-severity via GUI.color
 
         _barBgTex   = MakeTex(1, 1, new Color(0.25f, 0.25f, 0.25f, 1f));
         _barFillTex = MakeTex(1, 1, new Color(0.20f, 0.90f, 0.40f, 1f));
@@ -198,9 +208,43 @@ public class StartupUI : MonoBehaviour
             _offlineMode, CoGazeStrings.Startup_ToggleOfflineMode, _toggleStyle);
         y += 36f;
 
-        // ── Start button ──────────────────────────────────────
-        if (GUI.Button(new Rect(x + w * 0.5f - 80f, y, 160f, 40f), CoGazeStrings.Startup_ButtonStart, _buttonStyle))
+        // ── Startup self-check ────────────────────────────────
+        RefreshIssues();
+        GUI.Label(new Rect(x, y, w, 20f), "起動前チェック:", _labelStyle);
+        y += 22f;
+        foreach (var iss in _issues)
+        {
+            Color c = iss.Severity == StartupSelfCheck.Severity.Fatal   ? new Color(1f, 0.45f, 0.40f)
+                    : iss.Severity == StartupSelfCheck.Severity.Warning ? new Color(1f, 0.80f, 0.30f)
+                                                                        : new Color(0.6f, 0.85f, 0.6f);
+            string prefix = iss.Severity == StartupSelfCheck.Severity.Fatal   ? "● "
+                          : iss.Severity == StartupSelfCheck.Severity.Warning ? "▲ "
+                                                                              : "   ";
+            float rowH = iss.Message.StartsWith("条件順") ? 38f : 20f;   // preview wraps to ~2 lines
+            var prev = GUI.color; GUI.color = c;
+            GUI.Label(new Rect(x, y, w, rowH), prefix + iss.Message, _issueStyle);
+            GUI.color = prev;
+            y += rowH;
+        }
+        y += 8f;
+
+        // ── Start button (blocked while any Fatal check fails) ─
+        bool hasFatal = StartupSelfCheck.HasFatal(_issues);
+        GUI.enabled = !hasFatal;
+        if (GUI.Button(new Rect(x + w * 0.5f - 90f, y, 180f, 40f),
+                hasFatal ? "起動前チェックを修正してください" : CoGazeStrings.Startup_ButtonStart, _buttonStyle))
             Confirm();
+        GUI.enabled = true;
+    }
+
+    // Recompute the self-check only when the participant id / order index changes (OnGUI runs
+    // every frame; the checks do file I/O, so caching avoids per-frame disk hits).
+    private void RefreshIssues()
+    {
+        if (_issues != null && _participantId == _checkedId && _orderIndex == _checkedOrder) return;
+        _checkedId    = _participantId;
+        _checkedOrder = _orderIndex;
+        _issues = StartupSelfCheck.Run(_participantId, _orderIndex, includeInstructions: true);
     }
 
     private void Confirm()
