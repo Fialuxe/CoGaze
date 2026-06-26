@@ -284,6 +284,16 @@ public class SceneBootstrapper2 : MonoBehaviourPunCallbacks, IOnEventCallback
         // Periodic position logging (head / players / SharedMesh / QR markers) for offline debug.
         if (GetComponent<PositionLogger>() == null) gameObject.AddComponent<PositionLogger>();
 
+        // The Worker may have completed dual-QR calibration BEFORE joining (the startup panel delays
+        // the join while MRUK auto-detects the calib QRs). Those one-shot mesh/calib RPCs were sent
+        // with no room and lost — re-broadcast them now so the Expert's SharedMesh aligns and the
+        // approve gate isn't deadlocked. No-op on the Expert (its MeshHandler isn't calibrated).
+        if (_role == RoleManager.ROLE_WORKER)
+        {
+            var mh = FindAnyObjectByType<MeshHandler>();
+            if (mh != null) mh.RebroadcastCalibration();
+        }
+
         StartCoroutine(SetupAfterDeviceCheck());
     }
 

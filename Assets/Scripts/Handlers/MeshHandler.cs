@@ -267,6 +267,24 @@ public class MeshHandler : MonoBehaviourPun
         photonView.RPC(nameof(RPC_ReceiveMeshTransform), RpcTarget.AllBuffered, pos, rot, scale);
     }
 
+    /// <summary>
+    /// Re-broadcast the calibrated mesh transform + calib-complete (+ markers) to the room.
+    /// The Worker can finish dual-QR calibration BEFORE it joins the Photon room (the startup panel
+    /// delays the join, and MRUK auto-detects the calib QRs meanwhile). A one-shot RPC sent while
+    /// not in a room is lost — the Expert's SharedMesh then stays at its default and the Worker
+    /// appears offset, calib never reflects, and the approve gate deadlocks. Call this on room join.
+    /// </summary>
+    public void RebroadcastCalibration()
+    {
+        if (!PhotonNetwork.InRoom || meshObject == null) return;
+        if (IsDualQRMode && _dualCalibState != DualQRCalibState.Complete) return;  // not calibrated yet
+
+        SendMeshTransform();
+        photonView.RPC(nameof(RPC_NotifyCalibComplete), RpcTarget.AllBuffered);
+        _qrManager?.ResyncAllMarkers();
+        Debug.Log("[MeshHandler] RebroadcastCalibration: re-sent mesh transform + calib-complete on room join.");
+    }
+
     [PunRPC]
     private void RPC_ReceiveMeshTransform(Vector3 pos, Quaternion rot, Vector3 scale)
     {
