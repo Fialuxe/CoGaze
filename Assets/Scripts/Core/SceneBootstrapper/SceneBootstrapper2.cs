@@ -89,15 +89,24 @@ public class SceneBootstrapper2 : MonoBehaviourPunCallbacks, IOnEventCallback
     {
         var config = StartupConfig.LoadOrDefault();
 
-        // Android (Quest) boots headless — no keyboard/monitor to interact with the config panel.
-        // The config is pre-written to disk via StartupConfig.Save() on the PC side first.
+        // Config is pre-written to disk via StartupConfig.Save() on the PC side first.
         if (Application.platform != RuntimePlatform.Android)
         {
+            // Expert (PC/standalone): IMGUI config panel + self-check, blocks Start on fatal issues.
             bool confirmed = false;
             var ui = gameObject.AddComponent<StartupUI>();
             ui.Initialize(config);
             ui.OnConfirmed += () => confirmed = true;
             yield return new WaitUntil(() => confirmed);
+        }
+        else
+        {
+            // Worker (Quest/HMD): WorldSpace startup panel + self-check, confirmed with the right-hand
+            // A button (was a headless auto-proceed). Fatal checks block the confirm.
+            var panel = gameObject.AddComponent<WorkerStartupPanel>();
+            panel.Initialize(config);
+            yield return new WaitUntil(() => panel.Confirmed);
+            Destroy(panel);
         }
 
         // Apply config
