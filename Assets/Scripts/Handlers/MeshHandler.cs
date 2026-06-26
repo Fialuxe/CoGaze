@@ -37,7 +37,6 @@ public class MeshHandler : MonoBehaviourPun
     [SerializeField] private Transform indicatorB;
 
     private GameObject meshObject;
-    private bool isCalibrating = false;
     private bool _qrCalibrated = false;
     private QRSpatialManager _qrManager;
 
@@ -45,13 +44,6 @@ public class MeshHandler : MonoBehaviourPun
     private DualQRCalibState _dualCalibState = DualQRCalibState.NeedsA;
     private Vector3?         _detectedA;
     private Vector3?         _detectedB;
-
-    /// <summary>
-    /// When true, the right-grip manual-calibration toggle is ignored. Set by SetupCoordinator
-    /// during the Setup state, where the right grip is repurposed for manual QR registration.
-    /// Rising-edge state is still tracked so no stale edge fires when this clears.
-    /// </summary>
-    public bool SuppressManualCalibGrip = false;
 
     /// <summary>true when both indicatorA and indicatorB are assigned — uses 2-QR alignment.</summary>
     public bool             IsDualQRMode          => indicatorA != null && indicatorB != null;
@@ -154,71 +146,92 @@ public class MeshHandler : MonoBehaviourPun
     // Grip rising-edge state for toggle detection
     private bool _gripWasDown = false;
 
+    // ── Manual calibration: active ONLY while the left X button is HELD ──────
+    // The default grip stays free for "QR found" (SetupCoordinator registration / IdentificationTask
+    // completion); holding X is the deliberate gesture to calibrate, so the mesh is never moved by
+    // accident during the experiment.
+    private bool         _calibActive      = false; // left X held
+    private bool         _grabbing         = false; // right grip held → mesh follows the hand
+    private Vector3      _grabOffset;                // mesh − controller at grab start
+    private float        _calibSendTimer   = 0f;     // throttle live position broadcasts
+    private OVRCameraRig _ovrRig;
+    private const float  CalibSendInterval = 2.5f;   // seconds between position sends while calibrating
+
     private void UpdateCalibration()
     {
-        // X button (left controller) — toggle mesh visibility
-        if (OVRInput.GetDown(OVRInput.Button.One, OVRInput.Controller.LTouch))
-            ToggleMeshVisibility();
+        // Mesh calibration is gated behind HOLDING the left X button. The default grip stays free for
+        // "QR found" (SetupCoordinator registration / IdentificationTask completion), so the mesh is
+        // never moved by accident during the experiment.
+        bool xHeld = OVRInput.Get(OVRInput.Button.One, OVRInput.Controller.LTouch);
 
-        // Right grip — TOGGLE calibration mode (press once = in, press again = out)
-        bool gripDown = OVRInput.Get(OVRInput.Axis1D.PrimaryHandTrigger, OVRInput.Controller.RTouch) > TriggerThreshold;
-        // Suppress (but still track the edge) while SetupCoordinator owns the grip for manual QR
-        // registration during Setup — otherwise a registration grip would also flip calibration mode.
-        if (gripDown && !_gripWasDown && !SuppressManualCalibGrip)
+        if (xHeld != _calibActive)
         {
-            isCalibrating = !isCalibrating;
-            OnCalibrationChanged?.Invoke(isCalibrating);
-            Debug.Log($"[MeshHandler] Calibration {(isCalibrating ? "ON" : "OFF")}.");
+            _calibActive = xHeld;
+            OnCalibrationChanged?.Invoke(_calibActive);
+            SetMeshRenderersVisible(_calibActive);   // show the mesh while calibrating, hide on exit
+            if (_calibActive)
+            {
+                _calibSendTimer = 0f;
+            }
+            else
+            {
+                // Exit: stop the haptic, drop any grab, and push the final pose to everyone.
+                _grabbing    = false;
+                _gripWasDown = false;
+                OVRInput.SetControllerVibration(0f, 0f, OVRInput.Controller.LTouch);
+                SendMeshTransform();
+                photonView.RPC(nameof(RPC_NotifyCalibComplete), RpcTarget.AllBuffered);
+                _qrManager?.ResyncAllMarkers();
+                OnCalibrationConfirmed?.Invoke();
+                Debug.Log("[MeshHandler] Manual calibration ended — final pose sent.");
+            }
         }
+
+        if (!_calibActive) return;
+
+        // Gentle continuous vibration on the X hand signals that calibration is active.
+        OVRInput.SetControllerVibration(0.3f, 0.3f, OVRInput.Controller.LTouch);
+
+        // Right grip = grab the mesh; while held it follows the right controller (move / push / pull).
+        float   grip     = OVRInput.Get(OVRInput.Axis1D.PrimaryHandTrigger, OVRInput.Controller.RTouch);
+        bool    gripDown = grip > TriggerThreshold;
+        Vector3 ctrl     = RightControllerWorldPos();
+        if (gripDown && !_gripWasDown)
+        {
+            _grabbing   = true;
+            _grabOffset = meshObject.transform.position - ctrl;   // preserve the mesh's offset from the hand
+        }
+        if (gripDown && _grabbing)
+            meshObject.transform.position = ctrl + _grabOffset;
+        if (!gripDown) _grabbing = false;
         _gripWasDown = gripDown;
 
-        if (!isCalibrating) return;
+        // Right stick X = yaw rotation around world-up.
+        Vector2 stick = OVRInput.Get(OVRInput.Axis2D.PrimaryThumbstick, OVRInput.Controller.RTouch);
+        if (Mathf.Abs(stick.x) > StickDeadzone)
+            meshObject.transform.Rotate(Vector3.up, stick.x * rotateSpeed * Time.deltaTime, Space.World);
 
-        // ── Scheme D ──────────────────────────────────────────────────────────
-        // Stick alone      → XZ translation (relative to HMD facing)
-        // Trigger + stick Y → height (Y-axis)
-        // Trigger + stick X → Y-axis rotation
-        // A button          → confirm & send
-        // ─────────────────────────────────────────────────────────────────────
-
-        Vector2 stick       = OVRInput.Get(OVRInput.Axis2D.PrimaryThumbstick, OVRInput.Controller.RTouch);
-        bool    indexTrigger = OVRInput.Get(OVRInput.Axis1D.PrimaryIndexTrigger, OVRInput.Controller.RTouch) > TriggerThreshold;
-
-        if (indexTrigger)
+        // Broadcast the in-progress pose every few seconds so the Expert sees it move live.
+        _calibSendTimer += Time.deltaTime;
+        if (_calibSendTimer >= CalibSendInterval)
         {
-            if (Mathf.Abs(stick.y) > StickDeadzone)
-                meshObject.transform.position += Vector3.up * stick.y * moveSpeed * Time.deltaTime;
-
-            if (Mathf.Abs(stick.x) > StickDeadzone)
-                meshObject.transform.Rotate(Vector3.up, stick.x * rotateSpeed * Time.deltaTime, Space.World);
-        }
-        else if (stick.sqrMagnitude > StickDeadzone * StickDeadzone)
-        {
-            Transform hmd = Camera.main != null ? Camera.main.transform : transform;
-            Vector3 fwd = Vector3.ProjectOnPlane(hmd.forward, Vector3.up).normalized;
-            Vector3 rgt = Vector3.ProjectOnPlane(hmd.right,   Vector3.up).normalized;
-            meshObject.transform.position += (fwd * stick.y + rgt * stick.x) * moveSpeed * Time.deltaTime;
-        }
-
-        // A button → confirm & send
-        if (OVRInput.GetDown(OVRInput.Button.One, OVRInput.Controller.RTouch))
-        {
+            _calibSendTimer = 0f;
             SendMeshTransform();
-            // Re-broadcast known QR markers now that the SharedMesh is calibrated & synced, so any
-            // markers scanned BEFORE this confirm are re-placed correctly on the Expert (their
-            // Expert-side position is derived from the shared SharedMesh frame).
-            _qrManager?.ResyncAllMarkers();
-            OnCalibrationConfirmed?.Invoke();
-            OVRInput.SetControllerVibration(0.5f, 0.8f, OVRInput.Controller.RTouch);
-            StartCoroutine(StopVibration(0.2f));
-            Debug.Log("[MeshHandler] Calibration confirmed and sent.");
         }
     }
 
-    private System.Collections.IEnumerator StopVibration(float delay)
+    private Vector3 RightControllerWorldPos()
     {
-        yield return new WaitForSeconds(delay);
-        OVRInput.SetControllerVibration(0f, 0f, OVRInput.Controller.RTouch);
+        if (_ovrRig == null) _ovrRig = FindAnyObjectByType<OVRCameraRig>();
+        if (_ovrRig != null) return _ovrRig.rightHandAnchor.position;
+        return OVRInput.GetLocalControllerPosition(OVRInput.Controller.RTouch);
+    }
+
+    private void SetMeshRenderersVisible(bool visible)
+    {
+        if (meshObject == null) return;
+        foreach (var r in meshObject.GetComponentsInChildren<MeshRenderer>(true))
+            r.enabled = visible;
     }
 #endif
 

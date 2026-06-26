@@ -87,7 +87,6 @@ public class SetupCoordinator : MonoBehaviour
         else
             BuildExpertUI();
 
-        ApplyGripSuppression(manager.CurrentState);
         RefreshUI();
         SetPanelVisible(manager.CurrentState == ExperimentState.Setup);
     }
@@ -95,10 +94,7 @@ public class SetupCoordinator : MonoBehaviour
     private void OnDestroy()
     {
         if (_meshHandler != null)
-        {
             _meshHandler.OnCalibCompleteNotified -= OnCalibComplete;
-            _meshHandler.SuppressManualCalibGrip  = false;
-        }
         if (_qrManager != null)
             _qrManager.OnMarkerDetected -= OnMarkerDetected;
         if (_manager != null)
@@ -134,16 +130,7 @@ public class SetupCoordinator : MonoBehaviour
 
     private void OnStateChanged(ExperimentState state)
     {
-        ApplyGripSuppression(state);
         SetPanelVisible(state == ExperimentState.Setup);
-    }
-
-    private void ApplyGripSuppression(ExperimentState state)
-    {
-        // During Setup the Worker's right grip is used for manual QR registration, so the
-        // MeshHandler manual-calibration toggle must stand down. (No-op on Expert: IsMine=false.)
-        if (_meshHandler != null)
-            _meshHandler.SuppressManualCalibGrip = (state == ExperimentState.Setup);
     }
 
     private void OnCalibComplete()
@@ -182,6 +169,10 @@ public class SetupCoordinator : MonoBehaviour
         bool  gripDown    = grip > GripThreshold;
         bool  justPressed = gripDown && !_gripWasDown;
         _gripWasDown = gripDown;
+
+        // While the left X button is held, the right grip is calibrating the mesh (MeshHandler) —
+        // don't also register a QR with the same grip press.
+        if (OVRInput.Get(OVRInput.Button.One, OVRInput.Controller.LTouch)) return;
 
         if (!justPressed || nextMissing == null || _qrManager == null) return;
 
