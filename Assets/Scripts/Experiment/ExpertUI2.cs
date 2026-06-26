@@ -2,6 +2,7 @@ using System.Collections;
 using UnityEngine;
 using UnityEngine.UI;
 using UnityEngine.InputSystem;
+using Photon.Pun;
 
 public class ExpertUI2 : MonoBehaviour
 {
@@ -39,6 +40,7 @@ public class ExpertUI2 : MonoBehaviour
 
     // ── Zone D (bottom bar) ───────────────────────────────────────────────
     private Text bottomHintText;
+    private Text connStatusText;   // Photon 接続/相手在席（同室n/2・Worker接続・region/room）
 
     // ── Remote mesh visibility ────────────────────────────────────────────
     private MeshHandler _meshHandler;
@@ -142,6 +144,34 @@ public class ExpertUI2 : MonoBehaviour
         }
 
         UpdatePythonStatus();
+        RefreshConnectionStatus();
+    }
+
+    // Photon 接続/相手在席を下バーに常時表示。別室(別region/room)・Worker未接続を即検知できる。
+    // 読み取りのみ（ネットワーク書き込みなし）。
+    private void RefreshConnectionStatus()
+    {
+        if (connStatusText == null) return;
+
+        if (!PhotonNetwork.IsConnected || !PhotonNetwork.InRoom)
+        {
+            connStatusText.text  = "● 未接続";
+            connStatusText.color = new Color(1f, 0.4f, 0.4f);
+            return;
+        }
+
+        bool workerOnline = false;
+        foreach (var p in PhotonNetwork.PlayerListOthers)
+        {
+            if (RoleManager.GetPlayerRole(p) == RoleManager.ROLE_WORKER) { workerOnline = true; break; }
+        }
+
+        int    count  = PhotonNetwork.CurrentRoom != null ? PhotonNetwork.CurrentRoom.PlayerCount : 0;
+        string region = string.IsNullOrEmpty(PhotonNetwork.CloudRegion) ? "?" : PhotonNetwork.CloudRegion;
+        string room   = PhotonNetwork.CurrentRoom != null ? PhotonNetwork.CurrentRoom.Name : "-";
+
+        connStatusText.text  = $"● 同室 {count}/2 ・ {(workerOnline ? "Worker接続" : "Worker未接続")} ・ {region}/{room}";
+        connStatusText.color = workerOnline ? new Color(0.45f, 0.85f, 0.55f) : new Color(1f, 0.8f, 0.3f);
     }
 
     // ── Build ─────────────────────────────────────────────────────────────
@@ -267,6 +297,11 @@ public class ExpertUI2 : MonoBehaviour
             new Vector2(0f, 0f), new Vector2(1f, 0.04f),
             CoGazeStrings.Expert2_BottomHint,
             15, TextAnchor.MiddleCenter, new Color(0.40f, 0.44f, 0.48f));
+
+        // 接続/相手在席（下バー左寄せ）— 別室・別room・Worker未接続を一目で検知
+        connStatusText = MakeText(root,
+            new Vector2(0.01f, 0f), new Vector2(0.46f, 0.04f),
+            "● 接続確認中…", 14, TextAnchor.MiddleLeft, new Color(0.5f, 0.55f, 0.6f));
     }
 
     // ── State handler ─────────────────────────────────────────────────────
