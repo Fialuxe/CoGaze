@@ -30,9 +30,9 @@ public class ExperimentManager2 : MonoBehaviour, IOnEventCallback
     // -----------------------------------------------------------------------
 
     [Header("Timings")]
-    public float taskDurationSeconds       = 10f;
+    public float taskDurationSeconds       = 60f;
     public float assemblyDurationSeconds   = 180f;
-    public float whiteNoiseDurationSeconds = 60f;
+    public float whiteNoiseDurationSeconds = 20f;
     [Range(0f, 1f)] public float whiteNoiseVolume    = 0.30f;
     [Range(0f, 1f)] public float natureSoundVolume   = 0.25f;
 
@@ -55,6 +55,11 @@ public class ExperimentManager2 : MonoBehaviour, IOnEventCallback
     public float           RemainingSeconds{ get; private set; }
     public int             CurrentStepIndex{ get; private set; }
     public int             TotalSteps      { get; private set; }
+    // Identification correct-answer target for the current step ("" when none/out of range). Read by
+    // ExperimentLogger; SNAPSHOT it at trial start — the step advances before the end-row is written.
+    public string          CurrentTargetMarkerId =>
+        (CurrentStepIndex >= 0 && CurrentStepIndex < steps.Count)
+            ? steps[CurrentStepIndex].TargetMarkerId : string.Empty;
     public bool            IsExpert        { get; private set; }
 
     public int             CurrentConditionIndex       { get; private set; } = -1;
@@ -69,6 +74,12 @@ public class ExperimentManager2 : MonoBehaviour, IOnEventCallback
     public event Action<float>                 OnTimerUpdated;
     public event Action<string>                OnInstructionChanged;
     public event Action<int, int, StepType>    OnProgressChanged;
+    // 3-2-1 countdown before the first condition; ticks 3→2→1→0(GO!) on Expert, Worker starts
+    // its own local coroutine on the Setup→Idle state transition at roughly the same time.
+    public event Action<int>                   OnCountdownTick;
+
+    // Expose to ExpertUI2 for live target/score display
+    public IdentificationTask IdentificationTask => identificationTask;
 
     // -----------------------------------------------------------------------
     // Private fields
@@ -83,9 +94,15 @@ public class ExperimentManager2 : MonoBehaviour, IOnEventCallback
     private bool              _calibrationPending   = false;
     private bool              _calibrationFailed    = false;
     private System.Action<string, string> _pendingCalibAckHandler;
+    private Coroutine         _calibTimeoutCo;          // covers session_start ACK + calibration result
+    private WebcamCalibrationUI _webcamCalibUI;
+    private bool              _ssqGateArmed         = false; // Expert holds back Finished UI until SSQ submit
+    private System.Action     _ssqSubmitHandler;
+    private bool              _countdownFired       = false; // fires once before the very first condition
 
     private List<ExperimentStep> steps            = new();
     private List<ExperimentStep> conditionTemplate = new();
+    private string[]             conditionTargets;   // per-condition identification target id (index = condition 0-9), from the "targets =" config line; null = untracked
     private int[]                conditionOrder;   // WilliamsTable[participantOrderIndex]
 
     private AudioSource  audioSource;
@@ -146,8 +163,8 @@ public class ExperimentManager2 : MonoBehaviour, IOnEventCallback
             if (isExpert) questionnaireManager.OnQuestionnaireComplete += AdvanceStepFromQuestionnaire;
         }
         identificationTask = FindAnyObjectByType<IdentificationTask>();
-        if (isExpert && identificationTask != null)
-            identificationTask.OnTaskComplete += AdvanceStepFromTask;
+        // IdentificationTask no longer drives AdvanceStep — the per-task timer does.
+        // Workers answer repeatedly until the timer expires, then Enter advances the step.
 
         if (isExpert)
         {
@@ -156,6 +173,7 @@ public class ExperimentManager2 : MonoBehaviour, IOnEventCallback
             {
                 FileLogger.Log("Experiment", "[ExperimentManager] OscSessionManager found — Python OSC enabled.");
                 _oscSession.OnCalibrationResult += HandleCalibrationResult;
+                _oscSession.OnCalibrationRetrying += _ => _webcamCalibUI?.StartCalibration();
 
                 // Subscribe before LoadInstructions so we never miss a pong that arrives early
                 _pongForReadyHandler = () => {
@@ -180,8 +198,14 @@ public class ExperimentManager2 : MonoBehaviour, IOnEventCallback
         if (IsExpert)
         {
             if (_oscReadyTimeoutCo != null) { StopCoroutine(_oscReadyTimeoutCo); _oscReadyTimeoutCo = null; }
+            if (_calibTimeoutCo != null) { StopCoroutine(_calibTimeoutCo); _calibTimeoutCo = null; }
             if (questionnaireManager != null) questionnaireManager.OnQuestionnaireComplete -= AdvanceStepFromQuestionnaire;
-            if (identificationTask != null)   identificationTask.OnTaskComplete -= AdvanceStepFromTask;
+            if (_ssqSubmitHandler != null && questionnaireManager != null)
+            {
+                questionnaireManager.OnSurveySubmitted -= _ssqSubmitHandler;
+                _ssqSubmitHandler = null;
+            }
+            // identificationTask.OnTaskComplete is no longer wired to AdvanceStepFromTask
             if (_pongForReadyHandler != null && _oscSession != null)
             {
                 _oscSession.OnPong -= _pongForReadyHandler;
@@ -234,11 +258,20 @@ public class ExperimentManager2 : MonoBehaviour, IOnEventCallback
                      CurrentState == ExperimentState.NoiseComplete ||
                      CurrentState == ExperimentState.Questionnaire)
             {
+                // A NASA-TLX / SSQ questionnaire (StepType.Questionnaire) must advance ONLY on its own
+                // submit (OnQuestionnaireComplete) — pressing Enter here would truncate the Worker's
+                // in-progress answers. The Questionnaire *state* is also reused by the operator-gated
+                // steps (ConditionStart / Alignment / Rest), which DO advance on Enter, so gate on the
+                // StepType rather than the state.
+                bool answerableQuestionnaire =
+                    CurrentState == ExperimentState.Questionnaire &&
+                    CurrentStepType == StepType.Questionnaire;
+
                 if (_calibrationPending)
                 {
                     // blocked: waiting for session_start ACK before calibration can proceed
                 }
-                else
+                else if (!answerableQuestionnaire)
                 {
                     _lastEnterTime = Time.time;
                     AdvanceStep();
@@ -254,8 +287,10 @@ public class ExperimentManager2 : MonoBehaviour, IOnEventCallback
         {
             _calibrationFailed  = false;
             _calibrationPending = true;
+            if (_calibTimeoutCo != null) StopCoroutine(_calibTimeoutCo);
+            _calibTimeoutCo = StartCoroutine(CalibrationTimeout());
             OnInstructionChanged?.Invoke(MessageBank.Get("calib.retrying"));
-            _oscSession.StartCalibration();
+            _webcamCalibUI?.StartCalibration();
         }
 
         // Hold-to-confirm: fire once when Del has been held continuously for DelHoldSeconds.
@@ -267,6 +302,13 @@ public class ExperimentManager2 : MonoBehaviour, IOnEventCallback
                 _delFired = true;
                 if (CurrentState == ExperimentState.TaskRunning || CurrentState == ExperimentState.WhiteNoise)
                     ForceSkip();
+                else if (CurrentState == ExperimentState.Finished && _ssqGateArmed)
+                {
+                    // Emergency: the final SSQ is not being submitted (e.g. Worker frozen) — release
+                    // the gate and reveal the Finished/thanks UI so the operator is not stuck forever.
+                    questionnaireManager?.Hide();
+                    RevealFinished();
+                }
                 else if (CurrentState == ExperimentState.Questionnaire)
                 {
                     // Emergency: Worker is frozen on questionnaire — hide it and force advance.
@@ -319,13 +361,35 @@ public class ExperimentManager2 : MonoBehaviour, IOnEventCallback
     }
 
     /// <summary>
-    /// Expert calls this once Worker setup is verified — transitions Setup → Idle → Ready.
+    /// Expert calls this once Worker setup is verified — transitions Setup → Idle, then
+    /// plays a 3-2-1-GO countdown (once only) before transitioning to Ready.
     /// </summary>
     public void TriggerSetupComplete()
     {
         if (!IsExpert) return;
         if (CurrentState != ExperimentState.Setup) return;
         Transition(ExperimentState.Idle);
+        if (!_countdownFired)
+        {
+            _countdownFired = true;
+            StartCoroutine(CountdownThenStart());
+        }
+        else
+        {
+            TryTransitionToReady();
+        }
+    }
+
+    private IEnumerator CountdownThenStart()
+    {
+        OnCountdownTick?.Invoke(3);
+        yield return new WaitForSeconds(1f);
+        OnCountdownTick?.Invoke(2);
+        yield return new WaitForSeconds(1f);
+        OnCountdownTick?.Invoke(1);
+        yield return new WaitForSeconds(1f);
+        OnCountdownTick?.Invoke(0); // 0 = GO!
+        yield return new WaitForSeconds(0.5f);
         TryTransitionToReady();
     }
 
@@ -333,6 +397,7 @@ public class ExperimentManager2 : MonoBehaviour, IOnEventCallback
     {
         FileLogger.Log("Experiment", $"[ExperimentManager2] CalibrationResult quality={quality} err=({errX:F3},{errY:F3})");
         _calibrationPending = false;
+        if (_calibTimeoutCo != null) { StopCoroutine(_calibTimeoutCo); _calibTimeoutCo = null; }
         if (quality >= 1) // PASS (2) or MARGINAL (1)
         {
             _calibrationFailed = false;
@@ -353,6 +418,7 @@ public class ExperimentManager2 : MonoBehaviour, IOnEventCallback
         // Clear calibration gate whenever we advance (handles forced Del-skip during calibration)
         _calibrationPending = false;
         _calibrationFailed  = false;
+        if (_calibTimeoutCo != null) { StopCoroutine(_calibTimeoutCo); _calibTimeoutCo = null; }
         if (_pendingCalibAckHandler != null)
         {
             if (_oscSession != null) _oscSession.OnAck -= _pendingCalibAckHandler;
@@ -484,6 +550,8 @@ public class ExperimentManager2 : MonoBehaviour, IOnEventCallback
                             CurrentConditionType == ConditionType.WebcamFiltered)
                         {
                             _calibrationPending = true;
+                            if (_calibTimeoutCo != null) StopCoroutine(_calibTimeoutCo);
+                            _calibTimeoutCo = StartCoroutine(CalibrationTimeout());
                             string condNameCapture = CurrentConditionName;
                             _pendingCalibAckHandler = (cmd, status) =>
                             {
@@ -493,7 +561,7 @@ public class ExperimentManager2 : MonoBehaviour, IOnEventCallback
                                 if (status == "ok")
                                 {
                                     FileLogger.Log("Experiment", $"[ExperimentManager2] StartCalibration for {condNameCapture} (after session ACK)");
-                                    _oscSession.StartCalibration();
+                                    _webcamCalibUI?.StartCalibration();
                                 }
                                 else
                                 {
@@ -514,6 +582,14 @@ public class ExperimentManager2 : MonoBehaviour, IOnEventCallback
                 Transition(ExperimentState.Questionnaire);
                 questionnaireManager?.ShowNASATLX(CurrentConditionIndex, CurrentConditionName);
                 break;
+
+            default:
+                // Safety net: an unhandled StepType (e.g. StepType.Launch, which ExpandTemplate does
+                // not currently generate) must not silently stall the run. Log it and skip to the next
+                // step on the following frame rather than falling through and doing nothing.
+                FileLogger.Log("Experiment", $"[ExperimentManager2] Unhandled StepType {step.Type} at step {CurrentStepIndex} — skipping to next step.");
+                StartCoroutine(AdvanceNextFrame());
+                break;
         }
     }
 
@@ -521,6 +597,66 @@ public class ExperimentManager2 : MonoBehaviour, IOnEventCallback
     {
         yield return null;
         AdvanceStep();
+    }
+
+    // Subscribe to the SSQ submit on the NEXT frame so we do not catch the submit event that is
+    // firing right now (the final NASA-TLX whose completion triggered this Finished transition);
+    // the next OnSurveySubmitted after that is the SSQ submit. Expert only.
+    private IEnumerator ArmSsqGate()
+    {
+        yield return null;
+        if (!_ssqGateArmed || questionnaireManager == null) yield break;
+        _ssqSubmitHandler = () => RevealFinished();
+        questionnaireManager.OnSurveySubmitted += _ssqSubmitHandler;
+    }
+
+    /// <summary>
+    /// Fire the deferred Finished/thanks UI once the Worker has submitted the final SSQ (or the
+    /// operator force-released the gate). Expert only; the Worker's Finished UI was already delivered
+    /// by the Finished broadcast and is naturally revealed when the SSQ panel closes on submit, so
+    /// this does NOT re-broadcast Finished (that would re-show the SSQ panel on the Worker).
+    /// </summary>
+    private void RevealFinished()
+    {
+        if (!_ssqGateArmed) return;        // already revealed
+        _ssqGateArmed = false;
+        if (_ssqSubmitHandler != null && questionnaireManager != null)
+            questionnaireManager.OnSurveySubmitted -= _ssqSubmitHandler;
+        _ssqSubmitHandler = null;
+
+        FileLogger.Log("Experiment", "[ExperimentManager2] SSQ submitted — revealing Finished UI.");
+        OnStateChanged?.Invoke(ExperimentState.Finished);
+        OnProgressChanged?.Invoke(CurrentStepIndex, TotalSteps, CurrentStepType);
+    }
+
+    // Covers BOTH the session_start ACK wait and the subsequent calibration-result wait. If neither
+    // arrives, the Enter key stays blocked forever (silent cross-process deadlock). On timeout, surface
+    // an operator-visible failure and a recovery path: [R] re-sends calibration, [Enter] skips, [Del]
+    // force-advances.
+    private IEnumerator CalibrationTimeout()
+    {
+        const float CalibTimeoutSeconds = 90f;  // 16-dot Unity UI: ~2s instr + 16×2.8s ≈ 47s total
+        float elapsed = 0f;
+        while (elapsed < CalibTimeoutSeconds)
+        {
+            if (!_calibrationPending) { _calibTimeoutCo = null; yield break; }
+            elapsed += Time.deltaTime;
+            yield return null;
+        }
+        _calibTimeoutCo = null;
+        if (!_calibrationPending) yield break;   // resolved on the final frame
+
+        // Timed out while still pending — unblock the operator and allow retry.
+        _calibrationPending = false;
+        _calibrationFailed  = true;              // enables the [R] retry path
+        if (_pendingCalibAckHandler != null)
+        {
+            if (_oscSession != null) _oscSession.OnAck -= _pendingCalibAckHandler;
+            _pendingCalibAckHandler = null;
+        }
+        FileLogger.Log("Experiment", $"[ExperimentManager2] Calibration timed out after {CalibTimeoutSeconds:F0}s (no session_start ACK or result).");
+        OnInstructionChanged?.Invoke(
+            "キャリブレーションが応答しません (タイムアウト)。\nPython プロセスの状態を確認してください。\n[R] で再試行 / [Enter] でスキップ");
     }
 
     // -----------------------------------------------------------------------
@@ -634,6 +770,17 @@ public class ExperimentManager2 : MonoBehaviour, IOnEventCallback
         {
             if (_oscSessionActive) { _oscSession?.EndSession(); _oscSessionActive = false; }
             questionnaireManager?.ShowSSQ();
+
+            // SSQ-completion gate: the Worker is now answering the final SSQ. On the Expert, hold back
+            // the "finished/thanks" UI until the Worker submits the SSQ — otherwise the operator may end
+            // the session early and the final SSQ measure is silently lost. The Worker still shows the
+            // SSQ (ShowSSQ above) and its own thanks HUD stays behind the SSQ panel until the panel
+            // closes on submit, so it is naturally gated too. RevealFinished() fires the deferred UI.
+            if (IsExpert && !_ssqGateArmed && questionnaireManager != null)
+            {
+                _ssqGateArmed = true;
+                StartCoroutine(ArmSsqGate());
+            }
         }
         // Worker shows NASA-TLX when it receives the Questionnaire state for a Questionnaire step.
         // Expert's path goes through ExecuteCurrentStep instead (ShowNASATLX is a no-op for Expert).
@@ -650,9 +797,22 @@ public class ExperimentManager2 : MonoBehaviour, IOnEventCallback
                                 || next == ExperimentState.TaskComplete
                                 || next == ExperimentState.NoiseComplete;
         string instruction = suppressInstruction ? string.Empty : GetCurrentInstruction();
-        OnStateChanged?.Invoke(next);
-        OnInstructionChanged?.Invoke(instruction);
-        OnProgressChanged?.Invoke(CurrentStepIndex, TotalSteps, CurrentStepType);
+
+        // While the SSQ gate is armed (Expert only), withhold the Finished/thanks UI and show the
+        // operator a "waiting for SSQ" message instead. RevealFinished() fires the held-back events
+        // once the Worker submits the SSQ (or the operator force-releases via Del-hold).
+        bool ssqGateDeferred = IsExpert && _ssqGateArmed && next == ExperimentState.Finished;
+        if (ssqGateDeferred)
+        {
+            OnInstructionChanged?.Invoke(
+                "Worker が最終アンケート (SSQ) に回答しています。\n回答が完了するまでお待ちください。");
+        }
+        else
+        {
+            OnStateChanged?.Invoke(next);
+            OnInstructionChanged?.Invoke(instruction);
+            OnProgressChanged?.Invoke(CurrentStepIndex, TotalSteps, CurrentStepType);
+        }
 
         if (IsExpert)
         {
@@ -922,6 +1082,15 @@ public class ExperimentManager2 : MonoBehaviour, IOnEventCallback
         {
             string line = raw.Trim();
             if (line.StartsWith("#") || string.IsNullOrEmpty(line)) continue;
+            // Global directive: per-condition identification correct-answer targets, e.g.
+            // "targets = A, B, C, A, ...". Parsed here (not as a step block) so it can sit anywhere.
+            if (line.StartsWith("targets", System.StringComparison.OrdinalIgnoreCase) && line.Contains("="))
+            {
+                string[] parts = line.Substring(line.IndexOf('=') + 1).Split(',');
+                conditionTargets = new string[parts.Length];
+                for (int i = 0; i < parts.Length; i++) conditionTargets[i] = parts[i].Trim();
+                continue;
+            }
             if (line == "===") Commit();
             else block.Add(line);
         }
@@ -976,11 +1145,13 @@ public class ExperimentManager2 : MonoBehaviour, IOnEventCallback
                 ConditionIndex   = condIdx,
                 Instruction      = MessageBank.Format("step.condstart.expert",
                     ("pos", (c + 1).ToString()), ("total", total.ToString()), ("name", cond.name)),
-                LocalInstruction = MessageBank.Format("step.condstart.worker",
-                    ("pos", (c + 1).ToString()), ("total", total.ToString())),
+                LocalInstruction = CoGazeStrings.Exp_CondStartWorker(c + 1, total),
             });
 
-            // Per-condition steps from template
+            // Per-condition steps from template. Identification (Task) steps get this condition's
+            // correct-answer target so the Expert can direct the Worker and the logger can score it.
+            string condTarget = (conditionTargets != null && condIdx < conditionTargets.Length)
+                ? conditionTargets[condIdx] : string.Empty;
             foreach (var t in conditionTemplate)
             {
                 steps.Add(new ExperimentStep
@@ -989,9 +1160,28 @@ public class ExperimentManager2 : MonoBehaviour, IOnEventCallback
                     Instruction      = t.Instruction,
                     LocalInstruction = t.LocalInstruction,
                     ScriptArgs       = t.ScriptArgs,
-                    ConditionIndex   = -1
+                    ConditionIndex   = -1,
+                    TargetMarkerId   = t.Type == StepType.Task ? condTarget : string.Empty
                 });
             }
+        }
+
+        // Log the resolved condition→identification-target map once so the researcher can verify the
+        // config (it bakes a research-validity decision into a config line). Warn on a length mismatch —
+        // a silently short/over list would leave some conditions untracked.
+        if (conditionTargets != null)
+        {
+            if (conditionTargets.Length != total)
+                FileLogger.Log("Experiment", $"[ExperimentManager] WARNING: 'targets' has {conditionTargets.Length} entries, expected {total} (one per condition). Out-of-range conditions → untracked.");
+            var sb = new System.Text.StringBuilder("[ExperimentManager] Identification targets (presentation order): ");
+            for (int c = 0; c < total; c++)
+            {
+                int ci = conditionOrder[c];
+                string tgt = (ci < conditionTargets.Length && !string.IsNullOrEmpty(conditionTargets[ci]))
+                    ? conditionTargets[ci] : "(none)";
+                sb.Append($"#{c + 1}={ExperimentDesign.Conditions[ci].name}:{tgt}  ");
+            }
+            FileLogger.Log("Experiment", sb.ToString().TrimEnd());
         }
 
         FileLogger.Log("Experiment", $"[ExperimentManager] Expanded: {total} conditions × {conditionTemplate.Count} template steps = {steps.Count} total.");
@@ -1075,6 +1265,12 @@ public class ExperimentManager2 : MonoBehaviour, IOnEventCallback
         expertGazeHandler = handler;
     }
 
+    /// <summary>Register the Unity-driven calibration UI. Called by ExpertRigBuilder.</summary>
+    public void SetWebcamCalibUI(WebcamCalibrationUI ui)
+    {
+        _webcamCalibUI = ui;
+    }
+
     private void SetGazeMode(VisualizationMode mode)
     {
         if (expertGazeHandler == null) expertGazeHandler = GetComponent<GazeHandler>();
@@ -1092,14 +1288,45 @@ public class ExperimentManager2 : MonoBehaviour, IOnEventCallback
     private string GetCurrentInstruction()
     {
         if (steps == null || CurrentStepIndex >= steps.Count) return string.Empty;
-        var step = steps[CurrentStepIndex];
-        return IsExpert ? step.Instruction : step.LocalInstruction;
+        return ResolveInstruction(steps[CurrentStepIndex]);
     }
 
     public string GetInstruction(int idx)
     {
         if (steps == null || idx >= steps.Count) return string.Empty;
-        var step = steps[idx];
-        return IsExpert ? step.Instruction : step.LocalInstruction;
+        return ResolveInstruction(steps[idx]);
+    }
+
+    // Expert-facing NoGaze (control) instructions. CoGazeStrings has Worker NoGaze variants but no
+    // Expert ones, so these gaze-neutral lines are defined here. Per the researcher's intent the
+    // NoGaze control is "voice-only direction": the Expert still actively guides the Worker, but by
+    // SPEECH only — gaze is not shared. The operator must NOT be told to "視線で示す".
+    private const string NoGazeTaskExpert =
+        "識別課題 (視線共有なし・統制条件):\n口頭のみで正解の QR マーカーを Worker に指示してください。視線は共有されません。段を上げる毎にF2/F3で記録。";
+    private const string NoGazeAssemblyExpert =
+        "組み立て課題 (視線共有なし・統制条件):\n口頭のみで配置位置を Worker に指示してください。視線は共有されません。段を上げる毎にF2/F3/F4で記録（F4=向き）。";
+
+    /// <summary>
+    /// Role- and condition-aware instruction text. In the NoGaze CONTROL condition the template's
+    /// gaze-pointing wording is wrong (there is no shared gaze), so the gaze-dependent steps get a
+    /// gaze-neutral variant instead. Other conditions/steps return the authored template text verbatim.
+    /// </summary>
+    private string ResolveInstruction(ExperimentStep step)
+    {
+        string text;
+        if (CurrentGazeMode == GazeMode.None && step.Type == StepType.Task)
+            text = IsExpert ? NoGazeTaskExpert : CoGazeStrings.Worker_TaskNoGaze;
+        else if (CurrentGazeMode == GazeMode.None && step.Type == StepType.Assembly)
+            text = IsExpert ? NoGazeAssemblyExpert : CoGazeStrings.Worker_AssemblyNoGaze;
+        else
+            text = IsExpert ? step.Instruction : step.LocalInstruction;
+
+        // Show the identification correct-answer target to the EXPERT only, for BOTH gaze and NoGaze
+        // (in NoGaze the Expert directs by voice and still needs to know which marker is correct). The
+        // Worker must never see it. Empty target = untracked → no append.
+        if (IsExpert && step.Type == StepType.Task && !string.IsNullOrEmpty(step.TargetMarkerId))
+            text += $"\n【正解ターゲット: {step.TargetMarkerId}】";
+
+        return text;
     }
 }

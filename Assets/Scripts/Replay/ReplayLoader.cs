@@ -42,6 +42,10 @@ public class ReplayLoader : MonoBehaviour
     private AudioSource voiceSource;
     private AudioClip   voiceClip;
     private float       voiceStartSeconds;
+    // Generation token: bumped each time a WAV load starts. A slower, older load that finishes
+    // after a newer trial was selected sees a stale token and discards its result, so it can
+    // never clobber the newer trial's audio/status.
+    private int         wavLoadGeneration;
 
     private struct TrialEntry
     {
@@ -81,6 +85,9 @@ public class ReplayLoader : MonoBehaviour
 
     private IEnumerator LoadWavAsync(string path, string statusPrefix)
     {
+        // Claim a new generation up front; any in-flight older load is now superseded.
+        int gen = ++wavLoadGeneration;
+
         if (string.IsNullOrEmpty(path) || !File.Exists(path))
         {
             UpdateStatus($"{statusPrefix}  |  No audio");
@@ -90,6 +97,10 @@ public class ReplayLoader : MonoBehaviour
         string uri = "file:///" + path.Replace('\\', '/');
         using var req = UnityWebRequestMultimedia.GetAudioClip(uri, AudioType.WAV);
         yield return req.SendWebRequest();
+
+        // A newer trial load started while this WAV was downloading — discard the stale result
+        // before touching voiceClip / voiceSource.clip / status.
+        if (gen != wavLoadGeneration) yield break;
 
         if (req.result == UnityWebRequest.Result.Success)
         {

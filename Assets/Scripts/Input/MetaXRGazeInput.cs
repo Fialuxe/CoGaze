@@ -30,6 +30,7 @@ public class MetaXRGazeInput : MonoBehaviour, IGazeInput
         if (!OVRPlugin.GetEyeGazesState(OVRPlugin.Step.Render, -1, ref eyeGazesState))
         {
             isAvailable = false;
+            gazeData.z = 1f; // トラッキング喪失: 直前の x,y を生きた注視として送らず blink=1 にする
             return;
         }
 
@@ -39,6 +40,7 @@ public class MetaXRGazeInput : MonoBehaviour, IGazeInput
         if (!leftEye.IsValid && !rightEye.IsValid)
         {
             isAvailable = false;
+            gazeData.z = 1f; // 両目とも無効: 直前の x,y を生きた注視として送らず blink=1 にする
             return;
         }
 

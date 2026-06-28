@@ -65,6 +65,7 @@ public class WorkerVideoStream : MonoBehaviour
     public void TriggerOffer()
     {
         Debug.Log($"[WorkerVideoStream] TriggerOffer called. RT={captureRT?.width}x{captureRT?.height} fmt={captureRT?.graphicsFormat} created={captureRT?.IsCreated()} gfx={SystemInfo.graphicsDeviceType}");
+        StartCapture();   // begin feeding frames so the Expert sees video during Setup
         session.StartAsOfferer(captureRT);
     }
 

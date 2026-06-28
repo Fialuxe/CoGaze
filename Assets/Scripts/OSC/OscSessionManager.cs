@@ -73,13 +73,16 @@ public class OscSessionManager : MonoBehaviour
     // ── OSC address constants ─────────────────────────────────────────────────
 
     // Send
-    private const string ADDR_SESSION_START  = "/session/start";
-    private const string ADDR_SESSION_END    = "/experiment/session_end";
-    private const string ADDR_CALIB_START    = "/calibration/start";
-    private const string ADDR_CALIB_ABORT    = "/calibration/abort";
-    private const string ADDR_TRIAL_START    = "/experiment/trial_start";
-    private const string ADDR_TRIAL_END      = "/experiment/trial_end";
-    private const string ADDR_PING           = "/ping";
+    private const string ADDR_SESSION_START   = "/session/start";
+    private const string ADDR_SESSION_END     = "/experiment/session_end";
+    private const string ADDR_CALIB_START     = "/calibration/start";
+    private const string ADDR_CALIB_ABORT     = "/calibration/abort";
+    private const string ADDR_CALIB_RESET     = "/calibration/reset";
+    private const string ADDR_CALIB_SAMPLE    = "/calibration/sample";
+    private const string ADDR_CALIB_COMPUTE   = "/calibration/compute";
+    private const string ADDR_TRIAL_START     = "/experiment/trial_start";
+    private const string ADDR_TRIAL_END       = "/experiment/trial_end";
+    private const string ADDR_PING            = "/ping";
 
     // Receive
     private const string ADDR_ACK            = "/experiment/ack";
@@ -250,6 +253,38 @@ public class OscSessionManager : MonoBehaviour
     }
 
     /// <summary>
+    /// Unity-driven calibration: reset accumulated Python-side calibration points.
+    /// Call once before the dot sequence starts.
+    /// Sends: /calibration/reset
+    /// </summary>
+    public void SendCalibrationReset()
+    {
+        SendNoArgs(ADDR_CALIB_RESET);
+    }
+
+    /// <summary>
+    /// Unity-driven calibration: tell Python to capture one gaze sample for the
+    /// given normalised screen target position. Call ~every 100 ms during each dot dwell.
+    /// Sends: /calibration/sample [x: float] [y: float]
+    /// </summary>
+    public void SendCalibrationSample(float x, float y)
+    {
+        if (_transmitter == null) { LogNotReady("SendCalibrationSample"); return; }
+        var msg = new OSCMessage(ADDR_CALIB_SAMPLE, OSCValue.Float(x), OSCValue.Float(y));
+        _transmitter.Send(msg);
+    }
+
+    /// <summary>
+    /// Unity-driven calibration: tell Python to fit the Ridge model and send back
+    /// /calibration/result. Call once after all dots are complete.
+    /// Sends: /calibration/compute
+    /// </summary>
+    public void SendCalibrationCompute()
+    {
+        SendNoArgs(ADDR_CALIB_COMPUTE);
+    }
+
+    /// <summary>
     /// Send a /ping to check Python-side liveness.
     /// </summary>
     public void Ping()
@@ -294,9 +329,10 @@ public class OscSessionManager : MonoBehaviour
         {
             _marginalRetryCount++;
             FileLogger.Log("OSC", $"Calibration MARGINAL — auto-retry {_marginalRetryCount}/{maxMarginalRetries}.");
+            // Unity-driven flow: fire the retrying event so ExperimentManager2 can restart
+            // WebcamCalibrationUI. Do NOT send /calibration/start — Python no longer handles it.
             OnCalibrationRetrying?.Invoke(_marginalRetryCount);
-            SendNoArgs(ADDR_CALIB_START);
-            return; // do NOT fire the event yet
+            return; // do NOT fire the terminal event yet
         }
 
         // Terminal result: PASS, FAIL, or MARGINAL with retries exhausted.

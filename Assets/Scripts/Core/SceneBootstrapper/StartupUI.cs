@@ -45,16 +45,26 @@ public class StartupUI : MonoBehaviour
     private string _checkedId    = null;
     private int    _checkedOrder = int.MinValue;
 
+    // ── Python process detection ──────────────────────────────────────────────
+    private enum PythonStatus { Unknown, Checking, Running, NotRunning, Launching }
+
+    private string            _pythonScriptDir;
+    private PythonStatus      _pythonStatus  = PythonStatus.Unknown;
+    private OscSessionManager _oscSession;
+    private Coroutine         _pingCo;
+    private bool              _pongReceived;
+
     private const float PANEL_W = 480f;
     private float       _panelH;
 
     public void Initialize(StartupConfig config)
     {
-        _config        = config;
-        _participantId = config.participantId;
-        _orderIndex    = Mathf.Clamp(config.participantOrderIndex, 0, 23);
-        _pythonHost    = config.pythonHost;
-        _offlineMode   = config.offlineMode;
+        _config          = config;
+        _participantId   = config.participantId;
+        _orderIndex      = Mathf.Clamp(config.participantOrderIndex, 0, 23);
+        _pythonHost      = config.pythonHost;
+        _offlineMode     = config.offlineMode;
+        _pythonScriptDir = config.pythonScriptDir;
 
         _micDevices = Microphone.devices.Length > 0
             ? Microphone.devices
@@ -65,7 +75,14 @@ public class StartupUI : MonoBehaviour
 
         // Panel height: base layout + 28px per mic device + 40px offline toggle + ~70px mic-test meter
         // + ~230px for the startup self-check section (header + up to ~7 rows + condition preview).
-        _panelH = 310f + _micDevices.Length * 28f + 40f + 70f + 230f;
+        // + ~120px for Python script dir field + status/launch row.
+        _panelH = 310f + _micDevices.Length * 28f + 40f + 70f + 230f + 120f;
+    }
+
+    private void Start()
+    {
+        _oscSession = FindAnyObjectByType<OscSessionManager>();
+        _pingCo     = StartCoroutine(PingPython(2f));
     }
 
     private void BuildStyles()
@@ -175,6 +192,13 @@ public class StartupUI : MonoBehaviour
         GUI.Label(new Rect(x, y + 34f, w, 18f), CoGazeStrings.Startup_HintPythonHost, _hintStyle);
         y += 62f;
 
+        // ── Python script dir ─────────────────────────────────
+        GUI.Label(new Rect(x, y, w, 22f), "Python スクリプトディレクトリ:", _labelStyle);
+        y += 24f;
+        _pythonScriptDir = GUI.TextField(new Rect(x, y, w, 32f), _pythonScriptDir, _inputStyle);
+        GUI.Label(new Rect(x, y + 34f, w, 18f), "例: C:\\GitHub\\WebcamEyeTracking  (自動起動に必要)", _hintStyle);
+        y += 60f;
+
         // ── Microphone ────────────────────────────────────────
         GUI.Label(new Rect(x, y, w, 22f), CoGazeStrings.Startup_LabelMicrophone, _labelStyle);
         y += 24f;
@@ -208,10 +232,53 @@ public class StartupUI : MonoBehaviour
             _offlineMode, CoGazeStrings.Startup_ToggleOfflineMode, _toggleStyle);
         y += 36f;
 
-        // ── Startup self-check ────────────────────────────────
+        // ── Checklist ─────────────────────────────────────────
         RefreshIssues();
-        GUI.Label(new Rect(x, y, w, 20f), "起動前チェック:", _labelStyle);
+        GUI.Label(new Rect(x, y, w, 20f), "チェックリスト:", _labelStyle);
         y += 22f;
+
+        // Python status row (with launch/re-ping button)
+        {
+            string pyLabel =
+                _pythonStatus == PythonStatus.Checking  ? "確認中..." :
+                _pythonStatus == PythonStatus.Running   ? "起動済み ✓" :
+                _pythonStatus == PythonStatus.NotRunning? "未起動" :
+                _pythonStatus == PythonStatus.Launching ? "起動中..." : "不明";
+            Color pyColor =
+                _pythonStatus == PythonStatus.Running    ? new Color(0.4f, 1f, 0.4f) :
+                _pythonStatus == PythonStatus.NotRunning ? new Color(1f, 0.5f, 0.4f) :
+                                                           new Color(0.9f, 0.85f, 0.4f);
+            string pyPrefix =
+                _pythonStatus == PythonStatus.Running ? "   " :
+                _pythonStatus == PythonStatus.NotRunning ? "● " : "▲ ";
+            var prevCol = GUI.color; GUI.color = pyColor;
+            GUI.Label(new Rect(x, y, w * 0.58f, 20f), pyPrefix + "Python 視線追跡: " + pyLabel, _issueStyle);
+            GUI.color = prevCol;
+
+            float bx = x + w * 0.62f, bw = w * 0.38f;
+            if (_pythonStatus == PythonStatus.Running)
+            {
+                if (GUI.Button(new Rect(bx, y - 1f, bw, 22f), "再確認", _micButtonStyle))
+                {
+                    if (_pingCo != null) StopCoroutine(_pingCo);
+                    _pingCo = StartCoroutine(PingPython(2f));
+                }
+            }
+            else if (_pythonStatus != PythonStatus.Checking && _pythonStatus != PythonStatus.Launching)
+            {
+                bool canLaunch = !string.IsNullOrWhiteSpace(_pythonScriptDir);
+                GUI.enabled = canLaunch;
+                if (GUI.Button(new Rect(bx, y - 1f, bw, 22f), "Python を起動", _micButtonStyle))
+                {
+                    if (_pingCo != null) StopCoroutine(_pingCo);
+                    _pingCo = StartCoroutine(LaunchAndRePing());
+                }
+                GUI.enabled = true;
+            }
+            y += 22f;
+        }
+
+        // Remaining self-check issues
         foreach (var iss in _issues)
         {
             Color c = iss.Severity == StartupSelfCheck.Severity.Fatal   ? new Color(1f, 0.45f, 0.40f)
@@ -254,6 +321,7 @@ public class StartupUI : MonoBehaviour
         _config.pythonHost            = string.IsNullOrWhiteSpace(_pythonHost) ? "127.0.0.1" : _pythonHost.Trim();
         _config.microphoneDevice      = _micDevices[_micIndex];
         _config.offlineMode           = _offlineMode;
+        _config.pythonScriptDir       = _pythonScriptDir?.Trim() ?? "";
         _config.Save();
         OnConfirmed?.Invoke();
         Destroy(this);
@@ -305,7 +373,91 @@ public class StartupUI : MonoBehaviour
         _testClip = null;
     }
 
-    private void OnDestroy() => StopTestMic();
+    private void OnDestroy()
+    {
+        StopTestMic();
+        if (_pingCo != null) StopCoroutine(_pingCo);
+        if (_oscSession != null) _oscSession.OnPong -= HandlePong;
+    }
+
+    // ── Python detection / launch ─────────────────────────────────────────────
+
+    private void HandlePong() => _pongReceived = true;
+
+    private System.Collections.IEnumerator PingPython(float timeout)
+    {
+        _pythonStatus = PythonStatus.Checking;
+        // Wait for OscSessionManager.SetupReceiverNextFrame() to complete
+        yield return null;
+        yield return null;
+
+        if (_oscSession == null)
+            _oscSession = FindAnyObjectByType<OscSessionManager>();
+        if (_oscSession == null) { _pythonStatus = PythonStatus.NotRunning; yield break; }
+
+        _pongReceived = false;
+        _oscSession.OnPong += HandlePong;
+        _oscSession.Ping();
+
+        float elapsed = 0f;
+        while (elapsed < timeout && !_pongReceived)
+        {
+            yield return null;
+            elapsed += Time.unscaledDeltaTime;
+        }
+
+        _oscSession.OnPong -= HandlePong;
+        _pythonStatus = _pongReceived ? PythonStatus.Running : PythonStatus.NotRunning;
+        _pingCo = null;
+    }
+
+    private System.Collections.IEnumerator LaunchAndRePing()
+    {
+        _pythonStatus = PythonStatus.Launching;
+        LaunchPython();
+        // Give Python time to initialize OSC listener
+        yield return new WaitForSecondsRealtime(4f);
+        yield return StartCoroutine(PingPython(3f));
+    }
+
+    private void LaunchPython()
+    {
+        string baseDir = _pythonScriptDir?.Trim() ?? "";
+        if (string.IsNullOrEmpty(baseDir)) { _pythonStatus = PythonStatus.NotRunning; return; }
+        string srcDir = System.IO.Path.Combine(baseDir, "src");
+
+        // pythonw.exe is the windowless Python launcher bundled with every CPython install.
+        // Falls back to cmd start if pythonw is not found.
+        var psi = new System.Diagnostics.ProcessStartInfo
+        {
+            FileName         = "pythonw",
+            Arguments        = "-m main",
+            WorkingDirectory = srcDir,
+            UseShellExecute  = false,
+            CreateNoWindow   = true,
+        };
+        try
+        {
+            System.Diagnostics.Process.Start(psi);
+        }
+        catch
+        {
+            // pythonw not found — fall back to detached cmd (window visible)
+            psi = new System.Diagnostics.ProcessStartInfo
+            {
+                FileName       = "cmd.exe",
+                Arguments      = $"/c start \"\" /d \"{srcDir}\" cmd.exe /k python -m main",
+                UseShellExecute = false,
+                CreateNoWindow  = true,
+            };
+            try   { System.Diagnostics.Process.Start(psi); }
+            catch (Exception ex2)
+            {
+                Debug.LogWarning($"[StartupUI] Python launch failed: {ex2.Message}");
+                _pythonStatus = PythonStatus.NotRunning;
+            }
+        }
+    }
 
     private static Texture2D MakeTex(int w, int h, Color col)
     {

@@ -64,6 +64,11 @@ public class SceneBootstrapper2 : MonoBehaviourPunCallbacks, IOnEventCallback
 
     private void Awake()
     {
+        // Keep the headset / display awake for the whole session: without this the Quest can self-sleep
+        // during a long step (e.g. the 180s assembly), and proximity-sensor / OS suspend then drops Photon
+        // and rolls the Worker back to "setup". Idempotent; harmless on PC.
+        Screen.sleepTimeout = SleepTimeout.NeverSleep;
+
         // OVRCameraRig already provides an AudioListener; remove extras to prevent
         // "2 audio listeners" console spam every frame at startup.
         var allListeners = FindObjectsByType<AudioListener>(FindObjectsSortMode.None);
@@ -330,111 +335,15 @@ public class SceneBootstrapper2 : MonoBehaviourPunCallbacks, IOnEventCallback
 
     private void SetupWorker(GameObject playerObj, ExperimentManager2 expMgr, string micDevice)
     {
-        // Disable default camera; ensure AudioListener remains in scene
-        var cam = Camera.main;
-        if (cam != null && cam.GetComponentInParent<OVRCameraRig>() == null)
-        {
-            // Check if any AudioListener exists OUTSIDE the camera hierarchy.
-            // If all listeners are on the camera (or its children), create a standalone one
-            // before disabling the camera — otherwise audio goes silent.
-            bool hasExternalAL = false;
-            foreach (var al in FindObjectsByType<AudioListener>(FindObjectsSortMode.None))
-            {
-                if (!al.transform.IsChildOf(cam.transform))
-                { hasExternalAL = true; break; }
-            }
-            if (!hasExternalAL)
-                new GameObject("WorkerAudioListener").AddComponent<AudioListener>();
-            cam.gameObject.SetActive(false);
-        }
-
-        // PostureHandler + MetaXRPostureInput
-        var postureInput   = playerObj.AddComponent<MetaXRPostureInput>();
-        var postureHandler = playerObj.GetComponent<PostureHandler>();
-        if (postureHandler != null) postureHandler.Initialize(postureInput);
-
-        // GazeHandler + MetaXRGazeInput
-        var gazeInput   = playerObj.AddComponent<MetaXRGazeInput>();
-        var gazeHandler = playerObj.GetComponent<GazeHandler>();
-        if (gazeHandler != null) gazeHandler.Initialize(gazeInput);
-
-        // GazeVisualizer — renders the remote Expert's shared gaze on the Worker
-        new GameObject("LocalGazeVisualizer").AddComponent<GazeVisualizer>().Initialize();
-        FileLogger.Log("Setup", "[SceneBootstrapper2] Worker GazeVisualizer spawned.");
-
-        // Hide own avatar from self
-        foreach (var r in playerObj.GetComponentsInChildren<MeshRenderer>(true))
-            r.enabled = false;
-
-        // ExperimentManager2
-        expMgr.Initialize(isExpert: false);
-
-        // WorkerHUD2
-        var hud = playerObj.AddComponent<WorkerHUD2>();
-        hud.Initialize(expMgr);
-
-        // SetupCoordinator — drives setup progress UI and tracks calib + task QR conditions
-        var setupCoord = playerObj.AddComponent<SetupCoordinator>();
-        setupCoord.Initialize(isWorker: true, expMgr, requiredTaskQRCount);
-        _workerSetupCoord = setupCoord;   // so OnPlayerPropertiesUpdate can forward Expert setup-readiness
-
-        // Photon Voice 2 — Recorder must be on the prefab; we configure it here
-        var recorder = playerObj.GetComponentInChildren<Recorder>();
-        if (recorder != null && !string.IsNullOrEmpty(micDevice))
-            recorder.MicrophoneDevice = new Photon.Voice.DeviceInfo(micDevice);
-        else if (recorder == null)
-            Debug.LogWarning("[SceneBootstrapper2] Recorder not found on LocalWorker prefab.");
-
-        if (recorder != null)
-        {
-            recorder.MicrophoneType = Recorder.MicType.Photon;
-            // AGC off so VAD threshold is predictable (native AGC raises gain during silence → false triggers)
-            recorder.SetAndroidNativeMicrophoneSettings(aec: true, agc: false, ns: true);
-            var dsp = recorder.gameObject.GetComponent<WebRtcAudioDsp>()
-                      ?? recorder.gameObject.AddComponent<WebRtcAudioDsp>();
-            dsp.AEC = false; dsp.NoiseSuppression = false; dsp.AGC = false;
-            recorder.SamplingRate  = SamplingRate.Sampling16000;
-            recorder.FrameDuration = OpusCodec.FrameDuration.Frame20ms;
-            recorder.Bitrate       = 24000;
-            recorder.VoiceDetection          = true;
-            recorder.VoiceDetectionThreshold = 0.015f;
-            recorder.VoiceDetectionDelayMs   = 500;
-        }
-
-        // VoiceRecorder — WAV recording independent of PV2
-        string logDir = System.IO.Path.Combine(Application.persistentDataPath, "logs", participantId);
-        _voiceRecorder = playerObj.AddComponent<VoiceRecorder>();
-        _voiceRecorder.Initialize(false, logDir, micDevice);
-
-        // WorkerVideoStream — WebRTC, no transport arg; signaling wired below
         PhotonNetwork.AddCallbackTarget(this);
-        _videoStream = playerObj.AddComponent<WorkerVideoStream>();
-        _videoStream.Initialize(expMgr);
-
-        var s = _videoStream.Session;
-        s.OnSendOffer  += sdp => RaiseSignal(WebRtcVideoSession.EVT_OFFER,  new[] { sdp });
-        s.OnSendAnswer += sdp => RaiseSignal(WebRtcVideoSession.EVT_ANSWER, new[] { sdp });
-        s.OnSendIce    += (c, mid, idx) => RaiseSignal(WebRtcVideoSession.EVT_ICE, new[] { c, mid, idx.ToString() });
-
-        // QuestionnaireManager — set participant identity so JSON filenames are correct
-        var qm = FindAnyObjectByType<QuestionnaireManager>();
-        if (qm != null)
-        {
-            qm.participantId     = participantId;
-            qm.participantNumber = participantOrderIndex;
-            FileLogger.Log("Setup", $"[SceneBootstrapper2] QuestionnaireManager participant set: id={participantId} num={participantOrderIndex}");
-        }
-        else
-        {
-            Debug.LogWarning("[SceneBootstrapper2] QuestionnaireManager not found in scene — questionnaire data will use default participant identity.");
-        }
-
-        // WorkerTrackingSync — publishes head/controller pose to Photon custom player properties
-        playerObj.AddComponent<WorkerTrackingSync>();
-        FileLogger.Log("Setup", "[SceneBootstrapper2] WorkerTrackingSync added.");
-
+        var r = WorkerRigBuilder.Build(
+            playerObj, expMgr, micDevice,
+            participantId, participantOrderIndex, requiredTaskQRCount,
+            RaiseSignal);
+        _videoStream      = r.VideoStream;
+        _voiceRecorder    = r.VoiceRecorder;
+        _workerSetupCoord = r.SetupCoordinator;
         CheckForExistingExpert();
-
 #if UNITY_ANDROID && !UNITY_EDITOR
         AcquireWifiLock();
 #endif
@@ -451,28 +360,28 @@ public class SceneBootstrapper2 : MonoBehaviourPunCallbacks, IOnEventCallback
 
     public void OnEvent(EventData ev)
     {
+        // CustomData arrives from a remote peer over the wire — never trust its type or length.
+        // A malformed payload (null, wrong type, or too few elements) must not throw inside the
+        // Photon event pump; an unhandled exception there would kill all further signaling.
+        var d = ev.CustomData as string[];
+        if (d == null || d.Length == 0) return;
+
         switch (ev.Code)
         {
             case WebRtcVideoSession.EVT_ANSWER:
-                _videoStream?.Session?.ApplyRemoteAnswer(((string[])ev.CustomData)[0]);
+                _videoStream?.Session?.ApplyRemoteAnswer(d[0]);
                 break;
             case WebRtcVideoSession.EVT_ICE when _videoStream?.Session != null:
-            {
-                var d = (string[])ev.CustomData;
                 if (int.TryParse(d.Length > 2 ? d[2] : "0", out int idx))
                     _videoStream.Session.AddRemoteIce(d[0], d.Length > 1 ? d[1] : "", idx);
                 break;
-            }
             case WebRtcVideoSession.EVT_OFFER:
-                _videoDisplay?.Session?.ApplyRemoteOffer(((string[])ev.CustomData)[0]);
+                _videoDisplay?.Session?.ApplyRemoteOffer(d[0]);
                 break;
             case WebRtcVideoSession.EVT_ICE when _videoDisplay?.Session != null:
-            {
-                var d = (string[])ev.CustomData;
-                if (int.TryParse(d.Length > 2 ? d[2] : "0", out int idx))
-                    _videoDisplay.Session.AddRemoteIce(d[0], d.Length > 1 ? d[1] : "", idx);
+                if (int.TryParse(d.Length > 2 ? d[2] : "0", out int idx2))
+                    _videoDisplay.Session.AddRemoteIce(d[0], d.Length > 1 ? d[1] : "", idx2);
                 break;
-            }
         }
     }
 
@@ -552,95 +461,17 @@ public class SceneBootstrapper2 : MonoBehaviourPunCallbacks, IOnEventCallback
 
     private void SetupExpert(GameObject playerObj, ExperimentManager2 expMgr, string micDevice)
     {
-        // Remove OVRCameraRig — Expert is PC only
-        var rig = FindAnyObjectByType<OVRCameraRig>();
-        if (rig != null) { rig.gameObject.SetActive(false); Destroy(rig.gameObject); }
-
-        if (FindAnyObjectByType<AudioListener>() == null)
-            new GameObject("AudioListener").AddComponent<AudioListener>();
-
-        if (playerObj.GetComponent<ConnectionHandler>() == null)
-            playerObj.AddComponent<ConnectionHandler>();
-
-        // GazeHandler + OscGazeInput
-        var gazeInput   = playerObj.AddComponent<OscGazeInput>();
-        var gazeHandler = playerObj.GetComponent<GazeHandler>();
-        if (gazeHandler != null)
-        {
-            gazeHandler.Initialize(gazeInput);
-            expMgr.SetGazeHandler(gazeHandler);  // condition switches will update gaze mode
-        }
-
-        // ExperimentManager2
-        expMgr.Initialize(isExpert: true);
-
-        // ExpertUI2
-        var ui = playerObj.AddComponent<ExpertUI2>();
-        ui.Initialize(expMgr);
-
-        // SetupCoordinator — shows Worker status panel and approve button during Setup state
-        var setupCoord = playerObj.AddComponent<SetupCoordinator>();
-        setupCoord.Initialize(isWorker: false, expMgr, requiredTaskQRCount);
-
-        // Photon Voice 2 — Recorder must be on the prefab; configure it here
-        var recorder = playerObj.GetComponentInChildren<Recorder>();
-        if (recorder != null && !string.IsNullOrEmpty(micDevice))
-            recorder.MicrophoneDevice = new Photon.Voice.DeviceInfo(micDevice);
-        else if (recorder == null)
-            Debug.LogWarning("[SceneBootstrapper2] Recorder not found on RemoteExpert prefab.");
-
-        if (recorder != null)
-        {
-            var dsp = recorder.gameObject.GetComponent<WebRtcAudioDsp>()
-                      ?? recorder.gameObject.AddComponent<WebRtcAudioDsp>();
-            dsp.AEC = false; dsp.NoiseSuppression = true; dsp.AGC = true;
-            dsp.AgcCompressionGain = 18; dsp.AgcTargetLevel = 3;
-            recorder.SamplingRate  = SamplingRate.Sampling48000; // PC mic does not support 16000; use 48000
-            recorder.FrameDuration = OpusCodec.FrameDuration.Frame20ms;
-            recorder.Bitrate       = 24000;
-        }
-
-        // VoiceRecorder — WAV recording
-        string logDir = System.IO.Path.Combine(Application.persistentDataPath, "logs", participantId);
-        _voiceRecorder = playerObj.AddComponent<VoiceRecorder>();
-        _voiceRecorder.Initialize(true, logDir, micDevice);
-        StartSpeakerSearch(true);
-
-        // GazeVisualizer (self-view)
-        new GameObject("LocalGazeVisualizer").AddComponent<GazeVisualizer>().Initialize();
-
-        if (!_offlineMode)
-        {
-            PhotonNetwork.CurrentRoom?.SetCustomProperties(new ExitGames.Client.Photon.Hashtable
-            {
-                { "participantId", participantId }
-            });
-        }
-
-        // ExpertVideoDisplay — WebRTC answerer; signaling wired below
         PhotonNetwork.AddCallbackTarget(this);
-        _videoDisplay = playerObj.AddComponent<ExpertVideoDisplay>();
-        _videoDisplay.Initialize(expMgr);
-
-        var s = _videoDisplay.Session;
-        s.OnSendOffer  += sdp => RaiseSignal(WebRtcVideoSession.EVT_OFFER,  new[] { sdp });
-        s.OnSendAnswer += sdp => RaiseSignal(WebRtcVideoSession.EVT_ANSWER, new[] { sdp });
-        s.OnSendIce    += (c, mid, idx) => RaiseSignal(WebRtcVideoSession.EVT_ICE, new[] { c, mid, idx.ToString() });
-
-        // Signal Worker that signaling is ready — Worker waits for this before calling TriggerOffer()
+        var r = ExpertRigBuilder.Build(
+            playerObj, expMgr, micDevice,
+            participantId, participantOrderIndex, requiredTaskQRCount,
+            RaiseSignal, _offlineMode);
+        _videoDisplay  = r.VideoDisplay;
+        _voiceRecorder = r.VoiceRecorder;
+        StartSpeakerSearch(true);
+        // Publish granular self-readiness so the Worker's setup panel shows 実験者 準備中/準備完了.
         if (!_offlineMode)
-        {
-            Debug.Log("[SceneBootstrapper2] Setting expertReady=true — Worker can now send WebRTC offer.");
-            PhotonNetwork.LocalPlayer.SetCustomProperties(new Hashtable { ["expertReady"] = true });
-            // Publish granular self-readiness so the Worker's setup panel shows 実験者 準備中/準備完了.
             StartCoroutine(PublishExpertSetupReadyLoop(expMgr));
-        }
-
-        // ExperimentLogger — writes trials.csv / frames.csv / replay JSON
-        string logDir2 = System.IO.Path.Combine(
-            Application.persistentDataPath, "logs", participantId);
-        var logger = playerObj.AddComponent<ExperimentLogger>();
-        logger.Initialize(expMgr, participantOrderIndex, logDir2);
     }
 
     // ── Photon callbacks ──────────────────────────────────────────────────
@@ -671,6 +502,17 @@ public class SceneBootstrapper2 : MonoBehaviourPunCallbacks, IOnEventCallback
         if (!_setupDone) return;
         FileLogger.Log("Setup", "[SceneBootstrapper2] Disconnected — reset for reconnect.");
         _setupDone = false;
+
+        // Reset the one-shot guards so the rejoin path (OnRoomJoined → SetupAfterDeviceCheck →
+        // SetupWorker/SetupExpert) re-establishes A/V idempotently. Without this:
+        //  - _offerTriggered stayed true   → the WebRTC video offer was never re-sent → no video.
+        //  - _expertAudioAttached stayed true → the remote-Speaker search never restarted → no audio.
+        //  - _publishedExpertSetupReady kept its last value → Expert never re-published readiness.
+        // SetupWorker re-creates _videoStream and calls CheckForExistingExpert, which re-fires the
+        // offer (now that _offerTriggered is clear) once the Expert is present/ready again.
+        _offerTriggered            = false;
+        _expertAudioAttached       = false;
+        _publishedExpertSetupReady = null;
     }
 
     public override void OnPlayerEnteredRoom(Player newPlayer)

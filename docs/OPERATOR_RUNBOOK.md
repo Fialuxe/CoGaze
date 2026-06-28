@@ -18,8 +18,8 @@
   → [Expert: Escでカーソル解除 → 承認ボタン] → Idle（一瞬）→ Ready（Python pong or 10s後）
   → [Expert: Enter] → ConditionStart（条件1/10）
       IR/NoGaze: そのままEnter / Webcam系: キャリブPASS待ち→Enter
-  → WhiteNoise(60s 呼吸ガイド) → NoiseComplete [Enter]
-  → TaskRunning(Task 10s / Assembly 180s) → TaskComplete [Enter]
+  → WhiteNoise(20s 呼吸ガイド) → NoiseComplete [Enter]
+  → TaskRunning(Task 60s / Assembly 180s) → TaskComplete [Enter]
   → Questionnaire(NASA-TLX, Worker提出で自動前進)
   → …(条件×10 繰り返し)… → Finished → SSQ（最後の1問・外さない）
 ```
@@ -40,6 +40,7 @@
 | **1/2/3** | TaskRunning以外 | 視線可視化モード変更 | TaskRunningのみロック。ConditionStartで誤爆すると次タスク本番に誤モード持ち越し＝サイレント条件汚染 |
 | **V** | 全般 | WebRTC映像canvasトグル | Assembly中に白画面で視界が塞がれた時の視界回復手段 |
 | **WASD/マウス** | 非Assembly | Exportフリールック | 動かすと共有視線原点がずれる。タスク中はデータ汚染 |
+| **F2/F3/F4** | TaskRunning（Task/Assembly） | 発話エスカレーション段の記録（F2=特徴語 / F3=空間語 / F4=向き※組立のみ） | 段を上げた瞬間に押す。押し忘れ＝max_rung過小。識別はF2/F3のみ。trials.csv:max_rung＋escalations.csvに記録。詳細§1-E′ |
 
 ---
 
@@ -80,7 +81,7 @@
 | ACKがok以外→黙ってスキップ | Pythonがok以外で応答 | W:変化なし E:Enterが通るが「キャリブしてない」明示なし | Rで再試行可能だがスキップに気づきにくい |
 | **Webcamキャリブ中Workerに進行表示が無い** | 30秒級キャリブ走行中 | W:「【条件X/10】」のまま・なぜ進まないか不明 E:calib.runningで把握可 | **口頭(Voice)で「今キャリブ中」と伝える運用に依存**。Worker側フィードバック経路が無い |
 
-### 1-D. WhiteNoise（インターバル60s）
+### 1-D. WhiteNoise（インターバル20s）
 
 | 事態 | 引き金 | 何が見える | 操作者の対処 |
 |---|---|---|---|
@@ -89,7 +90,7 @@
 | nature音(rain_loop)未配置 | Resources/Audio/rain_loop無し | W:ブラウンノイズのみ(気づきにくい) E:差分なし(ログのみ) | 音量条件を厳密にするなら起動前にファイル確認 |
 | タイマードリフト | フレームレート差 | W:最大10s毎に微小ジャンプ | 自動補正(PeriodicResync)。一瞬飛んでも異常でない |
 
-### 1-E. TaskRunning（Task 10s / Assembly 180s）
+### 1-E. TaskRunning（Task 60s / Assembly 180s）
 
 | 事態 | 引き金 | 何が見える | 操作者の対処 |
 |---|---|---|---|
@@ -100,6 +101,23 @@
 | 被験者が違うQRでグリップ→誤同定Done | 対象外QRの20cm内でグリップ | W:「QR発見」→完了で次へ・誤りの指摘なし E:自動前進・どのIDで完了か即時表示なし | 現場では検知不可(解析時CompletedMarkerIdで判定)。完了ID即表示が望ましい |
 | **Assembly中Follow空振り** | Worker姿勢が見つからない(未参加/オーナーシップ未確定) | W:影響小 E:「タスク実行中」だがカメラがWorkerに追従せず・エラー表示なし | 進行中の手当てなし。`対処不能（要再設計）` |
 | **被験者が試行中に右グリップ→SharedMeshが動く** | Setup外で右グリップ→スティック→A | W:_calibText較正ヒント(v2では未配線で出ない場合あり) E:マーカー/空間が突然ずれ・原因表示なし | A確定前なら再グリップで戻せるが**A後は`対処不能（再起動 / 要再設計）`**。SuppressManualCalibGripがSetup限定(:146)が根本原因 |
+
+### 1-E′. 発話エスカレーション・プロトコル（識別/組立共通・要オペレータ訓練）
+
+視線（NoGaze条件は音声のみ）で対象が伝わらないとき、Expertは**段階的に言葉を足す**。段を上げた瞬間に**F2/F3/F4で記録**する（押し忘れ＝その段に未達扱い＝max_rung過小に注意）。
+
+| 段 | 内容 | 例 | 上がる条件 | キー |
+|---|---|---|---|---|
+| 1 | 指示語＋視線 | 「これを・そこに」 | 開始時（既定・max_rung=1） | （無し） |
+| 2 | 特徴・相対語 | 「赤いQR／L字のを・ひとつ右のマスに」 | 下段で通じない | **F2** |
+| 3 | 空間・座標語 | 「右上のQR／中央手前のマスに」 | さらに通じない | **F3** |
+| 4 | ＋向き（**組立のみ**） | 「90度右に回して」 | 正しいマスにあるが向き違い／配置失敗が続く | **F4** |
+
+- **組立 (Assembly, 180s)**: 各段は**無反応/誤りが約10秒続いたら次へ**上がる。識別の段1–3＋向きの段4まで使用。
+- **識別 (Task, 60s)**: 早期完了（Workerがグリップで選択）か満了の早い方。**組立と同じ10秒しきい値**でOK（60秒なら段3まで十分到達可能）。**向きの段（F4）は無し**＝段1–3のみ。
+- NoGaze条件も同じ段・キーで記録（視線が無いぶん早く上段になる＝高い max_rung が想定どおり）。
+- **記録先**: 試行ごとの最高段＝`logs/P{n}/trials.csv` の **max_rung** 列。各押下のタイムスタンプ＝同フォルダ **escalations.csv**（`trial_id,t_ms,elapsed_s,condition_index,task_type,rung`）。押し間違いは escalations.csv の系列から事後補正可（max_rung は最高段なので過大方向に注意）。
+- **方法論的意味**: 「視線がどれだけ言葉を足さずに済ませたか」の客観指標。良い視線条件ほど低段で完了し、NoGaze は高段に至るはず。理解項目が天井でも max_rung が視線の効き目を捉える。
 
 ### 1-F. TaskComplete / NoiseComplete（ゲート）
 

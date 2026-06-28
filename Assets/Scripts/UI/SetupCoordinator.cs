@@ -34,12 +34,21 @@ public class SetupCoordinator : MonoBehaviour
 #endif
 
     // ── Worker VR UI ───────────────────────────────────────────────────────
+    // Preferred path: WorkerHUD2 found at runtime → setup status rendered inside that HUD (no
+    // separate panel). Fallback path: WorkerHUD2 not found → standalone panel built by BuildWorkerUI.
+    private WorkerHUD2 _workerHUD;          // non-null when merged into WorkerHUD2
     private GameObject _workerPanel;
     private Text       _workerExpertReadyLine;
     private Text       _workerCalibLine;
     private Text       _workerTaskLine;
     private Text       _workerHintLine;
     private bool       _expertSetupReady = false;   // mirrors the Expert's IsExpertSelfReady (via Photon prop)
+
+    // ── Manual task-QR registration feedback (UX9) ──────────────────────────
+    // Declared OUTSIDE the Android #if because RefreshUI (which runs on the non-Android Expert
+    // build too) reads them. They are only ever written on the Worker/Android grip path.
+    private string _lastManualRegId;            // last task-QR id successfully registered, for the confirmation line
+    private float  _lastManualRegTime = -10f;   // Time.time of that registration (for the brief confirmation window)
 
     // ── Expert UI ─────────────────────────────────────────────────────────
     private GameObject _expertPanel;
@@ -90,7 +99,11 @@ public class SetupCoordinator : MonoBehaviour
         manager.OnStateChanged += OnStateChanged;
 
         if (isWorker)
-            BuildWorkerUI();
+        {
+            _workerHUD = Object.FindAnyObjectByType<WorkerHUD2>();
+            if (_workerHUD == null)
+                BuildWorkerUI();  // fallback: standalone panel when WorkerHUD2 is not in scene
+        }
         else
             BuildExpertUI();
 
@@ -177,19 +190,92 @@ public class SetupCoordinator : MonoBehaviour
         bool  justPressed = gripDown && !_gripWasDown;
         _gripWasDown = gripDown;
 
-        // While the left X button is held, the right grip is calibrating the mesh (MeshHandler) —
-        // don't also register a QR with the same grip press.
+        // While the left X button is held, the right hand is calibrating the mesh with the index
+        // trigger (MeshHandler); suppress QR registration during a calibration hold so a stray grip
+        // can't drop a marker while the operator is aligning the mesh.
         if (OVRInput.Get(OVRInput.Button.One, OVRInput.Controller.LTouch)) return;
 
         if (!justPressed || nextMissing == null || _qrManager == null) return;
 
         Vector3    pos = GetRightControllerWorldPos();
         Quaternion rot = _ovrRig != null ? _ovrRig.rightHandAnchor.rotation : Quaternion.identity;
+
+        // UX9: a manual registration writes this raw controller position straight into the marker
+        // set that the LATER 20 cm identification proximity test compares against
+        // (IdentificationTask.ProximityThreshold = 0.20 m). A garbage pose — tracking lost (origin),
+        // NaN, or an arm's-reach-violating stray grip — would silently corrupt that test with no
+        // operator-visible symptom. Gate the registration on a sane pose and tell the operator to
+        // retry instead of recording garbage.
+        if (!IsValidRegistrationPose(pos, out string rejectReason))
+        {
+            Debug.LogWarning($"[SetupCoordinator] Manual register REJECTED for '{nextMissing}': {rejectReason} pos={pos}");
+            ShowManualRegisterRejected(nextMissing, rejectReason);
+            OvrHaptics.Pulse(this, 0.3f, 0.3f, 0.08f, OVRInput.Controller.RTouch); // soft "rejected" buzz
+            return;
+        }
+
+        // Set the confirmation BEFORE registering: RegisterManualMarker broadcasts via a PUN RPC
+        // that runs locally and SYNCHRONOUSLY, so the RefreshUI it triggers (via OnMarkerDetected)
+        // must already see this id, or the on-panel "registered" line shows the previous letter.
+        _lastManualRegId   = nextMissing;
+        _lastManualRegTime = Time.time;
         _qrManager.RegisterManualMarker(nextMissing, pos, rot);
 
         OvrHaptics.Pulse(this, 0.5f, 0.8f, 0.2f, OVRInput.Controller.RTouch);
 #endif
     }
+
+#if UNITY_ANDROID && !UNITY_EDITOR
+    // Maximum plausible distance from the headset (centre-eye) to the right controller while the
+    // Worker is physically touching a QR to register it — i.e. arm's reach. Beyond this the pose is
+    // almost certainly NOT "controller on the code" (e.g. a stray grip mid-gesture).
+    // FLAG: this is a usability sanity bound chosen by the implementer, NOT a measured research
+    // parameter. It is deliberately separate from (and far larger than) the 0.20 m identification
+    // ProximityThreshold, which was left untouched. Confirm/adjust with the experiment owner.
+    private const float MaxRegisterReach = 1.2f;   // metres
+
+    /// <summary>
+    /// Sanity-checks a manual-registration controller pose before it is recorded as a task-QR
+    /// position. Rejects NaN/Inf, the tracking origin (lost controller), and implausibly far poses.
+    /// Cannot validate ground truth (MRUK failed to detect the code, so there is no true pose to
+    /// compare against) — this only stops obviously corrupt data from poisoning the 20 cm test.
+    /// </summary>
+    private bool IsValidRegistrationPose(Vector3 pos, out string reason)
+    {
+        if (float.IsNaN(pos.x)      || float.IsNaN(pos.y)      || float.IsNaN(pos.z) ||
+            float.IsInfinity(pos.x) || float.IsInfinity(pos.y) || float.IsInfinity(pos.z))
+        {
+            reason = "コントローラ座標が無効です";
+            return false;
+        }
+
+        // A controller that has lost tracking reports (0,0,0) at the tracking origin.
+        if (pos.sqrMagnitude < 0.0001f)
+        {
+            reason = "コントローラが認識されていません";
+            return false;
+        }
+
+        Transform head = _ovrRig != null ? _ovrRig.centerEyeAnchor : null;
+        if (head != null && Vector3.Distance(pos, head.position) > MaxRegisterReach)
+        {
+            reason = "QRにもっと近づけてください";
+            return false;
+        }
+
+        reason = null;
+        return true;
+    }
+
+    private void ShowManualRegisterRejected(string id, string reason)
+    {
+        string msg = $"[再試行] 「{id}」を登録できません\n{reason}";
+        if (_workerHUD != null) { _workerHUD.ShowSetupError(msg); return; }
+        if (_workerHintLine == null) return;
+        _workerHintLine.text  = msg;
+        _workerHintLine.color = new Color(1f, 0.4f, 0.3f);
+    }
+#endif
 
 #if UNITY_ANDROID && !UNITY_EDITOR
     private Vector3 GetRightControllerWorldPos()
@@ -210,40 +296,60 @@ public class SetupCoordinator : MonoBehaviour
 
     private void RefreshUI()
     {
-        string calibIcon   = _calibDone ? "✅" : "⬜";
+        // CQ19: plain-ASCII status markers — the bundled NotoSansJP font has no emoji glyphs,
+        // so ✅/⬜ rendered as tofu (□) on the headset.
+        string calibIcon   = _calibDone ? "[OK]" : "[--]";
         bool   taskDone    = AllTaskQRsPresent();
-        string taskIcon    = taskDone ? "✅" : "⬜";
+        string taskIcon    = taskDone ? "[OK]" : "[--]";
         int    detected    = DetectedTaskCount();
         string firstMissing = FirstMissingId();
 
         if (_isWorker)
         {
+            // Build hint text (shared by merged and standalone paths)
+            bool allDone = _calibDone && taskDone;
+            string hintText;
+            if (allDone)
+            {
+                hintText = "[OK] 準備完了 — 実験者の承認を待っています";
+            }
+            else if (!_calibDone)
+            {
+                hintText = "QR-A と QR-B を見てください";
+            }
+            else
+            {
+                bool justRegistered = !string.IsNullOrEmpty(_lastManualRegId)
+                                      && (Time.time - _lastManualRegTime) < 3f;
+                string confirm = justRegistered
+                    ? $"[OK] 「{_lastManualRegId}」を登録しました\n"
+                    : "";
+                hintText = confirm +
+                    $"未認識のQRが {_expectedTaskIds.Count - detected} 個あります\n" +
+                    $"「{firstMissing}」のQRにコントローラを当てて\n右グリップを押してください";
+            }
+
+            if (_workerHUD != null)
+            {
+                _workerHUD.UpdateSetupStatus(_calibDone, detected, _expectedTaskIds.Count, hintText, _expertSetupReady);
+                return;
+            }
+
+            // Standalone fallback panel
             if (_workerCalibLine != null)
                 _workerCalibLine.text = $"{calibIcon} キャリブレーション";
-
             if (_workerTaskLine != null)
                 _workerTaskLine.text = $"{taskIcon} タスクマーカー  {detected} / {_expectedTaskIds.Count}";
-
-            bool allDone = _calibDone && taskDone;
             if (_workerHintLine != null)
             {
-                if (allDone)
-                {
-                    _workerHintLine.text  = "✅ 準備完了 — 実験者の承認を待っています";
-                    _workerHintLine.color = new Color(0.3f, 1f, 0.5f);
-                }
-                else if (!_calibDone)
-                {
-                    _workerHintLine.text  = "QR-A と QR-B を見てください";
-                    _workerHintLine.color = new Color(1f, 0.85f, 0.3f);
-                }
-                else // calib done, task QRs missing
-                {
-                    _workerHintLine.text  =
-                        $"未認識のQRが {_expectedTaskIds.Count - detected} 個あります\n" +
-                        $"「{firstMissing}」のQRにコントローラを当てて\n右グリップを押してください";
-                    _workerHintLine.color = new Color(1f, 0.6f, 0.3f);
-                }
+                _workerHintLine.text  = hintText;
+                _workerHintLine.color = allDone
+                    ? new Color(0.3f, 1f, 0.5f)
+                    : !_calibDone
+                        ? new Color(1f, 0.85f, 0.3f)
+                        : (!string.IsNullOrEmpty(_lastManualRegId) && (Time.time - _lastManualRegTime) < 3f
+                            ? new Color(0.4f, 1f, 0.5f)
+                            : new Color(1f, 0.6f, 0.3f));
             }
         }
         else
@@ -325,11 +431,11 @@ public class SetupCoordinator : MonoBehaviour
 
         _workerCalibLine = MakeText("CalibLine", _workerPanel.transform,
             new Vector2(0.04f, 0.51f), new Vector2(0.96f, 0.67f),
-            "⬜ キャリブレーション", 20, TextAnchor.MiddleLeft, Color.white);
+            "[--] キャリブレーション", 20, TextAnchor.MiddleLeft, Color.white);
 
         _workerTaskLine = MakeText("TaskLine", _workerPanel.transform,
             new Vector2(0.04f, 0.35f), new Vector2(0.96f, 0.51f),
-            "⬜ タスクマーカー  0 / ?", 20, TextAnchor.MiddleLeft, Color.white);
+            "[--] タスクマーカー  0 / ?", 20, TextAnchor.MiddleLeft, Color.white);
 
         _workerHintLine = MakeText("HintLine", _workerPanel.transform,
             new Vector2(0.04f, 0.02f), new Vector2(0.96f, 0.35f),
@@ -348,7 +454,10 @@ public class SetupCoordinator : MonoBehaviour
     public void SetExpertSetupReady(bool ready)
     {
         _expertSetupReady = ready;
-        RefreshExpertReadyLine();
+        if (_workerHUD != null)
+            RefreshUI();  // WorkerHUD2 path — UpdateSetupStatus includes the expert-ready line
+        else
+            RefreshExpertReadyLine();
     }
 
     private void RefreshExpertReadyLine()
@@ -406,11 +515,11 @@ public class SetupCoordinator : MonoBehaviour
 
         _expertCalibLine = MakeText("CalibLine", pt,
             new Vector2(0.05f, 0.62f), new Vector2(0.95f, 0.81f),
-            "⬜ キャリブ", 17, TextAnchor.MiddleLeft, Color.white);
+            "[--] キャリブ", 17, TextAnchor.MiddleLeft, Color.white);
 
         _expertTaskLine = MakeText("TaskLine", pt,
             new Vector2(0.05f, 0.43f), new Vector2(0.95f, 0.62f),
-            "⬜ タスクQR  0 / ?", 17, TextAnchor.MiddleLeft, Color.white);
+            "[--] タスクQR  0 / ?", 17, TextAnchor.MiddleLeft, Color.white);
 
         var btnGo = new GameObject("ApproveButton");
         btnGo.transform.SetParent(pt, false);

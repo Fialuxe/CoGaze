@@ -46,6 +46,15 @@ public class ExpertUI2 : MonoBehaviour
     private MeshHandler _meshHandler;
     private bool        _meshVisible = false;
 
+    // ── Identification task (live target + score) ─────────────────────────
+    private IdentificationTask          _idTask;
+    private System.Action<string, int>  _idTargetHandler;
+
+    // ── Countdown overlay (3-2-1-GO) ─────────────────────────────────────
+    private Text                        _countdownOverlay;
+    private System.Action<int>          _countdownHandler;
+    private Coroutine                   _countdownClearCo;
+
     // ── State ─────────────────────────────────────────────────────────────
     private bool manualHideOverride;
 
@@ -61,9 +70,10 @@ public class ExpertUI2 : MonoBehaviour
     private bool      _inTaskState;
 
     // ── Python / OSC ──────────────────────────────────────────────────────
-    private float  _lastPong    = -999f;
-    private float  _nextPing    = 0f;
-    private bool   _wasPythonOk = false;
+    private float  _lastPong     = -999f;
+    private float  _nextPing     = 0f;
+    private float  _firstPingTime = -1f;   // set when the first ping is sent (CQ18: grace = elapsed since first ping)
+    private bool   _wasPythonOk  = false;
     private const float PingInterval = 5f;
     private const float PongTimeout  = 8f;
     private OscSessionManager  _oscSession;
@@ -84,6 +94,35 @@ public class ExpertUI2 : MonoBehaviour
         manager.OnInstructionChanged += HandleInstructionChanged;
         manager.OnProgressChanged    += HandleProgressChanged;
 
+        // Identification task: show current target and live score in instructionText.
+        // Expert MUST know the target to point their gaze at the correct QR.
+        _idTask = Object.FindAnyObjectByType<IdentificationTask>();
+        if (_idTask != null)
+        {
+            _idTargetHandler = (targetId, score) =>
+            {
+                if (manager.CurrentStepType != StepType.Task) return;
+                if (instructionText == null) return;
+                instructionText.text = targetId != null
+                    ? $"【現在のターゲット: {targetId}】\n正解数: {score}"
+                    : $"識別終了 — 最終正解数: {score}";
+            };
+            _idTask.OnTargetChanged += _idTargetHandler;
+        }
+
+        // 3-2-1-GO countdown: display each tick as a large overlay on the Expert screen.
+        _countdownHandler = tick =>
+        {
+            if (_countdownOverlay == null) return;
+            string[] labels = { "GO！", "1", "2", "3" };
+            _countdownOverlay.text = (tick >= 0 && tick <= 3) ? labels[tick] : "";
+            _countdownOverlay.gameObject.SetActive(true);
+            if (_countdownClearCo != null) StopCoroutine(_countdownClearCo);
+            float wait = tick == 0 ? 0.8f : 1.0f;
+            _countdownClearCo = StartCoroutine(ClearCountdownAfter(wait));
+        };
+        manager.OnCountdownTick += _countdownHandler;
+
         _oscSession = Object.FindAnyObjectByType<OscSessionManager>();
         if (_oscSession != null)
         {
@@ -102,9 +141,19 @@ public class ExpertUI2 : MonoBehaviour
         HandleStateChanged(manager.CurrentState);
     }
 
+    private System.Collections.IEnumerator ClearCountdownAfter(float delay)
+    {
+        yield return new WaitForSeconds(delay);
+        if (_countdownOverlay != null) _countdownOverlay.gameObject.SetActive(false);
+        _countdownClearCo = null;
+    }
+
     private void OnDestroy()
     {
         if (_autoHideCoroutine != null) { StopCoroutine(_autoHideCoroutine); _autoHideCoroutine = null; }
+        if (_countdownClearCo  != null) { StopCoroutine(_countdownClearCo);  _countdownClearCo  = null; }
+        if (_idTask     != null && _idTargetHandler  != null) _idTask.OnTargetChanged  -= _idTargetHandler;
+        if (manager     != null && _countdownHandler != null) manager.OnCountdownTick  -= _countdownHandler;
         if (manager == null) return;
         manager.OnStateChanged       -= HandleStateChanged;
         manager.OnTimerUpdated       -= HandleTimerUpdated;
@@ -139,6 +188,7 @@ public class ExpertUI2 : MonoBehaviour
 
         if (_oscSession != null && Time.time >= _nextPing)
         {
+            if (_firstPingTime < 0f) _firstPingTime = Time.time;
             _nextPing = Time.time + PingInterval;
             _oscSession.Ping();
         }
@@ -195,6 +245,20 @@ public class ExpertUI2 : MonoBehaviour
         BuildTopBar(go.transform);
         BuildLeftPanel(go.transform);
         BuildBottomBar(go.transform);
+
+        // Full-screen countdown overlay (3-2-1-GO!) — hidden until first countdown fires
+        var cdGo = new GameObject("CountdownOverlay");
+        cdGo.transform.SetParent(go.transform, false);
+        _countdownOverlay = cdGo.AddComponent<Text>();
+        _countdownOverlay.font      = japaneseFont ?? Resources.GetBuiltinResource<Font>("LegacyRuntime.ttf");
+        _countdownOverlay.fontSize  = 280;
+        _countdownOverlay.alignment = TextAnchor.MiddleCenter;
+        _countdownOverlay.color     = new Color(1f, 0.85f, 0.1f);
+        var cdRt = cdGo.GetComponent<RectTransform>();
+        cdRt.anchorMin = new Vector2(0.25f, 0.25f);
+        cdRt.anchorMax = new Vector2(0.75f, 0.75f);
+        cdRt.offsetMin = cdRt.offsetMax = Vector2.zero;
+        cdGo.SetActive(false);
     }
 
     private void BuildTopBar(Transform root)
@@ -400,6 +464,19 @@ public class ExpertUI2 : MonoBehaviour
                         MessageBank.Get("ui.alignment.hint"));
                     // auto-hide is applied in ApplyVisibility; no coroutine here
                 }
+                else if (manager != null && manager.CurrentStepType == StepType.Rest)
+                {
+                    // UX11: Rest reuses the Questionnaire gate, but the top-level label must read
+                    // 休憩中, not アンケート中. The durable surfaces are stateText / actionText / hintText —
+                    // HandleInstructionChanged later overwrites instructionText with Rest_Expert, so we
+                    // pass that same string as the detail to avoid a flicker.
+                    SetZoneA(CoGazeStrings.Expert2_RestState,
+                        new Color(0.45f, 0.85f, 0.80f),
+                        new Color(0.00f, 0.12f, 0.11f, 0.85f));
+                    SetZoneB(CoGazeStrings.Expert2_RestState,
+                        CoGazeStrings.Rest_Expert,
+                        CoGazeStrings.Expert2_RestHint);
+                }
                 else
                 {
                     SetZoneA(MessageBank.Get("ui.questionnaire.state"),
@@ -412,15 +489,24 @@ public class ExpertUI2 : MonoBehaviour
                 break;
 
             case ExperimentState.TaskComplete:
+            {
                 SetZoneA(MessageBank.Get("ui.taskcomplete.state"),
                     new Color(1.00f, 0.60f, 0.15f),
                     new Color(0.17f, 0.07f, 0.00f, 0.85f));
+                // UX12: only Assembly is followed by a questionnaire. After the identification task
+                // (StepType.Task) there is no questionnaire, so don't point the operator at one.
+                // CurrentStepType still holds the just-finished step here (TaskComplete is only reached
+                // from TaskRunning, which is only Task or Assembly).
+                string tcDetail = (manager != null && manager.CurrentStepType == StepType.Task)
+                    ? CoGazeStrings.Expert2_TaskCompleteDetail_Identify
+                    : MessageBank.Get("ui.taskcomplete.detail");
                 SetZoneB(MessageBank.Get("ui.taskcomplete.action"),
-                    MessageBank.Get("ui.taskcomplete.detail"),
+                    tcDetail,
                     MessageBank.Get("ui.taskcomplete.hint"));
                 timerText.text  = CoGazeStrings.Expert2_TimerZero;
                 timerText.color = Color.white;
                 break;
+            }
 
             case ExperimentState.NoiseComplete:
                 SetZoneA(MessageBank.Get("ui.noisecomplete.state"),
@@ -449,7 +535,51 @@ public class ExpertUI2 : MonoBehaviour
             }
         }
 
+        UpdateBottomHint(state);
         ApplyVisibility(state);
+    }
+
+    // UX13: the bottom bar (Zone D) is always visible — even while the left panel auto-hides during
+    // tasks — so it is the right place to make the otherwise-undiscoverable [M] mesh toggle,
+    // [R] calib-retry, and the Setup approval button discoverable. Select the hint per state.
+    private void UpdateBottomHint(ExperimentState state)
+    {
+        if (bottomHintText == null) return;
+
+        string hint;
+        switch (state)
+        {
+            case ExperimentState.Setup:
+                hint = CoGazeStrings.Expert2_HintSetup;
+                break;
+            case ExperimentState.Ready:
+                hint = CoGazeStrings.Expert2_HintReady;
+                break;
+            case ExperimentState.TaskRunning:
+            case ExperimentState.WhiteNoise:
+                hint = CoGazeStrings.Expert2_HintTask;
+                break;
+            case ExperimentState.Questionnaire:
+                bool calibGate = manager != null
+                    && manager.CurrentStepType == StepType.ConditionStart
+                    && (manager.CurrentConditionType == ConditionType.Webcam
+                     || manager.CurrentConditionType == ConditionType.WebcamFiltered);
+                if (calibGate)
+                    hint = CoGazeStrings.Expert2_HintCalibGate;       // [R] retry is meaningful here
+                else if (manager != null && manager.CurrentStepType == StepType.Rest)
+                    hint = CoGazeStrings.Expert2_HintRest;
+                else
+                    hint = CoGazeStrings.Expert2_HintGate;
+                break;
+            case ExperimentState.TaskComplete:
+            case ExperimentState.NoiseComplete:
+                hint = CoGazeStrings.Expert2_HintGate;
+                break;
+            default:
+                hint = CoGazeStrings.Expert2_BottomHint;             // Idle / Finished / fallback
+                break;
+        }
+        bottomHintText.text = hint;
     }
 
     private void SetZoneA(string label, Color textColor, Color bandColor)
@@ -555,7 +685,10 @@ public class ExpertUI2 : MonoBehaviour
         }
         if (_lastPong < 0f)
         {
-            bool timeout = Time.time > PongTimeout;
+            // CQ18: base the grace window on elapsed time since the FIRST ping, not absolute
+            // Time.time. If pinging hasn't started yet (or the UI initialized late), stay in the
+            // "waiting" state instead of falsely flipping to NG the instant the scene passes 8 s.
+            bool timeout = _firstPingTime >= 0f && (Time.time - _firstPingTime) > PongTimeout;
             if (timeout && _wasPythonOk)
             {
                 FileLogger.Log("Experiment", "[ExpertUI2] Python TIMEOUT (no pong received)");

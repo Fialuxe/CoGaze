@@ -22,11 +22,17 @@ public class DebugHUD : MonoBehaviour
     private Text   _text;
     private bool   _visible = false;
 
-    private readonly List<string> _recentLogs = new List<string>();
-    private const int MaxLogs = 6;
+    private readonly List<(float time, string msg)> _recentLogs = new List<(float, string)>();
+    private const int   MaxLogs      = 10;
+    private const float LogExpirySec = 60f;   // entries older than 60 s are dropped on next refresh
 
     private float _lastRefresh;
     private const float RefreshInterval = 0.5f;
+
+    // Long-press guard: Y button must be held for this many seconds to toggle the HUD.
+    // Prevents accidental activation when the left controller Y button is brushed mid-task.
+    private float _yHoldStart = -1f;
+    private const float YHoldRequired = 1.0f;
 
     // Voice (HMD→PC outgoing mic level via PV2 Recorder — no extra Microphone.Start, so no
     // Android mic contention) + QR detection feedback so testers can see both work in-headset.
@@ -37,6 +43,15 @@ public class DebugHUD : MonoBehaviour
     private string _qrLast = "";
     private string _qrLastTime = "";
     private System.Action<string, Vector3, Quaternion> _qrCb;
+
+    // Calibration diagnostics — subscribes to MeshHandler events so the [Calib] section
+    // stays accurate without relying solely on log-message parsing.
+    private MeshHandler _meshHandler;
+    private System.Action<float, float> _outlierCb;
+    private float  _lastOutlierMeasured;
+    private float  _lastOutlierExpected;
+    private float  _lastOutlierTime = float.NegativeInfinity;
+    private const float OutlierDisplaySec = 8f;   // how long to highlight the last outlier
 
     private void Start()
     {
@@ -54,15 +69,18 @@ public class DebugHUD : MonoBehaviour
     {
         Application.logMessageReceived -= OnLogMessage;
         if (_qr != null && _qrCb != null) _qr.OnMarkerDetected -= _qrCb;
+        if (_meshHandler != null && _outlierCb != null)
+            _meshHandler.OnDualQROutlierRejected -= _outlierCb;
     }
 
     private void OnLogMessage(string condition, string stackTrace, LogType type)
     {
         if (type != LogType.Error && type != LogType.Exception && type != LogType.Warning) return;
-        string prefix = (type == LogType.Warning) ? "W" : "E";
+        string prefix = type == LogType.Warning ? "W" : "E";
         string ts  = System.DateTime.Now.ToString("HH:mm:ss");
-        string msg = condition.Length > 90 ? condition.Substring(0, 90) + "…" : condition;
-        _recentLogs.Add($"[{ts}][{prefix}] {msg}");
+        // Keep enough context to be actionable; trim only at a word boundary after 120 chars.
+        string msg = condition.Length > 120 ? condition.Substring(0, 120) + "…" : condition;
+        _recentLogs.Add((Time.time, $"[{ts}][{prefix}] {msg}"));
         if (_recentLogs.Count > MaxLogs) _recentLogs.RemoveAt(0);
     }
 
@@ -70,7 +88,14 @@ public class DebugHUD : MonoBehaviour
     {
 #if UNITY_ANDROID && !UNITY_EDITOR
         if (OVRInput.GetDown(OVRInput.Button.Two, OVRInput.Controller.LTouch))
+            _yHoldStart = Time.time;
+        if (OVRInput.GetUp(OVRInput.Button.Two, OVRInput.Controller.LTouch))
+            _yHoldStart = -1f;
+        if (_yHoldStart >= 0f && Time.time - _yHoldStart >= YHoldRequired)
+        {
+            _yHoldStart = -1f;
             SetVisible(!_visible);
+        }
 #else
         if (Input.GetKeyDown(KeyCode.Tab))
             SetVisible(!_visible);
@@ -155,6 +180,40 @@ public class DebugHUD : MonoBehaviour
         else
             sb.AppendLine("(manager not found)");
 
+        // [Calib] — dual-QR calibration diagnostics. Shows state machine step and highlights the
+        // most recent outlier rejection (measured vs expected separation) in red so the operator
+        // can immediately see WHY auto-calibration is not completing without opening the file log.
+        if (_meshHandler == null)
+        {
+            _meshHandler = FindAnyObjectByType<MeshHandler>();
+            if (_meshHandler != null)
+            {
+                _outlierCb = (measured, expected) =>
+                {
+                    _lastOutlierMeasured = measured;
+                    _lastOutlierExpected = expected;
+                    _lastOutlierTime     = Time.time;
+                };
+                _meshHandler.OnDualQROutlierRejected += _outlierCb;
+            }
+        }
+        if (_meshHandler != null)
+        {
+            sb.Append("[Calib] ");
+            if (_meshHandler.IsDualQRMode)
+            {
+                sb.Append(_meshHandler.CurrentDualCalibState.ToString());
+                if (_meshHandler.CalibCompleteReceived) sb.Append(" ✓complete");
+                sb.AppendLine();
+                if (Time.time - _lastOutlierTime < OutlierDisplaySec)
+                    sb.AppendLine($"  ⚠ sep {_lastOutlierMeasured:F2}m / expected {_lastOutlierExpected:F2}m");
+            }
+            else
+            {
+                sb.AppendLine($"single-QR  complete={_meshHandler.CalibCompleteReceived}");
+            }
+        }
+
         // [Poke] — QuestionnairePokeInput status so testers can confirm touch input works
         var qpGo = GameObject.Find("QuestionnairePoke");
         sb.Append("[Poke] QS:");
@@ -168,12 +227,14 @@ public class DebugHUD : MonoBehaviour
             sb.AppendLine(qp != null && qp.IsEngaged ? "ENGAGED" : "active");
         }
 
+        // Purge log entries older than LogExpirySec so the panel doesn't accumulate stale messages.
+        _recentLogs.RemoveAll(e => Time.time - e.time > LogExpirySec);
         sb.AppendLine("[Logs]");
         if (_recentLogs.Count == 0)
-            sb.AppendLine("  (no warnings/errors)");
+            sb.AppendLine("  (no recent warnings/errors)");
         else
-            foreach (var l in _recentLogs)
-                sb.AppendLine("  " + l);
+            foreach (var (_, msg) in _recentLogs)
+                sb.AppendLine("  " + msg);
 
         _text.text = sb.ToString();
     }

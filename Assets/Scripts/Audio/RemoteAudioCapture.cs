@@ -12,10 +12,19 @@ public class RemoteAudioCapture : MonoBehaviour
     private List<float> buffer;
     private object      bufferLock;
 
+    /// <summary>
+    /// Rate (Hz) at which OnAudioFilterRead delivers samples — i.e. the DSP/output rate, NOT 16kHz.
+    /// Captured on the main thread in Initialize so VoiceRecorder can write a correct WAV header for
+    /// the remote stream. Samples are mono-downmixed below, so the remote WAV is 1 channel.
+    /// </summary>
+    public int SampleRate { get; private set; }
+
     public void Initialize(List<float> sharedBuffer, object sharedLock)
     {
         buffer     = sharedBuffer;
         bufferLock = sharedLock;
+        // OnAudioFilterRead always runs at the output/DSP rate (see Photon SpeakerAudioFilterRead).
+        SampleRate = AudioSettings.outputSampleRate > 0 ? AudioSettings.outputSampleRate : 48000;
     }
 
     private void OnAudioFilterRead(float[] data, int channels)

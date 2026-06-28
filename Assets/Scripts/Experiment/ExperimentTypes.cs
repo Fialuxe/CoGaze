@@ -35,4 +35,5 @@ public class ExperimentStep
     public string   LocalInstruction = string.Empty; // Local Worker
     public int      ConditionIndex   = -1;           // set for ConditionStart / Launch steps
     public string   ScriptArgs       = string.Empty; // baked in at expand time for Launch steps
+    public string   TargetMarkerId   = string.Empty; // identification correct-answer marker id ("A"/"B"/…); empty = untracked
 }

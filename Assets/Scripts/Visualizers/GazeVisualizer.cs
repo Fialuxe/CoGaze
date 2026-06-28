@@ -47,12 +47,14 @@ public class GazeVisualizer : MonoBehaviour
 
     // ── FOV 設定 ──────────────────────────────────────────────────────
     private const float EXPERT_CAMERA_FOV = 60f;   // Expert の PC カメラ (ConnectionHandler)
+    // Identification 時の Expert PC レンダリングのアスペクト比。
+    // ProjectSettings の defaultScreenWidth/Height = 1920x1080 かつ fullscreenMode=1 のため 16:9。
+    // 再構成カメラは Worker(Quest) 上で生成されるので、明示しないと Quest ディスプレイの比率が
+    // 使われてしまい、水平方向の視線座標 (横方向のレイ角度) がずれる。
+    private const float EXPERT_CAMERA_ASPECT = 16f / 9f;
     private float streamingFov = 90f;               // PCA カメラの推定 FOV（Quest 3 left camera）
     private float streamingAspect = 4f / 3f;        // PCA の解像度比 (640x480 = 4:3)
     private bool  isStreamingMode = false;
-
-    // ExperimentManager2 参照（FOV 切替用）
-    private ExperimentManager2 expManager;
 
     /// <summary>各Visualizerを初期化する</summary>
     public void Initialize()
@@ -106,7 +108,7 @@ public class GazeVisualizer : MonoBehaviour
             if (streaming)
                 cachedCamera.aspect = streamingAspect;
             else
-                cachedCamera.ResetAspect(); // PC スクリーンの実際のアスペクト比に戻す
+                cachedCamera.aspect = EXPERT_CAMERA_ASPECT; // Identification: Expert PC の 16:9（Quest 比に戻さない）
         }
         Debug.Log($"[GazeVisualizer] Streaming mode: {streaming}, FOV={cachedCamera?.fieldOfView}");
     }
@@ -114,12 +116,6 @@ public class GazeVisualizer : MonoBehaviour
     private void Update()
     {
         frameCounter++;
-
-        // ExperimentManager2 の参照を取得（1回だけ）
-        if (expManager == null)
-        {
-            expManager = FindAnyObjectByType<ExperimentManager2>();
-        }
 
         // ExpertのGazeHandlerを探す（重いので30フレームに1回だけ）
         if (targetGazeHandler == null)
@@ -165,6 +161,7 @@ public class GazeVisualizer : MonoBehaviour
             else
             {
                 cachedCamera.fieldOfView = EXPERT_CAMERA_FOV;
+                cachedCamera.aspect      = EXPERT_CAMERA_ASPECT; // Identification: Expert PC の 16:9 に固定
             }
         }
 

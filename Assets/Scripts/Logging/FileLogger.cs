@@ -18,10 +18,20 @@ public static class FileLogger
                 _writer = null;
             }
 
-            _writer = new StreamWriter(path, false, System.Text.Encoding.UTF8)
+            // Never let a logging-setup I/O failure (bad path, permission, full disk) throw into
+            // the experiment. Leave _writer null on failure so Log() silently no-ops.
+            try
             {
-                AutoFlush = true
-            };
+                _writer = new StreamWriter(path, false, System.Text.Encoding.UTF8)
+                {
+                    AutoFlush = true
+                };
+            }
+            catch (Exception ex)
+            {
+                _writer = null;
+                System.Diagnostics.Debug.WriteLine($"[FileLogger] Init failed for '{path}': {ex.Message}");
+            }
         }
     }
 
@@ -31,8 +41,14 @@ public static class FileLogger
         {
             // Silently discard if Init() has not been called yet
             if (_writer == null) return;
-            string timestamp = DateTime.Now.ToString("HH:mm:ss.fff");
-            _writer.WriteLine($"{timestamp} [{category}] {message}");
+            // A write failure (full disk, writer faulted) must never propagate into the
+            // experiment loop, and must never spam — swallow silently. Logging is best-effort.
+            try
+            {
+                string timestamp = DateTime.Now.ToString("HH:mm:ss.fff");
+                _writer.WriteLine($"{timestamp} [{category}] {message}");
+            }
+            catch { /* never let logging crash the caller */ }
         }
     }
 
@@ -41,8 +57,10 @@ public static class FileLogger
         lock (_lock)
         {
             if (_writer == null) return;
-            _writer.Flush();
-            _writer.Close();
+            // Flush/Close can also throw (e.g. disk full on the final flush); guard so shutdown
+            // logging never throws into the caller.
+            try { _writer.Flush(); _writer.Close(); }
+            catch { /* never let logging crash the caller */ }
             _writer = null;
         }
     }

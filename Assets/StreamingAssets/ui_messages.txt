@@ -53,7 +53,7 @@ ui.alignment.hint   = [Enter] 確認完了
 ui.questionnaire.state  = アンケート中
 ui.questionnaire.action = アンケート中
 ui.questionnaire.detail = Worker がアンケートに\n回答しています。\n\n完了を待ってください。
-ui.questionnaire.hint   = [Enter] 完了
+ui.questionnaire.hint   = 回答完了で自動的に進みます
 
 ui.taskcomplete.state  = タスク完了
 ui.taskcomplete.action = タスク完了

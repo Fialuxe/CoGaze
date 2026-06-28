@@ -39,7 +39,7 @@ public class QuestionnaireManager : MonoBehaviourPun
     public Font japaneseFont;
 
     [Header("WorldSpace Canvas position (metres ahead of camera)")]
-    public float   panelDistance = 1.0f;
+    public float   panelDistance = 1.5f;
     public Vector2 panelSizeMm   = new Vector2(520f, 400f);
     public float   panelScaleM   = 0.001f;
 
@@ -52,17 +52,94 @@ public class QuestionnaireManager : MonoBehaviourPun
     /// <summary>Fired on ALL clients when the Worker submits any questionnaire round.</summary>
     public event Action OnQuestionnaireComplete;
 
-    // ─── NASA-TLX label strings ───────────────────────────────────────────────
+    /// <summary>
+    /// Fired on ALL clients exactly once per questionnaire submission (NASA-TLX, SSQ, SUS —
+    /// every survey that is finalized/saved here). ExperimentManager2 (Agent 1) subscribes to
+    /// this to gate the Finished/thanks screen on SSQ completion. Raised from
+    /// RPC_QuestionnaireComplete alongside OnQuestionnaireComplete (do NOT also raise it from
+    /// the local submit path, or RpcTarget.All would double-fire on the Worker).
+    /// </summary>
+    public event System.Action OnSurveySubmitted;
 
-    private static readonly string[] NasaLabels =
+    // ─── NASA-TLX dimensions (SINGLE SOURCE OF TRUTH — CQ 2-6) ────────────────
+    //
+    // Each dimension pairs the label shown to the subject with the exact NasaScores
+    // field it writes into. Because the label and the output-field assignment live in
+    // ONE place, they cannot drift out of alignment by editing two separate lists.
+    // Add/remove a dimension here and the Assign delegate forces a matching NasaScores
+    // field at compile time. The runtime length assert in SubmitCurrentRound guards the
+    // remaining invariant: that the dimension count still matches NasaScores' field count.
+    private sealed class NasaDimension
     {
-        "Mental Demand\n(精神的要求)\n0 = 低  /  6 = 高",
-        "Physical Demand\n(身体的要求)\n0 = 低  /  6 = 高",
-        "Temporal Demand\n(時間的要求)\n0 = 低  /  6 = 高",
-        "Performance\n(作業成績)\n0 = 完璧  /  6 = 失敗",
-        "Effort\n(努力)\n0 = 低  /  6 = 高",
-        "Frustration\n(フラストレーション)\n0 = 低  /  6 = 高"
+        public readonly string                   Label;
+        public readonly Action<NasaScores, int>  Assign;
+        public NasaDimension(string label, Action<NasaScores, int> assign)
+        {
+            Label  = label;
+            Assign = assign;
+        }
+    }
+
+    // Number of int fields on NasaScores. The assert in SubmitCurrentRound fails LOUDLY
+    // if NasaDimensions ever stops matching this, rather than writing misaligned data.
+    private const int NasaScoresFieldCount = 6;
+
+    private static readonly NasaDimension[] NasaDimensions =
+    {
+        new NasaDimension(
+            "Mental Demand（精神的要求）\n" +
+            "思考・判断・計算・記憶・注視・探索など\n" +
+            "どれくらい頭を使う作業でしたか？\n" +
+            "0 = 非常に低い  /  6 = 非常に高い",
+            (s, v) => s.mental = v),
+
+        new NasaDimension(
+            "Physical Demand（身体的要求）\n" +
+            "押す・引く・回す・コントローラ操作など\n" +
+            "どれくらい身体を使う作業でしたか？\n" +
+            "0 = 非常に低い  /  6 = 非常に高い",
+            (s, v) => s.physical = v),
+
+        new NasaDimension(
+            "Temporal Demand（時間的要求）\n" +
+            "作業のペースやスピードに対して\n" +
+            "どれくらい時間的なプレッシャーを感じましたか？\n" +
+            "0 = ゆったり  /  6 = 非常に急いでいた",
+            (s, v) => s.temporal = v),
+
+        new NasaDimension(
+            "Performance（作業成績）\n" +
+            "設定された（または自分で設定した）目標を\n" +
+            "どれくらい達成できたと思いますか？\n" +
+            "0 = 完璧  /  6 = 全く達成できなかった",
+            (s, v) => s.performance = v),
+
+        new NasaDimension(
+            "Effort（努力）\n" +
+            "このレベルの作業成績を達成するために\n" +
+            "どれくらい頑張る必要がありましたか？\n" +
+            "0 = 非常に低い  /  6 = 非常に高い",
+            (s, v) => s.effort = v),
+
+        new NasaDimension(
+            "Frustration（フラストレーション）\n" +
+            "不安・苛立ち・ストレス・悩みをどれくらい感じましたか？\n" +
+            "（対: 安心感・満足感・リラックス）\n" +
+            "0 = 非常に低い  /  6 = 非常に高い",
+            (s, v) => s.frustration = v),
     };
+
+    // Display labels, DERIVED from the single source above so the UI can index them
+    // cheaply while remaining impossible to reorder independently of the field mapping.
+    private static readonly string[] NasaLabels = BuildNasaLabels();
+
+    private static string[] BuildNasaLabels()
+    {
+        var labels = new string[NasaDimensions.Length];
+        for (int i = 0; i < NasaDimensions.Length; i++)
+            labels[i] = NasaDimensions[i].Label;
+        return labels;
+    }
 
     // ─── SSQ label strings ────────────────────────────────────────────────────
 
@@ -104,7 +181,22 @@ public class QuestionnaireManager : MonoBehaviourPun
     {
         public int        condition_index;
         public string     condition_name;
+        public string     task_type;       // "identification" / "assembly" — two NASA blocks per condition
         public NasaScores scores;
+    }
+
+    // One gaze-construct rating (comprehension / usefulness / accuracy manipulation-check).
+    // score = -1 with missing=true marks a STRUCTURAL absence (e.g. usefulness/accuracy in the
+    // NoGaze control): recorded explicitly so the dataset stays rectangular, never imputed.
+    [Serializable]
+    private class GazeItemEntry
+    {
+        public int    condition_index;
+        public string condition_name;
+        public string task_type;   // "identification" / "assembly" / "condition"
+        public string construct;   // "comprehension" / "usefulness" / "accuracy_mc"
+        public int    score;       // 0-6, or -1 when missing
+        public bool   missing;     // true = structural NoGaze absence (not answered)
     }
 
     [Serializable]
@@ -117,10 +209,11 @@ public class QuestionnaireManager : MonoBehaviourPun
     [Serializable]
     private class QuestionnaireRoot
     {
-        public string             participant_id;
-        public string             timestamp;
-        public List<NasaTlxEntry> nasa_tlx = new List<NasaTlxEntry>();
-        public SsqData            ssq;
+        public string              participant_id;
+        public string              timestamp;
+        public List<NasaTlxEntry>  nasa_tlx   = new List<NasaTlxEntry>();
+        public List<GazeItemEntry> gaze_items = new List<GazeItemEntry>();
+        public SsqData             ssq;
     }
 
     // ─── Runtime state ────────────────────────────────────────────────────────
@@ -130,10 +223,29 @@ public class QuestionnaireManager : MonoBehaviourPun
     private bool              _isVisible    = false;
     private Transform         _camTransform = null;
 
-    private enum Mode { None, NasaTLX, SSQ }
+    // ─── Condition-panel item model (NASA ×2 tasks + gaze constructs + accuracy MC) ──
+    // Every item in a condition panel is a 0-6 / 7-button rating; only the label and the
+    // scale hint vary. Driving the hint per item is the fix for the old high=bad hint
+    // bleeding onto high=good gaze items (the former fixed ScaleHint string).
+    private enum PanelConstruct { Nasa, Comprehension, Usefulness, AccuracyMC }
+    private enum PanelTask      { Identification, Assembly, Condition }
+
+    private sealed class PanelItem
+    {
+        public string         Label;        // question text (with embedded anchors)
+        public string         ScaleHint;    // hint under the buttons (direction depends on construct)
+        public string         Section;      // title header (condition-blind)
+        public PanelConstruct Construct;
+        public PanelTask      Task;
+        public int            NasaDimIndex; // valid only when Construct == Nasa
+    }
+
+    private enum Mode { None, ConditionPanel, SSQ }
     private Mode   _currentMode    = Mode.None;
     private int    _conditionIndex;
     private string _conditionName;
+    private bool   _panelIsNoGaze;                       // NoGaze control → no usefulness/MC items
+    private List<PanelItem> _panelItems = new List<PanelItem>();
 
     private int   _itemIndex;     // current question index
     private int   _selectedScore; // -1 = nothing selected yet
@@ -144,6 +256,8 @@ public class QuestionnaireManager : MonoBehaviourPun
     private Text       _titleText;
     private Text       _itemText;
     private Text       _progressText;
+    private Text       _affordanceText;   // one-line "how to answer" hint (UX16)
+    private Text       _scaleHintText;    // direction hint under buttons; set per item (high=good vs high=bad)
     private GameObject _buttonRow;
     private Button[]   _scoreButtons;
     private Button     _nextButton;
@@ -177,25 +291,121 @@ public class QuestionnaireManager : MonoBehaviourPun
 
     // ─── Public show / hide ───────────────────────────────────────────────────
 
+    // Scale-direction hints (set per item — NASA is high=bad, gaze constructs are high=good).
+    private const string NasaScaleHint =
+        "← 低 / 良い   0 — 1 — 2 — 3 — 4 — 5 — 6   高 / 悪い →";
+    private const string ComprehensionScaleHint =
+        "← 分からなかった   0 — 1 — 2 — 3 — 4 — 5 — 6   はっきり分かった →";
+    private const string UsefulnessScaleHint =
+        "← 役に立たなかった   0 — 1 — 2 — 3 — 4 — 5 — 6   非常に役立った →";
+    private const string AccuracyScaleHint =
+        "← 不正確・不安定   0 — 1 — 2 — 3 — 4 — 5 — 6   正確・安定 →";
+    private const string NasaSection = "作業負荷について (NASA-TLX)";
+    private const string GazeSection = "課題と視線について";
+
     /// <summary>
-    /// Show NASA-TLX (6 items, 0-6 scale) after a condition ends.
-    /// No-op on Expert client.
+    /// Show the post-condition survey panel for the Worker: NASA-TLX ×2 (identification +
+    /// assembly) plus the gaze constructs — comprehension for every condition; usefulness and
+    /// the accuracy manipulation-check only when gaze is presented. 17 items for gaze
+    /// conditions, 14 for NoGaze. Method name kept for existing callers. No-op on Expert.
     /// </summary>
     public void ShowNASATLX(int conditionIndex, string conditionName)
     {
         if (RoleManager.LocalRole != RoleManager.ROLE_WORKER) return;
 
-        _currentMode    = Mode.NasaTLX;
+        _currentMode    = Mode.ConditionPanel;
         _conditionIndex = conditionIndex;
         _conditionName  = conditionName;
-        _answers        = new int[NasaLabels.Length];
+        _panelIsNoGaze  = IsNoGazeCondition(conditionIndex);
+        _panelItems     = BuildConditionPanel(_panelIsNoGaze);
+        _answers        = new int[_panelItems.Count];
 
         EnsureCanvas();
         SetupVRPointer();                                // controller-laser clicks
-        BuildItemLayout(maxScore: 6, buttonCount: 7);   // scores 0-6
+        BuildItemLayout(maxScore: 6, buttonCount: 7);   // scores 0-6 (constant across the panel)
         ShowItem(0);
         SetVisible(true);
     }
+
+    private static bool IsNoGazeCondition(int conditionIndex)
+    {
+        if (conditionIndex < 0 || conditionIndex >= ExperimentDesign.Conditions.Length) return false;
+        return ExperimentDesign.Conditions[conditionIndex].gaze == GazeMode.None;
+    }
+
+    // Ordered item list for one condition panel. Usefulness + accuracy MC are omitted from the
+    // PRESENTED list in NoGaze; they are written as structural-missing rows at submit instead.
+    private static List<PanelItem> BuildConditionPanel(bool isNoGaze)
+    {
+        var items = new List<PanelItem>();
+
+        AddNasaBlock(items, PanelTask.Identification, "【識別課題】");
+        items.Add(MakeComprehension(PanelTask.Identification));
+        if (!isNoGaze) items.Add(MakeUsefulness(PanelTask.Identification));
+
+        AddNasaBlock(items, PanelTask.Assembly, "【組立課題】");
+        items.Add(MakeComprehension(PanelTask.Assembly));
+        if (!isNoGaze) items.Add(MakeUsefulness(PanelTask.Assembly));
+
+        if (!isNoGaze) items.Add(MakeAccuracyMC());
+
+        return items;
+    }
+
+    private static void AddNasaBlock(List<PanelItem> items, PanelTask task, string taskPrefix)
+    {
+        for (int dim = 0; dim < NasaLabels.Length; dim++)
+            items.Add(new PanelItem
+            {
+                Label        = $"{taskPrefix}\n{NasaLabels[dim]}",
+                ScaleHint    = NasaScaleHint,
+                Section      = NasaSection,
+                Construct    = PanelConstruct.Nasa,
+                Task         = task,
+                NasaDimIndex = dim,
+            });
+    }
+
+    private static PanelItem MakeComprehension(PanelTask task)
+    {
+        string prefix = task == PanelTask.Identification ? "【識別課題】" : "【組立課題】";
+        string body   = task == PanelTask.Identification
+            ? "エキスパートが指示していた対象（どのQRコードか）が、はっきりと分かった"
+            : "エキスパートが指示していた「次に置くブロックと置き場所」が、はっきりと分かった";
+        return new PanelItem
+        {
+            Label     = $"{prefix}\n{body}\n0 = 分からなかった ・ 3 = どちらともいえない ・ 6 = はっきり分かった",
+            ScaleHint = ComprehensionScaleHint,
+            Section   = GazeSection,
+            Construct = PanelConstruct.Comprehension,
+            Task      = task,
+        };
+    }
+
+    private static PanelItem MakeUsefulness(PanelTask task)
+    {
+        string prefix = task == PanelTask.Identification ? "【識別課題】" : "【組立課題】";
+        string body   = task == PanelTask.Identification
+            ? "エキスパートの視線提示は、対象（QRコード）を見つけて答えるのに役立った"
+            : "エキスパートの視線提示は、ブロックを正しく組み立てるのに役立った";
+        return new PanelItem
+        {
+            Label     = $"{prefix}\n{body}\n0 = 役に立たなかった ・ 6 = 非常に役立った",
+            ScaleHint = UsefulnessScaleHint,
+            Section   = GazeSection,
+            Construct = PanelConstruct.Usefulness,
+            Task      = task,
+        };
+    }
+
+    private static PanelItem MakeAccuracyMC() => new PanelItem
+    {
+        Label     = "【この条件全体】\nエキスパートの視線提示は、対象をどの程度「正確・安定して」指していましたか\n0 = まったく不正確・不安定 ・ 6 = 非常に正確・安定",
+        ScaleHint = AccuracyScaleHint,
+        Section   = GazeSection,
+        Construct = PanelConstruct.AccuracyMC,
+        Task      = PanelTask.Condition,
+    };
 
     /// <summary>
     /// Show SSQ (16 items, 0-3 scale) after all conditions end.
@@ -246,6 +456,7 @@ public class QuestionnaireManager : MonoBehaviourPun
     {
         // Clear all subscribers to prevent stale delegate invocations
         OnQuestionnaireComplete = null;
+        OnSurveySubmitted       = null;
 
         // Restore any input modules we suspended, then drop our poke input. We do NOT
         // destroy the EventSystem / OVRInputModule — they may be shared and the
@@ -393,18 +604,28 @@ public class QuestionnaireManager : MonoBehaviourPun
         if (_ovrInputModule == null)
             _ovrInputModule = eventSystem.gameObject.AddComponent<OVRInputModule>();
 
-        var siblings = eventSystem.GetComponents<BaseInputModule>();
-        var suspended = new List<BaseInputModule>();
-        foreach (var m in siblings)
+        // Re-entrancy guard (CQ 2-7): only capture & suspend the sibling modules if we
+        // have NOT already done so. If SetupVRPointer runs twice without an intervening
+        // TeardownVRPointer (e.g. ShowNASATLX then ShowSSQ while still visible), the
+        // siblings are already disabled, so a fresh scan would record an EMPTY set and
+        // strand the scene's real input module disabled forever. Preserving the original
+        // captured set lets TeardownVRPointer restore it exactly. TeardownVRPointer nulls
+        // _suspendedModules, so a balanced hide→show re-captures correctly.
+        if (_suspendedModules == null)
         {
-            if (m == null || m == _ovrInputModule) continue;
-            if (m.enabled)
+            var siblings  = eventSystem.GetComponents<BaseInputModule>();
+            var suspended = new List<BaseInputModule>();
+            foreach (var m in siblings)
             {
-                m.enabled = false;
-                suspended.Add(m);
+                if (m == null || m == _ovrInputModule) continue;
+                if (m.enabled)
+                {
+                    m.enabled = false;
+                    suspended.Add(m);
+                }
             }
+            _suspendedModules = suspended.ToArray();
         }
-        _suspendedModules = suspended.ToArray();
 
         _ovrInputModule.enabled = true;
         // Required so the module activates on Android/Quest (no mouse present):
@@ -511,14 +732,20 @@ public class QuestionnaireManager : MonoBehaviourPun
             _scoreButtons[i] = btn;
         }
 
-        // ── Scale hint below buttons (17-25 %) ──
-        string hint = maxScore == 6
-            ? "← 低 / 良い   0 — 1 — 2 — 3 — 4 — 5 — 6   高 / 悪い →"
-            : "← なし   0 — 1 — 2 — 3   ひどく →";
+        // ── Answer affordance hint (46-50 %), shown only on the first question (UX16) ──
+        // The controller laser is invisible (touch-only), so the very first screen must
+        // tell the subject HOW to register an answer. ShowItem fills/clears the text.
+        _affordanceText = MakeText("AffordanceHint", _canvasGo.transform,
+            new Vector2(0.04f, 0.46f), new Vector2(0.96f, 0.50f),
+            "", 14, TextAnchor.MiddleCenter, new Color(0.4f, 0.9f, 1f));
 
-        MakeText("ScaleHint", _canvasGo.transform,
+        // ── Scale hint below buttons (17-25 %) ──
+        // Stored so ShowItem can set it PER ITEM: NASA items are high=bad, gaze items are
+        // high=good, and a single fixed hint would mislabel one of them (the old UX landmine).
+        string defaultHint = maxScore == 6 ? NasaScaleHint : "← なし   0 — 1 — 2 — 3   ひどく →";
+        _scaleHintText = MakeText("ScaleHint", _canvasGo.transform,
             new Vector2(0.04f, 0.17f), new Vector2(0.96f, 0.25f),
-            hint, 13, TextAnchor.MiddleCenter, new Color(0.65f, 0.65f, 0.65f));
+            defaultHint, 13, TextAnchor.MiddleCenter, new Color(0.65f, 0.65f, 0.65f));
 
         MakeDivider(_canvasGo.transform, 0.16f);
 
@@ -555,23 +782,37 @@ public class QuestionnaireManager : MonoBehaviourPun
         _itemIndex     = index;
         _selectedScore = -1;
 
-        string[] labels = _currentMode == Mode.NasaTLX ? NasaLabels : SsqLabels;
-        int      total  = labels.Length;
-        bool     isLast = (index == total - 1);
+        bool      isCondPanel = _currentMode == Mode.ConditionPanel;
+        int       total       = isCondPanel ? _panelItems.Count : SsqLabels.Length;
+        bool      isLast       = (index == total - 1);
+        PanelItem item         = isCondPanel ? _panelItems[index] : null;
 
-        // Title — deliberately hides condition name/index to preserve single-blind design.
+        // Title — condition name/index deliberately hidden to preserve single-blind design.
         if (_titleText != null)
-            _titleText.text = _currentMode == Mode.NasaTLX
-                ? $"NASA-TLX — 第 {_data.nasa_tlx.Count + 1} 回"
+        {
+            _titleText.color = new Color(0.6f, 0.9f, 1f);   // reset (clears any prior save-error red)
+            _titleText.text  = isCondPanel
+                ? item.Section
                 : "SSQ — Simulator Sickness Questionnaire";
+        }
 
         // Progress
         if (_progressText != null)
             _progressText.text = $"{index + 1} / {total}";
 
+        // Per-item scale hint (NASA high=bad vs gaze high=good). SSQ keeps its built-in hint.
+        if (_scaleHintText != null && isCondPanel)
+            _scaleHintText.text = item.ScaleHint;
+
+        // Answer affordance — only on the first question; cleared thereafter (UX16).
+        if (_affordanceText != null)
+            _affordanceText.text = (index == 0)
+                ? "▼ 下のボタンに指で触れて回答してください (touch a button to answer) ▼"
+                : "";
+
         // Question text
         if (_itemText != null)
-            _itemText.text = labels[index];
+            _itemText.text = isCondPanel ? item.Label : SsqLabels[index];
 
         // Reset score buttons
         HighlightScore(-1);
@@ -600,17 +841,13 @@ public class QuestionnaireManager : MonoBehaviourPun
     {
         if (_selectedScore < 0) return;   // guard: no selection yet
 
-        string[] labels = _currentMode == Mode.NasaTLX ? NasaLabels : SsqLabels;
+        int total     = _currentMode == Mode.ConditionPanel ? _panelItems.Count : SsqLabels.Length;
         int nextIndex = _itemIndex + 1;
 
-        if (nextIndex < labels.Length)
-        {
+        if (nextIndex < total)
             ShowItem(nextIndex);
-        }
         else
-        {
             SubmitCurrentRound();
-        }
     }
 
     private void HighlightScore(int score)
@@ -631,47 +868,173 @@ public class QuestionnaireManager : MonoBehaviourPun
 
     private void SubmitCurrentRound()
     {
-        if (_currentMode == Mode.NasaTLX)
+        // Idempotency guard (CQ 2-7). A round in progress is always ConditionPanel or SSQ; once
+        // submitted it is set to None below. A stray second click (a double-tap before the canvas
+        // hides) would otherwise re-run the save and double-write. Bailing here makes Submit safe
+        // to invoke twice.
+        if (_currentMode != Mode.ConditionPanel && _currentMode != Mode.SSQ) return;
+
+        if (_currentMode == Mode.ConditionPanel) SubmitConditionPanel();
+        else                                     SubmitSsq();
+    }
+
+    private void SubmitConditionPanel()
+    {
+        // Integrity gate (CQ 2-6): fail LOUDLY rather than write dimensions into the wrong fields.
+        // The single-source NASA mapping must still match NasaScores, and the built panel must
+        // carry exactly 6 NASA items per task — otherwise the positional Assign would misalign.
+        int idNasa = 0, asNasa = 0;
+        for (int i = 0; i < _panelItems.Count; i++)
         {
-            _data.nasa_tlx.Add(new NasaTlxEntry
+            if (_panelItems[i].Construct != PanelConstruct.Nasa) continue;
+            if (_panelItems[i].Task == PanelTask.Identification) idNasa++;
+            else if (_panelItems[i].Task == PanelTask.Assembly)  asNasa++;
+        }
+        if (NasaDimensions.Length != NasaScoresFieldCount || _answers.Length != _panelItems.Count ||
+            idNasa != NasaScoresFieldCount || asNasa != NasaScoresFieldCount)
+        {
+            string msg = $"Condition-panel mapping mismatch: dims={NasaDimensions.Length}, " +
+                         $"fields={NasaScoresFieldCount}, idNasa={idNasa}, asNasa={asNasa}, " +
+                         $"items={_panelItems.Count}, answers={_answers.Length}. Aborting save.";
+            Debug.LogError($"[QuestionnaireManager] {msg}");
+            FileLogger.Log("Questionnaire", $"ABORT {msg}");
+            ShowSaveError("dimension mapping mismatch");
+            return;
+        }
+
+        // Route each answer from the SINGLE source of truth so label↔field stays aligned.
+        var idScores = new NasaScores();
+        var asScores = new NasaScores();
+        var gazeRows = new List<GazeItemEntry>();
+
+        for (int i = 0; i < _panelItems.Count; i++)
+        {
+            var item = _panelItems[i];
+            int ans  = _answers[i];
+            if (item.Construct == PanelConstruct.Nasa)
             {
-                condition_index = _conditionIndex,
-                condition_name  = _conditionName,
-                scores = new NasaScores
+                NasaDimensions[item.NasaDimIndex].Assign(
+                    item.Task == PanelTask.Identification ? idScores : asScores, ans);
+            }
+            else
+            {
+                gazeRows.Add(new GazeItemEntry
                 {
-                    mental      = _answers[0],
-                    physical    = _answers[1],
-                    temporal    = _answers[2],
-                    performance = _answers[3],
-                    effort      = _answers[4],
-                    frustration = _answers[5]
-                }
-            });
-
-            SaveJson();   // persist after every round — crash-safe
-
-            SetVisible(false);
-            _currentMode = Mode.None;
-            photonView.RPC(nameof(RPC_QuestionnaireComplete), RpcTarget.All);
+                    condition_index = _conditionIndex,
+                    condition_name  = _conditionName,
+                    task_type       = TaskTypeString(item.Task),
+                    construct       = ConstructString(item.Construct),
+                    score           = ans,
+                    missing         = false,
+                });
+            }
         }
-        else  // SSQ
+
+        // NoGaze: usefulness (both tasks) + accuracy MC are structurally absent — record them
+        // explicitly as missing so the dataset is rectangular; never imputed.
+        if (_panelIsNoGaze)
         {
-            int total = 0;
-            foreach (int v in _answers) total += v;
-
-            _data.ssq = new SsqData
-            {
-                scores = (int[])_answers.Clone(),
-                total  = total
-            };
-
-            SaveJson();
-            Debug.Log($"[QuestionnaireManager] SSQ submitted. Total={total}. Path={_saveFilePath}");
-
-            SetVisible(false);
-            _currentMode = Mode.None;
-            photonView.RPC(nameof(RPC_QuestionnaireComplete), RpcTarget.All);
+            gazeRows.Add(MakeMissingGazeRow(PanelTask.Identification, "usefulness"));
+            gazeRows.Add(MakeMissingGazeRow(PanelTask.Assembly,       "usefulness"));
+            gazeRows.Add(MakeMissingGazeRow(PanelTask.Condition,      "accuracy_mc"));
         }
+
+        // Append, then persist. On failure, roll back EVERYTHING added this round so a retry
+        // does not duplicate, leave the panel up with a visible error, and DO NOT advance.
+        int nasaStart = _data.nasa_tlx.Count;
+        int gazeStart = _data.gaze_items.Count;
+
+        _data.nasa_tlx.Add(new NasaTlxEntry
+        {
+            condition_index = _conditionIndex, condition_name = _conditionName,
+            task_type = "identification", scores = idScores,
+        });
+        _data.nasa_tlx.Add(new NasaTlxEntry
+        {
+            condition_index = _conditionIndex, condition_name = _conditionName,
+            task_type = "assembly", scores = asScores,
+        });
+        _data.gaze_items.AddRange(gazeRows);
+
+        if (!SaveJson())
+        {
+            _data.nasa_tlx.RemoveRange(nasaStart, _data.nasa_tlx.Count - nasaStart);
+            _data.gaze_items.RemoveRange(gazeStart, _data.gaze_items.Count - gazeStart);
+            ShowSaveError("local write failed");
+            return;
+        }
+
+        SetVisible(false);
+        _currentMode = Mode.None;
+        photonView.RPC(nameof(RPC_QuestionnaireComplete), RpcTarget.All);
+    }
+
+    private GazeItemEntry MakeMissingGazeRow(PanelTask task, string construct) => new GazeItemEntry
+    {
+        condition_index = _conditionIndex,
+        condition_name  = _conditionName,
+        task_type       = TaskTypeString(task),
+        construct       = construct,
+        score           = -1,
+        missing         = true,
+    };
+
+    private static string TaskTypeString(PanelTask task) => task switch
+    {
+        PanelTask.Identification => "identification",
+        PanelTask.Assembly       => "assembly",
+        _                        => "condition",
+    };
+
+    private static string ConstructString(PanelConstruct c) => c switch
+    {
+        PanelConstruct.Comprehension => "comprehension",
+        PanelConstruct.Usefulness    => "usefulness",
+        PanelConstruct.AccuracyMC    => "accuracy_mc",
+        _                            => "nasa",
+    };
+
+    private void SubmitSsq()
+    {
+        int total = 0;
+        foreach (int v in _answers) total += v;
+
+        _data.ssq = new SsqData
+        {
+            scores = (int[])_answers.Clone(),
+            total  = total
+        };
+
+        // SSQ is overwritten (not accumulated) so a retry is idempotent; on save failure
+        // halt with a visible error and DO NOT advance, protecting the final dataset.
+        if (!SaveJson())
+        {
+            ShowSaveError("local write failed");
+            return;
+        }
+
+        Debug.Log($"[QuestionnaireManager] SSQ submitted. Total={total}. Path={_saveFilePath}");
+
+        SetVisible(false);
+        _currentMode = Mode.None;
+        photonView.RPC(nameof(RPC_QuestionnaireComplete), RpcTarget.All);
+    }
+
+    /// <summary>
+    /// Surface a save failure to the operator/subject: keep the panel visible, show a bright
+    /// error on the title, and relabel the action button so the round can be re-submitted.
+    /// Combined with the FileLogger SAVE FAILED entry this converts the whole class of silent
+    /// questionnaire-save failures into something detectable (CQ11).
+    /// </summary>
+    private void ShowSaveError(string detail)
+    {
+        Debug.LogError($"[QuestionnaireManager] SAVE ERROR surfaced to operator: {detail}");
+        if (_titleText != null)
+        {
+            _titleText.color = new Color(1f, 0.45f, 0.45f);
+            _titleText.text  = "⚠ 保存に失敗しました — もう一度［送信］を押してください\nSAVE FAILED — press Submit again";
+        }
+        if (_nextButtonLabel != null) _nextButtonLabel.text = "再送信 / Retry ⟳";
     }
 
     private void EnsureSavePath()
@@ -689,7 +1052,12 @@ public class QuestionnaireManager : MonoBehaviourPun
         _data.timestamp = DateTime.Now.ToString("yyyy-MM-ddTHH:mm:ss");
     }
 
-    private void SaveJson()
+    /// <summary>
+    /// Persist the cumulative questionnaire JSON to the HMD, then forward a backup copy to the
+    /// Expert. Returns true only if the LOCAL write succeeded; callers must NOT advance the
+    /// experiment on false (CQ11 / 2-5). The Expert copy is still attempted as a backup either way.
+    /// </summary>
+    private bool SaveJson()
     {
         EnsureSavePath();
 
@@ -698,23 +1066,53 @@ public class QuestionnaireManager : MonoBehaviourPun
 
         string json = JsonUtility.ToJson(_data, prettyPrint: true);
 
-        // Local save (HMD backup — crash-safe atomic write).
+        // Local save (HMD backup). Write a temp file first, then publish atomically (2-5):
+        // a crash mid-write can only ever damage the throwaway .tmp, never the live results.
+        bool localOk = false;
         try
         {
             string tmpPath = _saveFilePath + ".tmp";
             File.WriteAllText(tmpPath, json);
-            if (File.Exists(_saveFilePath)) File.Delete(_saveFilePath);
-            File.Move(tmpPath, _saveFilePath);
+
+            if (File.Exists(_saveFilePath))
+            {
+                // File.Replace is atomic on NTFS and keeps a .bak of the prior good copy.
+                // Some Android/Mono filesystem backends throw on it, so fall back to the
+                // (proven) delete+move path rather than ever leaving data unsaved.
+                try
+                {
+                    File.Replace(tmpPath, _saveFilePath, _saveFilePath + ".bak");
+                }
+                catch (Exception rex)
+                {
+                    Debug.LogWarning($"[QuestionnaireManager] File.Replace unsupported here ({rex.Message}); using delete+move fallback.");
+                    if (File.Exists(_saveFilePath)) File.Delete(_saveFilePath);
+                    File.Move(tmpPath, _saveFilePath);
+                }
+            }
+            else
+            {
+                File.Move(tmpPath, _saveFilePath);   // first save — nothing to replace
+            }
+
+            localOk = true;
             Debug.Log($"[QuestionnaireManager] JSON saved → {_saveFilePath}");
+            FileLogger.Log("Questionnaire", $"SAVE OK ({_currentMode}) → {_saveFilePath}");
         }
         catch (Exception ex)
         {
-            Debug.LogError($"[QuestionnaireManager] Local save failed: {ex.Message}");
+            // Persistent, operator-visible record of the failure (CQ11): converts a silent
+            // data-loss into something detectable in the run log.
+            Debug.LogError($"[QuestionnaireManager] Local save FAILED: {ex.Message}");
+            FileLogger.Log("Questionnaire", $"SAVE FAILED ({_currentMode}) → {_saveFilePath} : {ex.Message}");
         }
 
-        // Forward to Expert (PC) so the researcher can access the data without ADB.
+        // Forward to Expert (PC) so the researcher can access the data without ADB. Best-effort
+        // backup — attempted even if the local save failed, so the data isn't solely on the HMD.
         if (PhotonNetwork.InRoom && photonView != null)
             photonView.RPC(nameof(RPC_ForwardQuestionnaireJson), RpcTarget.Others, json, _data.participant_id);
+
+        return localOk;
     }
 
     // ─── Photon RPC ──────────────────────────────────────────────────────────
@@ -728,6 +1126,7 @@ public class QuestionnaireManager : MonoBehaviourPun
     {
         Debug.Log("[QuestionnaireManager] RPC_QuestionnaireComplete received.");
         OnQuestionnaireComplete?.Invoke();
+        OnSurveySubmitted?.Invoke();   // Agent 1 (ExperimentManager2) gates the Finished screen on this
     }
 
     /// <summary>
@@ -749,10 +1148,12 @@ public class QuestionnaireManager : MonoBehaviourPun
         {
             File.WriteAllText(path, json);
             Debug.Log($"[QuestionnaireManager] PC copy saved → {path}");
+            FileLogger.Log("Questionnaire", $"PC COPY OK → {path}");
         }
         catch (Exception ex)
         {
             Debug.LogError($"[QuestionnaireManager] PC save failed: {ex.Message}");
+            FileLogger.Log("Questionnaire", $"PC COPY FAILED → {path} : {ex.Message}");
         }
     }
 

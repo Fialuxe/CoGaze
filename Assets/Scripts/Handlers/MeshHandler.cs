@@ -44,6 +44,13 @@ public class MeshHandler : MonoBehaviourPun
     private Vector3?         _detectedA;
     private Vector3?         _detectedB;
 
+    // Minimum A↔B separation required for numerically stable yaw estimation.
+    // The old check that compared measured separation against the indicator separation has been
+    // removed: it prevented calibration whenever physical QR placement didn't exactly match the
+    // scene indicator spacing. ComputePose aligns the centroid + yaw direction regardless of scale,
+    // so any separation ≥ MinDualQRSeparation produces a valid (if coarser) pose estimate.
+    private const float MinDualQRSeparation = 0.20f;   // 20 cm — below this yaw becomes unreliable
+
     /// <summary>true when both indicatorA and indicatorB are assigned — uses 2-QR alignment.</summary>
     public bool             IsDualQRMode          => indicatorA != null && indicatorB != null;
     /// <summary>Current step of the dual-QR calibration state machine.</summary>
@@ -66,6 +73,12 @@ public class MeshHandler : MonoBehaviourPun
     public event System.Action<DualQRCalibState> OnDualQRCalibStep;
     /// <summary>Fired on ALL clients via RPC when dual-QR calibration completes.</summary>
     public event System.Action                   OnCalibCompleteNotified;
+    /// <summary>
+    /// Fired on the Worker when a dual-QR detection is rejected because the measured A↔B separation
+    /// disagrees with the expected indicator separation. Carries (measuredMetres, expectedMetres) so
+    /// the HUD can show a visible diagnostic without relying on Debug.Log parsing.
+    /// </summary>
+    public event System.Action<float, float>     OnDualQROutlierRejected;
 
     private void Start()
     {
@@ -151,13 +164,13 @@ public class MeshHandler : MonoBehaviourPun
     private const float TriggerThreshold = OVRInputThresholds.Grip;
     private const float StickDeadzone    = 0.15f;
 
-    // Grip rising-edge state for toggle detection
-    private bool _gripWasDown = false;
+    // Index-trigger rising-edge state for grab detection
+    private bool _triggerWasDown = false;
 
     // ── Manual calibration: active ONLY while the left X button is HELD ──────
-    // The default grip stays free for "QR found" (SetupCoordinator registration / IdentificationTask
-    // completion); holding X is the deliberate gesture to calibrate, so the mesh is never moved by
-    // accident during the experiment.
+    // The grab uses the index TRIGGER, leaving the grip free for "QR found" (SetupCoordinator
+    // registration / IdentificationTask answer); holding X is the deliberate gesture to calibrate,
+    // so the mesh is never moved by accident during the experiment.
     private bool         _calibActive      = false; // left X held
     private bool         _grabbing         = false; // right grip held → mesh follows the hand
     private Vector3      _grabOffset;                // mesh − controller at grab start
@@ -167,9 +180,9 @@ public class MeshHandler : MonoBehaviourPun
 
     private void UpdateCalibration()
     {
-        // Mesh calibration is gated behind HOLDING the left X button. The default grip stays free for
-        // "QR found" (SetupCoordinator registration / IdentificationTask completion), so the mesh is
-        // never moved by accident during the experiment.
+        // Mesh calibration is gated behind HOLDING the left X button; the grab uses the index trigger.
+        // The grip stays free for "QR found" (SetupCoordinator registration / IdentificationTask
+        // answer), so the mesh is never moved by accident during the experiment.
         bool xHeld = OVRInput.Get(OVRInput.Button.One, OVRInput.Controller.LTouch);
 
         if (xHeld != _calibActive)
@@ -183,15 +196,25 @@ public class MeshHandler : MonoBehaviourPun
             }
             else
             {
-                // Exit: stop the haptic, drop any grab, and push the final pose to everyone.
-                _grabbing    = false;
-                _gripWasDown = false;
+                // Exit: stop haptics and drop grab.
+                // Only confirm (SendMeshTransform + RPC_NotifyCalibComplete) when:
+                //   - not in dual-QR mode (single-QR / manual — X is the only completion signal), OR
+                //   - dual-QR already completed (re-confirming is idempotent and helps late-joining Expert).
+                // Without this guard, releasing X before QR calibration finishes commits the default
+                // scene pose (-3.85, 0.71, -3.12) as "calibrated" and blocks the Setup gate.
+                _grabbing       = false;
+                _triggerWasDown = false;
                 OVRInput.SetControllerVibration(0f, 0f, OVRInput.Controller.LTouch);
-                SendMeshTransform();
-                photonView.RPC(nameof(RPC_NotifyCalibComplete), RpcTarget.AllBuffered);
+                OVRInput.SetControllerVibration(0f, 0f, OVRInput.Controller.RTouch);
+                bool shouldConfirm = !IsDualQRMode || _dualCalibState == DualQRCalibState.Complete;
+                Debug.Log($"[MeshHandler] Manual calib ended. dualCalibState={_dualCalibState} shouldConfirm={shouldConfirm}");
+                if (shouldConfirm)
+                {
+                    SendMeshTransform();
+                    photonView.RPC(nameof(RPC_NotifyCalibComplete), RpcTarget.AllBuffered);
+                    OnCalibrationConfirmed?.Invoke();
+                }
                 _qrManager?.ResyncAllMarkers();
-                OnCalibrationConfirmed?.Invoke();
-                Debug.Log("[MeshHandler] Manual calibration ended — final pose sent.");
             }
         }
 
@@ -200,19 +223,19 @@ public class MeshHandler : MonoBehaviourPun
         // Gentle continuous vibration on the X hand signals that calibration is active.
         OVRInput.SetControllerVibration(0.3f, 0.3f, OVRInput.Controller.LTouch);
 
-        // Right grip = grab the mesh; while held it follows the right controller (move / push / pull).
-        float   grip     = OVRInput.Get(OVRInput.Axis1D.PrimaryHandTrigger, OVRInput.Controller.RTouch);
-        bool    gripDown = grip > TriggerThreshold;
+        // Right index trigger = grab the mesh; while held it follows the right controller (move / push / pull).
+        float   trig     = OVRInput.Get(OVRInput.Axis1D.PrimaryIndexTrigger, OVRInput.Controller.RTouch);
+        bool    trigDown = trig > TriggerThreshold;
         Vector3 ctrl     = RightControllerWorldPos();
-        if (gripDown && !_gripWasDown)
+        if (trigDown && !_triggerWasDown)
         {
             _grabbing   = true;
             _grabOffset = meshObject.transform.position - ctrl;   // preserve the mesh's offset from the hand
         }
-        if (gripDown && _grabbing)
+        if (trigDown && _grabbing)
             meshObject.transform.position = ctrl + _grabOffset;
-        if (!gripDown) _grabbing = false;
-        _gripWasDown = gripDown;
+        if (!trigDown) _grabbing = false;
+        _triggerWasDown = trigDown;
 
         // Right stick X = yaw rotation around world-up.
         Vector2 stick = OVRInput.Get(OVRInput.Axis2D.PrimaryThumbstick, OVRInput.Controller.RTouch);
@@ -268,6 +291,39 @@ public class MeshHandler : MonoBehaviourPun
         CalibCompleteReceived = true;   // durable — survives a late-subscribing SetupCoordinator
         OnCalibCompleteNotified?.Invoke();
         Debug.Log("[MeshHandler] RPC_NotifyCalibComplete: dual-QR calibration complete.");
+    }
+
+    /// <summary>
+    /// Expert side: requests the Worker re-scan both QR codes when visual verification reveals bad
+    /// alignment. Mirrors <see cref="RequestSetMeshVisible"/> — call from ExpertUI2 via
+    /// FindAnyObjectByType&lt;MeshHandler&gt;().RequestResetDualCalibration(). RpcTarget.All so the
+    /// Worker (which owns the dual-QR state machine) resets; on the Expert it just re-arms the
+    /// completion flag + HUD step so a bad calibration can no longer be approved until re-scanned.
+    /// </summary>
+    public void RequestResetDualCalibration()
+    {
+        photonView.RPC(nameof(ResetDualCalibration), RpcTarget.All);
+    }
+
+    /// <summary>
+    /// Resets the dual-QR calibration state so the Worker can re-scan both QR codes. Invocable over
+    /// Photon (Expert → all clients via <see cref="RequestResetDualCalibration"/>) when visual
+    /// verification reveals bad alignment. Has no effect in single-QR (legacy) mode. Compiled on all
+    /// platforms so Photon can resolve the RPC on either client; the polling-restart is Worker-only.
+    /// </summary>
+    [PunRPC]
+    public void ResetDualCalibration()
+    {
+        if (!IsDualQRMode) return;
+        _dualCalibState       = DualQRCalibState.NeedsA;
+        _detectedA            = null;
+        _detectedB            = null;
+        CalibCompleteReceived = false;   // calibration is no longer valid until the re-scan completes
+        OnDualQRCalibStep?.Invoke(DualQRCalibState.NeedsA);
+#if UNITY_ANDROID && !UNITY_EDITOR
+        _qrManager?.StartPeriodicBroadcast();  // リセット → ポーリング再開
+#endif
+        Debug.Log("[MeshHandler] Dual-QR calibration reset — re-scan QR-A.");
     }
 
     public void SendMeshTransform()
@@ -376,6 +432,26 @@ public class MeshHandler : MonoBehaviourPun
         if (_detectedA.HasValue && _detectedB.HasValue)
         {
             if (meshObject == null) return;
+
+            // ── Outlier / stabilization guard ───────────────────────────────────────────────
+            // The physical QR-A↔QR-B distance is fixed and known: it equals the world separation of
+            // Only reject if the two QR detections are so close together that yaw estimation becomes
+            // numerically unreliable. The previous indicator-distance check (measured must match
+            // expected within 15%) has been removed: it fires whenever the physical QR placement
+            // differs from the indicator spacing in the scene model, which is the normal case and
+            // prevented calibration entirely. ComputePose derives yaw from the A→B direction vector
+            // alone, which is valid at any scale ≥ MinDualQRSeparation.
+            float measuredSep = Vector3.Distance(_detectedA.Value, _detectedB.Value);
+            if (measuredSep < MinDualQRSeparation)
+            {
+                float expectedSep = Vector3.Distance(indicatorA.position, indicatorB.position);
+                Debug.LogWarning($"[MeshHandler] Dual-QR rejected: QR-A↔QR-B separation " +
+                                 $"{measuredSep:F3} m is below minimum {MinDualQRSeparation} m — " +
+                                 "move QR codes further apart or check MRUK tracking.");
+                OnDualQROutlierRejected?.Invoke(measuredSep, expectedSep);
+                return;  // stay in NeedsB; periodic re-broadcast will refresh _detectedA/_detectedB
+            }
+
             // Indicators must be direct children of SharedMesh (uniform scale assumed = photogrammetry export).
             // InverseTransformPoint is used (vs localPosition) to correctly handle any nesting depth.
             Vector3 aLocal = meshObject.transform.InverseTransformPoint(indicatorA.position);
@@ -398,22 +474,6 @@ public class MeshHandler : MonoBehaviourPun
             _qrManager?.ResyncAllMarkers();  // 較正前に検出済みのQRを新フレームで再送
             Debug.Log($"[MeshHandler] Dual-QR complete: pos={newPos} yaw={newRot.eulerAngles.y:F1}°");
         }
-    }
-
-    /// <summary>
-    /// Resets the dual-QR calibration state so the Worker can re-scan both QR codes.
-    /// Call via RPC from Expert if visual verification reveals bad alignment.
-    /// Has no effect in single-QR (legacy) mode.
-    /// </summary>
-    public void ResetDualCalibration()
-    {
-        if (!IsDualQRMode) return;
-        _dualCalibState = DualQRCalibState.NeedsA;
-        _detectedA      = null;
-        _detectedB      = null;
-        OnDualQRCalibStep?.Invoke(DualQRCalibState.NeedsA);
-        _qrManager?.StartPeriodicBroadcast();  // リセット → ポーリング再開
-        Debug.Log("[MeshHandler] Dual-QR calibration reset — Worker can re-scan QR-A.");
     }
 
     private void ApplyBakedCollisionMeshes(GameObject target)

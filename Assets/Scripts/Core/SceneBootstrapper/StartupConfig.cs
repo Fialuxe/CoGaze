@@ -18,6 +18,7 @@ public class StartupConfig
     public string pythonHost            = "127.0.0.1";
     public string microphoneDevice      = "";   // "" = use first available
     public bool   offlineMode           = false; // skip Photon, for local testing
+    public string pythonScriptDir       = "";   // root dir of WebcamEyeTracking repo (for auto-launch)
 
     private static string ConfigPath =>
         Path.Combine(Application.persistentDataPath, "cogaze_config.json");

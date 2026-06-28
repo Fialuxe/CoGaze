@@ -1678,9 +1678,9 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: cdee2d08aeafa99429c54177c7287b60, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
-  taskDurationSeconds: 10
+  taskDurationSeconds: 60
   assemblyDurationSeconds: 180
-  whiteNoiseDurationSeconds: 10
+  whiteNoiseDurationSeconds: 20
   whiteNoiseVolume: 0.4
   natureSoundVolume: 0.25
   resyncIntervalSeconds: 10

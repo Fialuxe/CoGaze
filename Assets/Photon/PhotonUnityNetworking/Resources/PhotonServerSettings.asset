@@ -50,6 +50,7 @@ MonoBehaviour:
   - RPC_ForwardQuestionnaireJson
   - RPC_SetMeshVisible
   - RPC_NotifyCalibComplete
+  - ResetDualCalibration
   DisableAutoOpenWizard: 1
   ShowSettings: 1
   DevRegionSetOnce: 0

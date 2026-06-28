@@ -35,7 +35,11 @@ public class GazeHandler : MonoBehaviourPun, IPunObservable
     {
         if (stream.IsWriting)
         {
-            Vector3 data = gazeInput != null ? gazeInput.GazeData : Vector3.zero;
+            // 視線が利用不可（トラッキング喪失 / OSC ストリーム断）のときは、直前の有効値を
+            // 流さず blink=1 の no-gaze を送る。古い注視を「生きた注視」として送信しない。
+            Vector3 data = (gazeInput != null && gazeInput.IsAvailable)
+                ? gazeInput.GazeData
+                : new Vector3(0.5f, 0.5f, 1f);
             stream.SendNext(data.x);
             stream.SendNext(data.y);
             stream.SendNext(data.z);

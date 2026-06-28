@@ -18,9 +18,20 @@ public class WorkerHUD2 : MonoBehaviour
     }
 
     [Header("HUD position relative to center eye (metres)")]
-    public Vector3 hudOffset  = new Vector3(-0.30f, 0.3f, 0.7f);
-    public Vector2 hudSizeMm  = new Vector2(480f, 92f);
+    // 1.2 m: within Quest lens focal range (~1.3–2.0 m); closer causes eye strain.
+    // +0.21 m: workpiece is 20–40° below gaze, so HUD above avoids visual competition.
+    // −0.21 m: slight left offset keeps forward view clear; reachable with a small eye movement.
+    public Vector3 hudOffset  = new Vector3(-0.21f, 0.21f, 1.2f);
+    public Vector2 hudSizeMm  = new Vector2(520f, 200f);            // taller panel for merged setup content
     public float   hudScaleM  = 0.001f;
+
+    [Header("HUD comfort-follow (UX6)")]
+    [Tooltip("How quickly the world-space HUD eases toward its comfortable spot. Higher = snappier.")]
+    public float   hudFollowLerp = 6f;
+    // UX6: the task HUD is no longer rigidly parented to the head. It lives in world space and
+    // follows head POSITION + YAW only (not pitch/roll), so looking down to assemble no longer
+    // drags the panel across the work area.
+    private Transform _hudCanvas;
 
     [Header("Alert Marker")]
     public float alertDistance  = 1.0f;
@@ -54,11 +65,24 @@ public class WorkerHUD2 : MonoBehaviour
     private Text  _calibText;
     private bool  _calibTutorialShown = false;
 
+    // Setup state rows — shown only during ExperimentState.Setup; replace stateText/timerText.
+    // Filled by SetupCoordinator via UpdateSetupStatus().
+    private Text _setupCalibText;
+    private Text _setupTaskText;
+    private Text _setupHintText;
+
     // Kept so OnDestroy can unsubscribe: these publishers (MeshHandler / IdentificationTask)
     // outlive this HUD across a reconnect, so a leaked handler would fire into a dead object.
     private MeshHandler        _meshHandler;
     private IdentificationTask _idTask;
-    private System.Action<bool> _qrHandler;
+    private System.Action<bool>       _qrHandler;
+    private System.Action             _idDoneHandler;     // OnCorrectGrip → haptic + flash
+    private System.Action<string,int> _idScoreHandler;    // OnTargetChanged → score display
+    private System.Action<float, float> _outlierHandler;
+
+    // Countdown (3-2-1-GO) shown once after the first Setup approval
+    private Text               _countdownText;
+    private ExperimentState    _prevState = ExperimentState.Setup;
 
     public void Initialize(ExperimentManager2 experimentManager)
     {
@@ -81,8 +105,25 @@ public class WorkerHUD2 : MonoBehaviour
     {
         if (meshHandler == null) return;
         _meshHandler = meshHandler;
-        meshHandler.OnCalibrationChanged += OnCalibrationChanged;
-        meshHandler.OnDualQRCalibStep    += OnDualQRCalibStep;
+        meshHandler.OnCalibrationChanged   += OnCalibrationChanged;
+        meshHandler.OnDualQRCalibStep      += OnDualQRCalibStep;
+        // Bridge the confirm event to the (previously caller-less) OnCalibrationConfirmed() so the
+        // haptic + "送信完了" flash actually fire. Subscribed here (not from SceneBootstrapper2) so
+        // OnDestroy can unsubscribe it — MeshHandler outlives this HUD across a reconnect.
+        meshHandler.OnCalibrationConfirmed += OnCalibrationConfirmed;
+
+        // Show a visible warning when dual-QR outlier rejection fires so the operator immediately
+        // knows that the physical QR separation doesn't match the indicator setup.
+        _outlierHandler = (measured, expected) =>
+        {
+            if (_calibText == null) return;
+            _calibText.gameObject.SetActive(true);
+            _calibText.color = Color.red;
+            _calibText.text  = $"⚠ QR間隔が合いません\n実測 {measured:F2}m / 期待 {expected:F2}m";
+            StopCoroutine(nameof(ClearOutlierWarning));
+            StartCoroutine(nameof(ClearOutlierWarning));
+        };
+        meshHandler.OnDualQROutlierRejected += _outlierHandler;
 
         // Immediately show initial dual-QR step so the Worker knows what to do from app launch.
         if (meshHandler.IsDualQRMode && _calibText != null)
@@ -90,6 +131,15 @@ public class WorkerHUD2 : MonoBehaviour
             _calibText.gameObject.SetActive(true);
             OnDualQRCalibStep(meshHandler.CurrentDualCalibState);
         }
+    }
+
+    private System.Collections.IEnumerator ClearOutlierWarning()
+    {
+        yield return new WaitForSeconds(4f);
+        if (_calibText == null) yield break;
+        _calibText.color = new Color(1f, 0.85f, 0.2f);
+        if (_meshHandler != null && _meshHandler.IsDualQRMode)
+            OnDualQRCalibStep(_meshHandler.CurrentDualCalibState);
     }
 
     private void OnDualQRCalibStep(DualQRCalibState step)
@@ -186,12 +236,15 @@ public class WorkerHUD2 : MonoBehaviour
     private System.Collections.IEnumerator FlashConfirm()
     {
         if (_calibText == null) yield break;
+        // OnCalibrationChanged(false) fires just before this on X-release and hides _calibText,
+        // so re-show it for the flash, then hide again (calibration has ended).
+        _calibText.gameObject.SetActive(true);
         Color orig = _calibText.color;
         _calibText.text  = CoGazeStrings.Calib_Sent;
         _calibText.color = new Color(0.3f, 1f, 0.5f);
         yield return new WaitForSeconds(1.5f);
-        _calibText.text  = CoGazeStrings.Calib_FullHint;
         _calibText.color = orig;
+        _calibText.gameObject.SetActive(false);
     }
 
     /// <summary>
@@ -206,11 +259,67 @@ public class WorkerHUD2 : MonoBehaviour
         {
             if (manager == null || manager.CurrentState != ExperimentState.TaskRunning) return;
             if (qrFound)
-                SetState(CoGazeStrings.Worker_QRFound, new Color(0.3f, 1f, 0.5f));
+            {
+                // Target armed (IdentificationTask fires this at task start): green instruction +
+                // a light haptic tick on the answer hand as a "ready to point" cue. Use the NoGaze
+                // variant in the control condition so the instruction matches the absent indicator.
+                bool noGaze = manager.CurrentGazeMode == GazeMode.None;
+                SetState(noGaze ? CoGazeStrings.Worker_QRFoundNoGaze : CoGazeStrings.Worker_QRFound,
+                         new Color(0.3f, 1f, 0.5f));
+#if UNITY_ANDROID && !UNITY_EDITOR
+                OvrHaptics.Pulse(this, 0.3f, 0.4f, 0.08f, OVRInput.Controller.RTouch);
+#endif
+            }
             else
                 SetState(CoGazeStrings.Worker_QRSearching, new Color(0.6f, 0.9f, 1f));
         };
         task.OnQRStateChanged += _qrHandler;
+
+        // Per-correct-hit feedback: strong haptic + green flash so the subject knows
+        // their answer was taken. Fires on OnCorrectGrip (not OnTaskComplete) so it
+        // triggers on EACH correct identification, not just once at end-of-task.
+        _idDoneHandler = () =>
+        {
+#if UNITY_ANDROID && !UNITY_EDITOR
+            OvrHaptics.Pulse(this, 0.5f, 0.9f, 0.25f, OVRInput.Controller.RTouch);
+#endif
+            StartCoroutine(FlashIdentifyConfirm());
+        };
+        task.OnCorrectGrip += _idDoneHandler;
+
+        // Live score display: update stateText to show running count after each correct answer.
+        // Worker must NEVER see targetId — only score is shown.
+        _idScoreHandler = (_, score) =>
+        {
+            if (manager == null || manager.CurrentState != ExperimentState.TaskRunning) return;
+            if (stateText == null) return;
+            bool noGaze  = manager.CurrentGazeMode == GazeMode.None;
+            string base2 = noGaze ? CoGazeStrings.Worker_QRFoundNoGaze : CoGazeStrings.Worker_QRFound;
+            stateText.text = $"{base2}\n{CoGazeStrings.Worker_ScoreFormat(score)}";
+        };
+        task.OnTargetChanged += _idScoreHandler;
+    }
+
+    private System.Collections.IEnumerator FlashIdentifyConfirm()
+    {
+        if (stateText == null) yield break;
+        Color orig = stateText.color;
+        stateText.color = new Color(0.3f, 1f, 0.5f);
+        yield return new WaitForSeconds(0.5f);
+        if (stateText != null) stateText.color = orig;
+    }
+
+    private System.Collections.IEnumerator ShowCountdown()
+    {
+        if (_countdownText == null) yield break;
+        var steps = new (string label, float wait)[] { ("3", 1f), ("2", 1f), ("1", 1f), ("GO！", 0.8f) };
+        _countdownText.gameObject.SetActive(true);
+        foreach (var (label, wait) in steps)
+        {
+            _countdownText.text = label;
+            yield return new UnityEngine.WaitForSeconds(wait);
+        }
+        _countdownText.gameObject.SetActive(false);
     }
 
     private void OnDestroy()
@@ -225,10 +334,20 @@ public class WorkerHUD2 : MonoBehaviour
         // these subscribed would leak and double-fire into the destroyed HUD.
         if (_meshHandler != null)
         {
-            _meshHandler.OnCalibrationChanged -= OnCalibrationChanged;
-            _meshHandler.OnDualQRCalibStep    -= OnDualQRCalibStep;
+            _meshHandler.OnCalibrationChanged   -= OnCalibrationChanged;
+            _meshHandler.OnDualQRCalibStep      -= OnDualQRCalibStep;
+            _meshHandler.OnCalibrationConfirmed -= OnCalibrationConfirmed;
+            if (_outlierHandler != null)
+                _meshHandler.OnDualQROutlierRejected -= _outlierHandler;
         }
-        if (_idTask != null && _qrHandler != null) _idTask.OnQRStateChanged -= _qrHandler;
+        if (_idTask != null && _qrHandler      != null) _idTask.OnQRStateChanged -= _qrHandler;
+        if (_idTask != null && _idDoneHandler  != null) _idTask.OnCorrectGrip   -= _idDoneHandler;
+        if (_idTask != null && _idScoreHandler != null) _idTask.OnTargetChanged  -= _idScoreHandler;
+        // The HUD/breath canvases are no longer children of this component's GameObject (the HUD now
+        // lives in world space; the breath guide hangs off the camera rig), so destroy them
+        // explicitly — otherwise a reconnect would leave a frozen, orphaned canvas in the scene.
+        if (_hudCanvas != null) Destroy(_hudCanvas.gameObject);
+        if (_breathGo  != null) Destroy(_breathGo);
         if (alertMarkerGo != null) Destroy(alertMarkerGo);
         if (_discTex != null) Destroy(_discTex);
     }
@@ -240,12 +359,103 @@ public class WorkerHUD2 : MonoBehaviour
         RefreshConnectionStatus();
         RefreshTimer();
         RefreshAlertBillboard();
+        PositionHud(instant: false);
         if (_breathingActive) AnimateBreathing();
     }
+
+    // UX6: comfort-anchor the world-space HUD. Follows head position + yaw only (ignores pitch/roll)
+    // with frame-rate-independent easing, so the panel stays readable above the work area instead of
+    // sweeping across it when the subject looks down to assemble.
+    private void PositionHud(bool instant)
+    {
+        if (_hudCanvas == null || cameraAnchor == null) return;
+
+        Vector3 fwd = Vector3.ProjectOnPlane(cameraAnchor.forward, Vector3.up);
+        if (fwd.sqrMagnitude < 1e-4f) fwd = Vector3.forward;
+        else                          fwd.Normalize();
+
+        Vector3 right = Vector3.Cross(Vector3.up, fwd);   // head's right, on the horizontal plane
+        Vector3 target = cameraAnchor.position
+                       + fwd          * hudOffset.z
+                       + right        * hudOffset.x
+                       + Vector3.up   * hudOffset.y;
+        Quaternion targetRot = Quaternion.LookRotation(fwd, Vector3.up);
+
+        if (instant)
+        {
+            _hudCanvas.SetPositionAndRotation(target, targetRot);
+            return;
+        }
+
+        float k = 1f - Mathf.Exp(-Mathf.Max(0f, hudFollowLerp) * Time.deltaTime);
+        _hudCanvas.position = Vector3.Lerp(_hudCanvas.position, target, k);
+        _hudCanvas.rotation = Quaternion.Slerp(_hudCanvas.rotation, targetRot, k);
+    }
+
+    // ── Setup view helpers ────────────────────────────────────────────────────
+
+    private void ShowSetupRows(bool show)
+    {
+        if (_setupCalibText != null) _setupCalibText.gameObject.SetActive(show);
+        if (_setupTaskText  != null) _setupTaskText.gameObject.SetActive(show);
+        if (_setupHintText  != null) _setupHintText.gameObject.SetActive(show);
+        if (stateText       != null) stateText.gameObject.SetActive(!show);
+        if (timerText       != null) timerText.gameObject.SetActive(!show);
+    }
+
+    /// <summary>
+    /// Called by SetupCoordinator each time setup state changes (calib complete, task QR detected,
+    /// expert ready). Ignored unless the current experiment state is Setup.
+    /// </summary>
+    public void UpdateSetupStatus(bool calibDone, int taskDetected, int taskTotal, string hintText, bool expertReady)
+    {
+        if (manager?.CurrentState != ExperimentState.Setup) return;
+
+        if (connStatusText != null)
+        {
+            connStatusText.text  = expertReady ? CoGazeStrings.Worker_ExpertReady : CoGazeStrings.Worker_ExpertPreparing;
+            connStatusText.color = expertReady ? new Color(0.3f, 1f, 0.5f) : new Color(1f, 0.85f, 0.3f);
+        }
+
+        if (_setupCalibText != null)
+        {
+            _setupCalibText.text  = $"{(calibDone ? "[OK]" : "[--]")} キャリブレーション";
+            _setupCalibText.color = calibDone ? new Color(0.3f, 1f, 0.5f) : Color.white;
+        }
+
+        bool taskDone = taskDetected >= taskTotal;
+        if (_setupTaskText != null)
+        {
+            _setupTaskText.text  = $"{(taskDone ? "[OK]" : "[--]")} タスクマーカー  {taskDetected} / {taskTotal}";
+            _setupTaskText.color = taskDone ? new Color(0.3f, 1f, 0.5f) : Color.white;
+        }
+
+        if (_setupHintText != null)
+        {
+            _setupHintText.text  = hintText;
+            _setupHintText.color = hintText.StartsWith("[OK]")
+                ? new Color(0.3f, 1f, 0.5f)
+                : new Color(1f, 0.85f, 0.3f);
+        }
+    }
+
+    /// <summary>
+    /// Temporarily overrides the hint row with a red error message (e.g., registration rejected).
+    /// </summary>
+    public void ShowSetupError(string message)
+    {
+        if (_setupHintText == null || manager?.CurrentState != ExperimentState.Setup) return;
+        _setupHintText.text  = message;
+        _setupHintText.color = new Color(1f, 0.4f, 0.3f);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
 
     private void RefreshConnectionStatus()
     {
         if (connStatusText == null) return;
+        // During Setup, connStatusText is owned by UpdateSetupStatus (fed by SetupCoordinator).
+        if (manager != null && manager.CurrentState == ExperimentState.Setup) return;
 
         if (!PhotonNetwork.IsConnected)
         {
@@ -330,14 +540,18 @@ public class WorkerHUD2 : MonoBehaviour
         }
 
         var go = new GameObject("WorkerHUD2_Canvas");
-        go.transform.SetParent(cameraAnchor, false);
-        go.transform.localPosition = hudOffset;
-        go.transform.localRotation = Quaternion.identity;
-        go.transform.localScale    = Vector3.one * hudScaleM;
+        go.transform.localScale = Vector3.one * hudScaleM;
 
         var canvas = go.AddComponent<Canvas>();
         canvas.renderMode = RenderMode.WorldSpace;
         go.GetComponent<RectTransform>().sizeDelta = hudSizeMm;
+
+        // UX6: NOT parented to the head. The canvas lives in world space and is eased toward a
+        // comfortable spot that follows head position + yaw only (see PositionHud), so head pitch
+        // during assembly no longer drags the task instruction across the work area. _hudCanvas is
+        // captured AFTER AddComponent<Canvas> so it references the final RectTransform.
+        _hudCanvas = go.transform;
+        PositionHud(instant: true);
 
         var bgGo = new GameObject("BG");
         bgGo.transform.SetParent(go.transform, false);
@@ -368,6 +582,23 @@ public class WorkerHUD2 : MonoBehaviour
         MakeDivider(go.transform, 0.375f);
         MakeDivider(go.transform, 0.74f);
 
+        // Setup view: calib + task status + instructions (visible only during Setup state).
+        // These overlay the stateText/timerText area; both sets are never shown simultaneously.
+        _setupCalibText = MakeText("SetupCalibLine", go.transform,
+            new Vector2(0.05f, 0.60f), new Vector2(0.98f, 0.73f),
+            "[--] キャリブレーション", 20, TextAnchor.MiddleLeft, Color.white);
+        _setupCalibText.gameObject.SetActive(false);
+
+        _setupTaskText = MakeText("SetupTaskLine", go.transform,
+            new Vector2(0.05f, 0.40f), new Vector2(0.98f, 0.60f),
+            "[--] タスクマーカー  0 / ?", 20, TextAnchor.MiddleLeft, Color.white);
+        _setupTaskText.gameObject.SetActive(false);
+
+        _setupHintText = MakeText("SetupHintLine", go.transform,
+            new Vector2(0.05f, 0.02f), new Vector2(0.98f, 0.37f),
+            "QR-A と QR-B を見てください", 17, TextAnchor.UpperLeft, new Color(1f, 0.85f, 0.3f));
+        _setupHintText.gameObject.SetActive(false);
+
         // Calibration mode indicator — hidden until grip toggles calibration ON
         _calibText = MakeText("CalibStatus", go.transform,
             new Vector2(0.0f, -0.12f), new Vector2(1.0f, 0.0f),
@@ -376,6 +607,12 @@ public class WorkerHUD2 : MonoBehaviour
 
         BuildAlertMarker();
         BuildBreathingGuide();
+
+        // Large countdown overlay — shown once before the first condition (3-2-1-GO!)
+        _countdownText = MakeText("Countdown", go.transform,
+            new Vector2(0.05f, 0.20f), new Vector2(0.95f, 0.85f),
+            "", 90, TextAnchor.MiddleCenter, new Color(1f, 0.85f, 0.1f));
+        _countdownText.gameObject.SetActive(false);
 
         Debug.Log("[WorkerHUD2] HUD built successfully.");
     }
@@ -419,6 +656,7 @@ public class WorkerHUD2 : MonoBehaviour
     private void HandleStateChanged(ExperimentState state)
     {
         HideBreathGuide();
+        ShowSetupRows(state == ExperimentState.Setup);
 
         if (state != ExperimentState.TaskRunning)
         {
@@ -426,11 +664,16 @@ public class WorkerHUD2 : MonoBehaviour
             DismissAlert();
         }
 
+        // 3-2-1-GO countdown: fires once when Setup transitions to Idle (first setup approval).
+        // Worker starts a local coroutine here; the Expert's countdown is driven by OnCountdownTick.
+        if (state == ExperimentState.Idle && _prevState == ExperimentState.Setup)
+            StartCoroutine(ShowCountdown());
+        _prevState = state;
+
         switch (state)
         {
             case ExperimentState.Setup:
-                SetState("セットアップ中...", new Color(0.5f, 0.8f, 1f));
-                SetTimer(CoGazeStrings.Worker_TimerEmpty, Color.white);
+                // Setup rows managed by SetupCoordinator.UpdateSetupStatus(); just show the panel.
                 SetPanelMode(true);
                 break;
 
@@ -480,6 +723,12 @@ public class WorkerHUD2 : MonoBehaviour
                 SetTimer(CoGazeStrings.Worker_TimerEmpty, Color.gray);
                 SetPanelMode(true);
                 break;
+
+            default:
+                // Unknown/added state: keep the panel visible so the HUD never silently disappears.
+                Debug.LogWarning($"[WorkerHUD2] Unhandled ExperimentState in HandleStateChanged: {state}");
+                SetPanelMode(true);
+                break;
         }
     }
 
@@ -504,15 +753,16 @@ public class WorkerHUD2 : MonoBehaviour
 
             case StepType.Task:
             {
-                // NoGaze conditions need a different message; for all gaze modes prefer the authored
-                // [local] instruction from the template file (includes "Done ボタンを押して" etc.).
-                string fileInstr = !noGaze && manager != null ? manager.GetInstruction(stepIdx) : null;
-                string taskText  = !string.IsNullOrEmpty(fileInstr)
-                    ? condLabel + fileInstr
-                    : condLabel + (noGaze
-                        ? CoGazeStrings.Worker_TaskNoGaze
-                        : CoGazeStrings.Worker_TaskWithGaze);
-                SetState(taskText, new Color(0.6f, 0.9f, 1f));
+                // The authored [local] template instructed the subject to press a non-existent "Done"
+                // button. The identification answer is now a proximity + grip action, so show
+                // the self-contained identification instruction instead (Worker_QRFound is the whole-
+                // task message per CoGazeStrings). This is also the last writer in the manager's
+                // OnStateChanged→OnInstructionChanged→OnProgressChanged sequence, so it determines what
+                // the subject actually sees during TaskRunning; ConnectIdentificationTask keeps it in
+                // sync afterwards via OnQRStateChanged. In the NoGaze control there is no indicator, so
+                // a voice-directed variant tells the subject gaze is absent this condition.
+                SetState(condLabel + (noGaze ? CoGazeStrings.Worker_QRFoundNoGaze : CoGazeStrings.Worker_QRFound),
+                         new Color(0.3f, 1f, 0.5f));
                 break;
             }
 
@@ -542,6 +792,11 @@ public class WorkerHUD2 : MonoBehaviour
                 SetState(csText, new Color(0.6f, 1f, 0.6f));
                 break;
             }
+
+            default:
+                // Unknown/added StepType: leave the current HUD text untouched rather than blanking it.
+                Debug.LogWarning($"[WorkerHUD2] Unhandled StepType in HandleProgressChanged: {stepType}");
+                break;
         }
     }
 

@@ -8,6 +8,7 @@ using Photon.Pun;
 using Photon.Realtime;
 using ExitGames.Client.Photon;
 using Newtonsoft.Json;
+using UnityEngine.InputSystem;
 
 /// <summary>
 /// Runs on the Expert PC. Records trial metadata to trials.csv, per-frame gaze+head data
@@ -35,12 +36,19 @@ public class ExperimentLogger : MonoBehaviour, IOnEventCallback
     private string            logDir;
     private string            _participantId = "P00";
     private StreamWriter      framesWriter;
+    private StreamWriter      escalationsWriter;   // Expert escalation-rung markers (assembly/identification ladder)
+    private StreamWriter      _identificationsWriter; // Per-grip attempt rows for identification task
+
+    // Subscribed once when _identTask is first found; unsubscribed in OnDestroy.
+    private System.Action<string, string, bool, int> _idAttemptHandler;
 
     // Per-trial state
     private string                currentTrialId;
     private long                  trialStartMs;
     private int                   trialStepIndex;
     private StepType              trialStepType;
+    private int                   trialMaxRung = 1;   // highest escalation rung reached this trial (1 = deictic + gaze only)
+    private string                trialTargetMarker = "";   // identification correct-answer target, snapshotted at trial start
     private Vector3               trialMeshPos;
     private Quaternion            trialMeshRot;
     private Vector3               trialMeshScale;
@@ -131,13 +139,47 @@ public class ExperimentLogger : MonoBehaviour, IOnEventCallback
                 File.WriteAllText(trialsPath,
                     "trial_id,participant,condition_index,gaze_mode,noise_level," +
                     "task_type,condition_name," +
-                    "step_type,step_index,start_ms,end_ms,duration_ms,identified_marker\n",
+                    "step_type,step_index,start_ms,end_ms,duration_ms,identified_marker,target_marker,correct,max_rung,score\n",
                     Encoding.UTF8);
             }
             catch (Exception ex)
             {
                 Debug.LogWarning($"[ExperimentLogger] Could not write trials.csv header: {ex.Message}");
             }
+        }
+
+        // Open escalations CSV — Expert escalation-rung markers, append across restarts.
+        string escalationsPath  = Path.Combine(logDir, "escalations.csv");
+        bool   escalationsExist = File.Exists(escalationsPath);
+        try
+        {
+            escalationsWriter = new StreamWriter(escalationsPath, append: true, encoding: Encoding.UTF8)
+            {
+                AutoFlush = true   // low-frequency operator events — flush immediately so nothing is lost on crash
+            };
+            if (!escalationsExist)
+                escalationsWriter.WriteLine("trial_id,t_ms,elapsed_s,condition_index,task_type,rung");
+        }
+        catch (Exception ex)
+        {
+            Debug.LogWarning($"[ExperimentLogger] Could not open escalations.csv: {ex.Message}");
+        }
+
+        // Open identifications CSV — per-grip-attempt rows for the repeated identification task
+        string idPath  = Path.Combine(logDir, "identifications.csv");
+        bool   idExists = File.Exists(idPath);
+        try
+        {
+            _identificationsWriter = new StreamWriter(idPath, append: true, encoding: Encoding.UTF8)
+            {
+                AutoFlush = true
+            };
+            if (!idExists)
+                _identificationsWriter.WriteLine("trial_id,t_ms,elapsed_s,target_id,gripped_id,correct,score_after");
+        }
+        catch (Exception ex)
+        {
+            Debug.LogWarning($"[ExperimentLogger] Could not open identifications.csv: {ex.Message}");
         }
 
         // Open frames CSV — append across session restarts
@@ -189,6 +231,10 @@ public class ExperimentLogger : MonoBehaviour, IOnEventCallback
         trialStartMs     = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
         trialStepIndex   = expManager.CurrentStepIndex;
         trialStepType    = expManager.CurrentStepType;
+        trialMaxRung     = 1;   // reset the escalation ladder for the new trial
+        // Snapshot the target NOW: completion advances the step before the end-row is written, so
+        // reading it at trial end would capture the next step's (empty) target.
+        trialTargetMarker = expManager.CurrentTargetMarkerId ?? "";
 
         // Auto-populate fields that LogTrialStart() was supposed to set but was never called.
         trialTaskType = trialStepType == StepType.Task     ? "task"
@@ -208,10 +254,32 @@ public class ExperimentLogger : MonoBehaviour, IOnEventCallback
         findAttempts     = 0;
         if (_identTask == null)
             _identTask = FindAnyObjectByType<IdentificationTask>();
+
+        // Subscribe to per-grip attempts once (handler persists across trials; null-guard prevents double-subscribe)
+        if (_identTask != null && _idAttemptHandler == null)
+        {
+            _idAttemptHandler = (targetId, grippedId, correct, scoreAfter) =>
+            {
+                if (currentTrialId == null || trialStepType != StepType.Task) return;
+                long   nowMs   = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                float  elapsed = (nowMs - trialStartMs) / 1000f;
+                try
+                {
+                    _identificationsWriter?.WriteLine(
+                        $"{currentTrialId},{nowMs},{elapsed:F3},{targetId},{grippedId},{(correct ? "1" : "0")},{scoreAfter}");
+                }
+                catch (Exception ex)
+                {
+                    Debug.LogWarning($"[ExperimentLogger] identifications.csv write error: {ex.Message}");
+                }
+            };
+            _identTask.OnIdentificationAttempt += _idAttemptHandler;
+        }
+
         if (_voiceRecorder == null)
             _voiceRecorder = GetComponent<VoiceRecorder>();
-        trialVoiceStartSeconds = _voiceRecorder?.RecordingSeconds ?? 0f;
-
+        // Legacy per-trial voice-align transport was removed; this offset is intentionally always 0
+        // (used as replay voiceStartSeconds). Single explicit assignment — was a dead double-assign.
         trialVoiceStartSeconds = 0f;
 
         // Snapshot mesh transform at trial start
@@ -256,11 +324,19 @@ public class ExperimentLogger : MonoBehaviour, IOnEventCallback
 
         // Append trial row — includes task_type and condition_name
         string trialsPath   = Path.Combine(logDir, "trials.csv");
-        string markerResult = _identTask?.CompletedMarkerId ?? "";
+        // Only the identification (Task) trial selects a marker, and CompletedMarkerId is not cleared at
+        // task end — so writing it on an Assembly row would record a STALE identification marker. Blank it
+        // for non-Task steps so Assembly rows carry no misleading identified_marker.
+        string markerResult = (trialStepType == StepType.Task) ? (_identTask?.CompletedMarkerId ?? "") : "";
+        // correct: blank when untracked (no target), else 1/0 on exact match of the Worker's selection.
+        string correct = string.IsNullOrEmpty(trialTargetMarker) ? ""
+                       : (markerResult == trialTargetMarker ? "1" : "0");
+        string scoreStr = (trialStepType == StepType.Task && _identTask != null)
+            ? _identTask.Score.ToString() : "";
         string row = $"{currentTrialId},{_participantId},{condIdx},{gazeMode},{noiseLevel}," +
                      $"{trialTaskType},{trialConditionName}," +
                      $"{trialStepType},{trialStepIndex},{trialStartMs},{endMs},{durationMs}," +
-                     $"{markerResult}\n";
+                     $"{markerResult},{trialTargetMarker},{correct},{trialMaxRung},{scoreStr}\n";
         try
         {
             File.AppendAllText(trialsPath, row, Encoding.UTF8);
@@ -278,6 +354,53 @@ public class ExperimentLogger : MonoBehaviour, IOnEventCallback
         replayFrames       = null;
         trialTaskType      = "";
         trialConditionName = "";
+    }
+
+    // -------------------------------------------------------------------------
+    // Escalation-rung markers (Expert keyboard, during an active trial)
+    // -------------------------------------------------------------------------
+    //
+    // The Expert climbs a graduated verbal ladder when gaze alone is not getting the
+    // instruction across: rung 1 = deictic + gaze, rung 2 = feature/relative words,
+    // rung 3 = full spatial/coordinate, rung 4 = orientation (assembly only). They mark
+    // the rung reached in real time with F2/F3/F4 so "how far the Expert had to climb" is
+    // captured per trial (max_rung in trials.csv) plus a timestamped event stream
+    // (escalations.csv). Active only while a Task/Assembly trial is running; on the Worker
+    // there is no keyboard so this is inert.
+
+    private void Update()
+    {
+        if (currentTrialId == null) return;     // only during an active trial (Expert-side)
+        var kb = Keyboard.current;
+        if (kb == null) return;                 // no keyboard (e.g. Worker/Quest) — nothing to mark
+
+        if (kb.f2Key.wasPressedThisFrame) RecordEscalation(2);
+        if (kb.f3Key.wasPressedThisFrame) RecordEscalation(3);
+        // rung4 = orientation help, which only exists in the assembly task. Gate F4 to Assembly so a
+        // stray press during the 60s identification trial cannot pollute max_rung / escalations.csv (ESCAL-01).
+        if (kb.f4Key.wasPressedThisFrame && trialStepType == StepType.Assembly) RecordEscalation(4);
+    }
+
+    private void RecordEscalation(int rung)
+    {
+        if (rung > trialMaxRung) trialMaxRung = rung;
+
+        long  nowMs   = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        float elapsed = (nowMs - trialStartMs) / 1000f;
+        int   condIdx = expManager != null ? expManager.CurrentConditionIndex : -1;
+
+        if (escalationsWriter != null)
+        {
+            try
+            {
+                escalationsWriter.WriteLine($"{currentTrialId},{nowMs},{elapsed:F3},{condIdx},{trialTaskType},{rung}");
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning($"[ExperimentLogger] Escalation write error: {ex.Message}");
+            }
+        }
+        FileLogger.Log("ExperimentLogger", $"Escalation rung {rung} (max={trialMaxRung}) trial={currentTrialId} task={trialTaskType}");
     }
 
     private void SaveReplayJson(int condIdx, string gazeMode, string noiseLevel)
@@ -498,6 +621,34 @@ public class ExperimentLogger : MonoBehaviour, IOnEventCallback
         catch (Exception ex)
         {
             Debug.LogWarning($"[ExperimentLogger] StreamWriter close error: {ex.Message}");
+        }
+
+        try
+        {
+            escalationsWriter?.Flush();
+            escalationsWriter?.Close();
+            escalationsWriter = null;
+        }
+        catch (Exception ex)
+        {
+            Debug.LogWarning($"[ExperimentLogger] escalations.csv close error: {ex.Message}");
+        }
+
+        try
+        {
+            _identificationsWriter?.Flush();
+            _identificationsWriter?.Close();
+            _identificationsWriter = null;
+        }
+        catch (Exception ex)
+        {
+            Debug.LogWarning($"[ExperimentLogger] identifications.csv close error: {ex.Message}");
+        }
+
+        if (_identTask != null && _idAttemptHandler != null)
+        {
+            _identTask.OnIdentificationAttempt -= _idAttemptHandler;
+            _idAttemptHandler = null;
         }
     }
 }
