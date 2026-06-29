@@ -1,39 +1,51 @@
+using System.Collections.Generic;
 using UnityEngine;
 using Photon.Pun;
 
 public class IdentificationTask : MonoBehaviourPun
 {
-    public event System.Action       OnTaskComplete;
-    public event System.Action<bool> OnQRStateChanged;
+    // Fired at task end (backward compat — ExperimentManager2 no longer uses this for advancing)
+    public event System.Action                               OnTaskComplete;
+    // True = task armed (start of task); false = wrong/searching (not currently used post-redesign)
+    public event System.Action<bool>                         OnQRStateChanged;
+    // (targetId, score) — Expert shows both; Worker shows score only (never expose targetId to Worker display)
+    public event System.Action<string, int>                  OnTargetChanged;
+    // Fires on each correct grip — WorkerHUD2 uses this for haptic + flash feedback
+    public event System.Action                               OnCorrectGrip;
+    // (targetId, grippedId, correct, scoreAfter) — ExperimentLogger writes identifications.csv
+    public event System.Action<string, string, bool, int>    OnIdentificationAttempt;
 
-    private ExperimentManager2 experimentManager2;
-    private bool               _doneSent       = false;
-    private bool               _qrScanned      = false;
-    private bool               _workerInitDone = false;
-    private QRSpatialManager   _qrManager;
+    public const string QR_CALIB_PREFIX = "QR_CALIB";
+
+    private ExperimentManager2 _experimentManager2;
+    public string CompletedMarkerId { get; private set; }
+    public string CurrentTargetId   { get; private set; }
+    public int    Score             { get; private set; }
+    public int    MissCount         { get; private set; }
+
+    private bool             _workerInitDone;
+    private QRSpatialManager _qrManager;
 
     private bool IsWorker => RoleManager.LocalRole == RoleManager.ROLE_WORKER;
 
 #if UNITY_ANDROID && !UNITY_EDITOR
-    // Analog grip threshold — same value as MeshHandler to handle Touch Plus axis
-    // inconsistency on both MQ3 and MQ3S (identical Touch Plus controllers, but
-    // firmware versions differ and the raw axis value at "fully squeezed" varies).
-    private const float GripThreshold      = 0.7f;
-    private const float ProximityThreshold = 0.20f; // 20 cm
-    private bool         _gripWasDown      = false;
+    // Answer = right-hand GRIP near the target QR (matches participant briefing video).
+    // Calibration uses the index TRIGGER (MeshHandler) — inputs never overlap.
+    private const float k_gripThreshold      = OVRInputThresholds.Grip;
+    private const float k_proximityThreshold = 0.20f; // 20 cm
+    private bool        _gripWasDown;
     private OVRCameraRig _ovrRig;
 #endif
 
     private void Start()
     {
-        experimentManager2 = Object.FindAnyObjectByType<ExperimentManager2>();
-        if (experimentManager2 == null)
+        _experimentManager2 = Object.FindAnyObjectByType<ExperimentManager2>();
+        if (_experimentManager2 == null)
         {
             Debug.LogError("[IdentificationTask] ExperimentManager2 not found in scene.");
             return;
         }
-
-        experimentManager2.OnStateChanged += OnStateChanged;
+        _experimentManager2.OnStateChanged += OnStateChanged;
         SetTaskEnabled(false);
     }
 
@@ -44,35 +56,21 @@ public class IdentificationTask : MonoBehaviourPun
         if (!IsWorker) return;
 
         _qrManager = Object.FindAnyObjectByType<QRSpatialManager>();
-        if (_qrManager != null)
-            _qrManager.OnMarkerDetected += OnQRMarkerDetected;
-        else
-            Debug.LogWarning("[IdentificationTask] QRSpatialManager not found — QR gate disabled.");
+        if (_qrManager == null)
+            Debug.LogWarning("[IdentificationTask] QRSpatialManager not found — target selection disabled.");
     }
 
     private void OnDestroy()
     {
-        if (experimentManager2 != null)
-            experimentManager2.OnStateChanged -= OnStateChanged;
-        if (_qrManager != null)
-            _qrManager.OnMarkerDetected -= OnQRMarkerDetected;
-    }
-
-    private void OnQRMarkerDetected(string markerId, Vector3 pos, Quaternion rot)
-    {
-        if (_qrScanned) return;
-        if (markerId.StartsWith("calib")) return;
-        _qrScanned = true;
-        OnQRStateChanged?.Invoke(true);
-        Debug.Log($"[IdentificationTask] QR confirmed (id='{markerId}') — squeeze grip near it to complete.");
+        if (_experimentManager2 != null)
+            _experimentManager2.OnStateChanged -= OnStateChanged;
     }
 
     private void OnStateChanged(ExperimentState newState)
     {
         EnsureWorkerInit();
         bool shouldRun = newState == ExperimentState.TaskRunning
-                      && experimentManager2.CurrentStepType == StepType.Task;
-
+                      && _experimentManager2.CurrentStepType == StepType.Task;
         if (shouldRun) StartTask();
         else           EndTask();
     }
@@ -80,81 +78,140 @@ public class IdentificationTask : MonoBehaviourPun
     public void StartTask()
     {
         Debug.Log("[IdentificationTask] StartTask");
-        _qrScanned = false;
-        OnQRStateChanged?.Invoke(false);
+        Score             = 0;
+        MissCount         = 0;
+        CurrentTargetId   = null;
+        CompletedMarkerId = null;
+        OnQRStateChanged?.Invoke(true);
 #if UNITY_ANDROID && !UNITY_EDITOR
         _gripWasDown = false;
 #endif
         SetTaskEnabled(true);
+        if (IsWorker) SelectNextTarget();
+    }
+
+    // Worker picks a random non-calibration QR that differs from the current target.
+    // Result is broadcast to all clients via RPC_SetTarget so Expert also knows the target.
+    private void SelectNextTarget()
+    {
+        if (_qrManager == null) return;
+        var candidates = new List<string>();
+        foreach (var kvp in _qrManager.DetectedMarkers)
+        {
+            if (kvp.Key.StartsWith(QR_CALIB_PREFIX)) continue;
+            if (kvp.Value == null) continue;
+            candidates.Add(kvp.Key);
+        }
+        if (candidates.Count == 0)
+        {
+            Debug.LogWarning("[IdentificationTask] No non-calib QR candidates — target not set.");
+            return;
+        }
+        string next = CurrentTargetId;
+        if (candidates.Count > 1)
+        {
+            int tries = 0;
+            while (next == CurrentTargetId && tries++ < 10)
+                next = candidates[Random.Range(0, candidates.Count)];
+        }
+        else
+            next = candidates[0];
+        photonView.RPC(nameof(RPC_SetTarget), RpcTarget.All, next, Score);
+    }
+
+    [PunRPC]
+    private void RPC_SetTarget(string targetId, int score)
+    {
+        CurrentTargetId = targetId;
+        Score = score;
+        Debug.Log($"[IdentificationTask] Target → '{targetId}' (score={score})");
+        OnTargetChanged?.Invoke(targetId, score);
     }
 
     public void EndTask()
     {
-        Debug.Log("[IdentificationTask] EndTask");
+        Debug.Log($"[IdentificationTask] EndTask. FinalScore={Score}");
         SetTaskEnabled(false);
+        OnTaskComplete?.Invoke();
     }
 
 #if UNITY_ANDROID && !UNITY_EDITOR
     private void Update()
     {
         if (!IsWorker) return;
-        if (!_qrScanned) return;
 
         float grip        = OVRInput.Get(OVRInput.Axis1D.PrimaryHandTrigger, OVRInput.Controller.RTouch);
-        bool  gripDown    = grip > GripThreshold;
+        bool  gripDown    = grip > k_gripThreshold;
         bool  justPressed = gripDown && !_gripWasDown;
         _gripWasDown = gripDown;
 
+        // While X (left) is held, the right hand calibrates the mesh — block answer input.
+        if (OVRInput.Get(OVRInput.Button.One, OVRInput.Controller.LTouch)) return;
         if (!justPressed) return;
         if (_qrManager == null) return;
+        // Target not yet assigned (RPC_SetTarget hasn't arrived yet) — ignore grip.
+        if (CurrentTargetId == null) return;
 
         Vector3 controllerPos = GetRightControllerWorldPos();
+        string nearestId   = null;
+        float  nearestDist = k_proximityThreshold;
         foreach (var kvp in _qrManager.DetectedMarkers)
         {
-            if (kvp.Key.StartsWith("calib")) continue;
+            if (kvp.Key.StartsWith(QR_CALIB_PREFIX)) continue;
             if (kvp.Value == null) continue;
-            if (Vector3.Distance(controllerPos, kvp.Value.transform.position) < ProximityThreshold)
-            {
-                CompleteTask(kvp.Key);
-                return;
-            }
+            float dist = Vector3.Distance(controllerPos, kvp.Value.transform.position);
+            if (dist < nearestDist) { nearestDist = dist; nearestId = kvp.Key; }
         }
 
-        Debug.Log($"[IdentificationTask] Grip pressed but no QR within {ProximityThreshold * 100:F0} cm.");
+        if (nearestId == null)
+        {
+            Debug.Log($"[IdentificationTask] Grip: no QR within {k_proximityThreshold * 100:F0} cm.");
+            return;
+        }
+
+        if (nearestId == CurrentTargetId)
+        {
+            Debug.Log($"[IdentificationTask] Correct grip on '{nearestId}'!");
+            photonView.RPC(nameof(RPC_CorrectHit), RpcTarget.All, nearestId, Score + 1);
+        }
+        else
+        {
+            Debug.Log($"[IdentificationTask] Wrong: '{nearestId}' (target='{CurrentTargetId}').");
+            photonView.RPC(nameof(RPC_WrongHit), RpcTarget.All, CurrentTargetId, nearestId, Score);
+        }
     }
 
     private Vector3 GetRightControllerWorldPos()
     {
-        if (_ovrRig == null)
-            _ovrRig = FindAnyObjectByType<OVRCameraRig>();
-
-        if (_ovrRig != null)
-            return _ovrRig.rightHandAnchor.position;
-
-        // Fallback if OVRCameraRig is absent (editor-side stub, etc.)
+        if (_ovrRig == null) _ovrRig = FindAnyObjectByType<OVRCameraRig>();
+        if (_ovrRig != null) return _ovrRig.rightHandAnchor.position;
         return OVRInput.GetLocalControllerPosition(OVRInput.Controller.RTouch);
     }
 #endif
 
-    private void CompleteTask(string markerId)
+    [PunRPC]
+    private void RPC_CorrectHit(string grippedId, int newScore)
     {
-        if (_doneSent) return;
-        _doneSent = true;
-        Debug.Log($"[IdentificationTask] Completion confirmed near QR '{markerId}' — sending RPC.");
-        photonView.RPC(nameof(RPC_IdentificationDone), RpcTarget.All);
+        string prevTarget = CurrentTargetId;
+        CompletedMarkerId = grippedId;
+        Score             = newScore;
+        Debug.Log($"[IdentificationTask] ✓ Correct: gripped='{grippedId}' score={newScore}");
+        OnIdentificationAttempt?.Invoke(prevTarget, grippedId, true, newScore);
+        OnCorrectGrip?.Invoke();
+        // OnTargetChanged fires via RPC_SetTarget when Worker selects the next QR
+        if (IsWorker) SelectNextTarget();
     }
 
     [PunRPC]
-    private void RPC_IdentificationDone()
+    private void RPC_WrongHit(string targetId, string grippedId, int currentScore)
     {
-        Debug.Log("[IdentificationTask] RPC_IdentificationDone received.");
-        OnTaskComplete?.Invoke();
-        SetTaskEnabled(false);
+        MissCount++;
+        Debug.Log($"[IdentificationTask] ✗ Wrong: '{grippedId}' (target='{targetId}', score={currentScore}, miss={MissCount})");
+        OnIdentificationAttempt?.Invoke(targetId, grippedId, false, currentScore);
     }
 
     private void SetTaskEnabled(bool value)
     {
         enabled = value;
-        if (value) _doneSent = false;
     }
 }

@@ -1,6 +1,4 @@
-/// <summary>
-/// Posture (head tracking) input interface.
-/// </summary>
+// Posture (head tracking) input interface.
 public interface IPostureInput
 {
     UnityEngine.Vector3 Position { get; }

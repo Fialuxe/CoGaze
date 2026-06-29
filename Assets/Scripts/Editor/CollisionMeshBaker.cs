@@ -4,25 +4,11 @@ using UnityEditor;
 using UnityEngine;
 using UnityMeshSimplifier;
 
-/// <summary>
-/// This script is an Editor utility for baking and previewing simplified collision meshes for MeshColliders in Unity.
-/// It is necessary because MeshColliders can be expensive to compute at runtime, especially on mobile platforms like Android. By precomputing simplified versions of the meshes, we can improve performance and reduce load times.
-/// 
-/// CoGaze → Bake Collision Mesh
-///
-/// Runs vertex-clustering simplification on all MeshColliders of the SharedMesh
-/// object, saves each result as a .mesh asset, and auto-assigns them to
-/// MeshHandler.bakedCollisionMeshes so Android builds skip runtime computation.
-///
-/// CoGaze → Preview Collision Mesh
-/// Adds a temporary wireframe object in the Scene for visual verification.
-/// The object is tagged "[PREVIEW]" and is destroyed when you run Preview again
-/// or manually delete it.
-/// </summary>
+// Editor tool (CoGaze menu): bakes simplified collision meshes for SharedMesh; saves to Assets/GeneratedMeshes.
 public static class CollisionMeshBaker
 {
-    private const string OutputFolder  = "Assets/GeneratedMeshes";
-    private const string PreviewTag    = "[CollisionPreview]";
+    private const string k_outputFolder  = "Assets/GeneratedMeshes";
+    private const string k_previewTag    = "[CollisionPreview]";
 
     // ── Bake ──────────────────────────────────────────────────────────────────
 
@@ -45,7 +31,7 @@ public static class CollisionMeshBaker
             return;
         }
 
-        EnsureOutputFolder();
+        Ensurek_outputFolder();
 
         var baked = new List<Mesh>();
         var stats = new StringBuilder();
@@ -59,7 +45,7 @@ public static class CollisionMeshBaker
             Mesh simplified = Simplify(mf.sharedMesh, quality);
             int dstTris = simplified.triangles.Length / 3;
 
-            string path = $"{OutputFolder}/{mf.name}_collision.mesh";
+            string path = $"{k_outputFolder}/{mf.name}_collision.mesh";
             AssetDatabase.CreateAsset(simplified, path);
             baked.Add(AssetDatabase.LoadAssetAtPath<Mesh>(path));
 
@@ -91,7 +77,7 @@ public static class CollisionMeshBaker
     private static void Preview()
     {
         // Remove any existing preview first
-        var existing = GameObject.Find(PreviewTag);
+        var existing = GameObject.Find(k_previewTag);
         if (existing != null)
         {
             Object.DestroyImmediate(existing);
@@ -113,7 +99,7 @@ public static class CollisionMeshBaker
             return;
         }
 
-        var previewRoot = new GameObject(PreviewTag);
+        var previewRoot = new GameObject(k_previewTag);
 
         for (int i = 0; i < filters.Length; i++)
         {
@@ -173,9 +159,9 @@ public static class CollisionMeshBaker
         return (handler, meshGo);
     }
 
-    private static void EnsureOutputFolder()
+    private static void Ensurek_outputFolder()
     {
-        if (!AssetDatabase.IsValidFolder(OutputFolder))
+        if (!AssetDatabase.IsValidFolder(k_outputFolder))
             AssetDatabase.CreateFolder("Assets", "GeneratedMeshes");
     }
 

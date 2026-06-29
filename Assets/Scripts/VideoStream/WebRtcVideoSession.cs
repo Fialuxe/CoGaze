@@ -4,17 +4,7 @@ using System.Collections.Generic;
 using UnityEngine;
 using Unity.WebRTC;
 
-/// <summary>
-/// Pure WebRTC peer connection — no Photon dependency.
-///
-/// Worker (offerer)  : StartAsOfferer(captureRT) → fires OnSendOffer, OnSendIce
-/// Expert (answerer) : StartAsAnswerer(onFrame)  → waits for ApplyRemoteOffer(),
-///                     then fires OnSendAnswer, OnSendIce
-///
-/// Caller is responsible for transporting signaling messages in both directions:
-///   outbound: subscribe to OnSendOffer / OnSendAnswer / OnSendIce
-///   inbound:  call ApplyRemoteOffer / ApplyRemoteAnswer / AddRemoteIce
-/// </summary>
+// Pure WebRTC peer connection; Worker offers, Expert answers; caller routes signaling via Photon events EVT_OFFER/ANSWER/ICE.
 public class WebRtcVideoSession : MonoBehaviour
 {
     // Signaling event codes — defined here so setup files can reference them without a separate file.
@@ -23,7 +13,7 @@ public class WebRtcVideoSession : MonoBehaviour
     public const byte EVT_ICE    = 62;
     public const byte EVT_HANGUP = 63;
 
-    private static bool _loopStarted;
+    private static bool s_loopStarted;
 
     // ── Outbound signaling events (caller routes these to the remote peer) ─
 
@@ -48,13 +38,23 @@ public class WebRtcVideoSession : MonoBehaviour
     private bool              _iceRestartPending;   // true while waiting for ICE Restart to recover
     private readonly List<RTCIceCandidateInit> _pending = new();
 
+    // Held so the native MediaStream (and the track references it owns) can be Disposed on
+    // teardown; otherwise it leaks every reconnect, just like the tracks above.
+    private MediaStream       _sendStream;
+
+    // Offer/answer handshake retry: the initial attempt plus up to (MaxHandshakeAttempts-1)
+    // retries on timeout/error before giving up. Only the failure path retries — the happy
+    // path is untouched.
+    private const int   MaxHandshakeAttempts = 3;
+    private const float HandshakeRetryDelay  = 1.0f;
+
     // ── Lifecycle ───────────────────────────────────────────────────────────
 
     private void Awake()
     {
-        if (!_loopStarted)
+        if (!s_loopStarted)
         {
-            _loopStarted = true;
+            s_loopStarted = true;
             var go = new GameObject("[WebRTC_Pump]");
             DontDestroyOnLoad(go);
             go.AddComponent<WebRtcPumpHost>();
@@ -65,15 +65,11 @@ public class WebRtcVideoSession : MonoBehaviour
     private void OnDestroy()
     {
         CleanUp();
-        // _loopStarted intentionally NOT reset — pump lives on the persistent [WebRTC_Pump] GO.
+        // s_loopStarted intentionally NOT reset — pump lives on the persistent [WebRTC_Pump] GO.
     }
 
     // ── Worker side ─────────────────────────────────────────────────────────
 
-    /// <summary>
-    /// Call once when the Expert is confirmed in the room.
-    /// Fires OnSendOffer when the SDP is ready.
-    /// </summary>
     public void StartAsOfferer(RenderTexture captureRT)
     {
         if (_stopped) return;
@@ -90,9 +86,9 @@ public class WebRtcVideoSession : MonoBehaviour
         return new RTCConfiguration { iceServers = Array.Empty<RTCIceServer>() };
     }
 
-    private IEnumerator DoOffer()
+    private IEnumerator DoOffer(int attempt = 0)
     {
-        Debug.Log("[WebRTC] DoOffer: start.");
+        Debug.Log($"[WebRTC] DoOffer: start (attempt {attempt + 1}/{MaxHandshakeAttempts}).");
         ClosePeerConnection();
         _iceRestartPending = false;
         var cfg = BuildIceConfig();
@@ -100,29 +96,43 @@ public class WebRtcVideoSession : MonoBehaviour
         Debug.Log("[WebRTC] DoOffer: RTCPeerConnection created.");
         BindCommonCallbacks();
 
-        var stream = new MediaStream();
+        _sendStream = new MediaStream();
         Debug.Log($"[WebRTC] DoOffer: creating VideoStreamTrack  RT={_sourceRT?.width}x{_sourceRT?.height}  fmt={_sourceRT?.graphicsFormat}  created={_sourceRT?.IsCreated()}");
         _sendTrack = new VideoStreamTrack(_sourceRT);
         Debug.Log("[WebRTC] DoOffer: VideoStreamTrack created.");
-        _pc.AddTrack(_sendTrack, stream);
+        _pc.AddTrack(_sendTrack, _sendStream);
 
         var offerOp = _pc.CreateOffer();
         Debug.Log("[WebRTC] DoOffer: waiting for CreateOffer…");
         yield return StartCoroutine(WaitWithTimeout(offerOp, 10f, "CreateOffer"));
-        if (!offerOp.IsDone) yield break;
-        if (offerOp.IsError) { Debug.LogError($"[WebRTC] CreateOffer error: {offerOp.Error.message}"); yield break; }
+        if (!offerOp.IsDone) { yield return StartCoroutine(RetryOfferAfterDelay(attempt, "CreateOffer timed out")); yield break; }
+        if (offerOp.IsError) { Debug.LogError($"[WebRTC] CreateOffer error: {offerOp.Error.message}"); yield return StartCoroutine(RetryOfferAfterDelay(attempt, "CreateOffer error")); yield break; }
         Debug.Log("[WebRTC] DoOffer: CreateOffer done.");
 
         var desc = offerOp.Desc;
         var setLocalOp = _pc.SetLocalDescription(ref desc);
         Debug.Log("[WebRTC] DoOffer: waiting for SetLocalDescription…");
         yield return StartCoroutine(WaitWithTimeout(setLocalOp, 10f, "SetLocalDescription"));
-        if (!setLocalOp.IsDone) yield break;
-        if (setLocalOp.IsError) { Debug.LogError($"[WebRTC] SetLocalDesc error: {setLocalOp.Error.message}"); yield break; }
+        if (!setLocalOp.IsDone) { yield return StartCoroutine(RetryOfferAfterDelay(attempt, "SetLocalDescription timed out")); yield break; }
+        if (setLocalOp.IsError) { Debug.LogError($"[WebRTC] SetLocalDesc error: {setLocalOp.Error.message}"); yield return StartCoroutine(RetryOfferAfterDelay(attempt, "SetLocalDescription error")); yield break; }
         Debug.Log("[WebRTC] DoOffer: SetLocalDescription done.");
 
         OnSendOffer?.Invoke(desc.sdp);
         Debug.Log("[WebRTC] Offer created and dispatched.");
+    }
+
+    private IEnumerator RetryOfferAfterDelay(int attempt, string reason)
+    {
+        Debug.LogWarning($"[WebRTC] Offer handshake failed ({reason}).");
+        if (_stopped || !_isOfferer) yield break;
+        if (attempt + 1 >= MaxHandshakeAttempts)
+        {
+            Debug.LogError($"[WebRTC] Offer handshake giving up after {attempt + 1} attempt(s).");
+            yield break;
+        }
+        yield return new WaitForSeconds(HandshakeRetryDelay);
+        if (_stopped || !_isOfferer) yield break;
+        yield return StartCoroutine(DoOffer(attempt + 1));
     }
 
     private IEnumerator WaitWithTimeout(AsyncOperationBase op, float seconds, string label)
@@ -139,10 +149,6 @@ public class WebRtcVideoSession : MonoBehaviour
 
     // ── Expert side ─────────────────────────────────────────────────────────
 
-    /// <summary>
-    /// Call once during initialization.
-    /// onFrame is invoked on the main thread each time a decoded video frame arrives.
-    /// </summary>
     public void StartAsAnswerer(Action<Texture> onFrame)
     {
         _isOfferer = false;
@@ -178,7 +184,7 @@ public class WebRtcVideoSession : MonoBehaviour
 
     // ── Internal coroutines ─────────────────────────────────────────────────
 
-    private IEnumerator DoAnswer(string offerSdp)
+    private IEnumerator DoAnswer(string offerSdp, int attempt = 0)
     {
         ClosePeerConnection();
         var cfg = BuildIceConfig();
@@ -196,23 +202,40 @@ public class WebRtcVideoSession : MonoBehaviour
 
         var remoteDesc = new RTCSessionDescription { type = RTCSdpType.Offer, sdp = offerSdp };
         var setRemoteOp = _pc.SetRemoteDescription(ref remoteDesc);
-        yield return setRemoteOp;
-        if (setRemoteOp.IsError) { Debug.LogError($"[WebRTC] SetRemoteDesc(offer): {setRemoteOp.Error.message}"); yield break; }
+        yield return StartCoroutine(WaitWithTimeout(setRemoteOp, 10f, "SetRemoteDescription(offer)"));
+        if (!setRemoteOp.IsDone) { yield return StartCoroutine(RetryAnswerAfterDelay(offerSdp, attempt, "SetRemoteDescription timed out")); yield break; }
+        if (setRemoteOp.IsError) { Debug.LogError($"[WebRTC] SetRemoteDesc(offer): {setRemoteOp.Error.message}"); yield return StartCoroutine(RetryAnswerAfterDelay(offerSdp, attempt, "SetRemoteDescription error")); yield break; }
 
         _remoteDescSet = true;
         FlushPending();
 
         var answerOp = _pc.CreateAnswer();
-        yield return answerOp;
-        if (answerOp.IsError) { Debug.LogError($"[WebRTC] CreateAnswer: {answerOp.Error.message}"); yield break; }
+        yield return StartCoroutine(WaitWithTimeout(answerOp, 10f, "CreateAnswer"));
+        if (!answerOp.IsDone) { yield return StartCoroutine(RetryAnswerAfterDelay(offerSdp, attempt, "CreateAnswer timed out")); yield break; }
+        if (answerOp.IsError) { Debug.LogError($"[WebRTC] CreateAnswer: {answerOp.Error.message}"); yield return StartCoroutine(RetryAnswerAfterDelay(offerSdp, attempt, "CreateAnswer error")); yield break; }
 
         var desc = answerOp.Desc;
         var setLocalOp = _pc.SetLocalDescription(ref desc);
-        yield return setLocalOp;
-        if (setLocalOp.IsError) { Debug.LogError($"[WebRTC] SetLocalDesc(answer): {setLocalOp.Error.message}"); yield break; }
+        yield return StartCoroutine(WaitWithTimeout(setLocalOp, 10f, "SetLocalDescription(answer)"));
+        if (!setLocalOp.IsDone) { yield return StartCoroutine(RetryAnswerAfterDelay(offerSdp, attempt, "SetLocalDescription(answer) timed out")); yield break; }
+        if (setLocalOp.IsError) { Debug.LogError($"[WebRTC] SetLocalDesc(answer): {setLocalOp.Error.message}"); yield return StartCoroutine(RetryAnswerAfterDelay(offerSdp, attempt, "SetLocalDescription(answer) error")); yield break; }
 
         OnSendAnswer?.Invoke(desc.sdp);
         Debug.Log("[WebRTC] Answer created and dispatched.");
+    }
+
+    private IEnumerator RetryAnswerAfterDelay(string offerSdp, int attempt, string reason)
+    {
+        Debug.LogWarning($"[WebRTC] Answer handshake failed ({reason}).");
+        if (_stopped) yield break;
+        if (attempt + 1 >= MaxHandshakeAttempts)
+        {
+            Debug.LogError($"[WebRTC] Answer handshake giving up after {attempt + 1} attempt(s).");
+            yield break;
+        }
+        yield return new WaitForSeconds(HandshakeRetryDelay);
+        if (_stopped) yield break;
+        yield return StartCoroutine(DoAnswer(offerSdp, attempt + 1));
     }
 
     private IEnumerator DoApplyAnswer(string answerSdp)
@@ -282,17 +305,16 @@ public class WebRtcVideoSession : MonoBehaviour
         };
     }
 
-    /// <summary>
-    /// ICE Restart を試みる。5 秒以内に Connected に戻らなければ完全再起動する。
-    /// Offerer（Worker）側のみ呼び出すこと。
-    /// </summary>
     private IEnumerator TryIceRestart()
     {
         if (_stopped || !_isOfferer || _pc == null) yield break;
 
         _iceRestartPending = true;
-        Debug.Log("[WebRTC] ICE Restart: calling RestartIce().");
+        Debug.Log("[WebRTC] ICE Restart: calling RestartIce() + re-sending offer.");
         _pc.RestartIce();
+        // RestartIce() only FLAGS the next CreateOffer to carry fresh ICE credentials — it does
+        // nothing until that offer is actually produced and dispatched. Re-offer on the SAME _pc.
+        yield return StartCoroutine(ReOffer());
 
         // 最大 5 秒待って Connected に戻るか確認する
         float elapsed = 0f;
@@ -322,6 +344,31 @@ public class WebRtcVideoSession : MonoBehaviour
         yield return StartCoroutine(DoOffer());
     }
 
+    private IEnumerator ReOffer()
+    {
+        if (_stopped || _pc == null) yield break;
+
+        var offerOp = _pc.CreateOffer();
+        yield return StartCoroutine(WaitWithTimeout(offerOp, 10f, "ICE-restart CreateOffer"));
+        if (!offerOp.IsDone || offerOp.IsError)
+        {
+            Debug.LogWarning("[WebRTC] ICE-restart CreateOffer failed — full reconnect will follow on timeout.");
+            yield break;
+        }
+
+        var desc = offerOp.Desc;
+        var setLocalOp = _pc.SetLocalDescription(ref desc);
+        yield return StartCoroutine(WaitWithTimeout(setLocalOp, 10f, "ICE-restart SetLocalDescription"));
+        if (!setLocalOp.IsDone || setLocalOp.IsError)
+        {
+            Debug.LogWarning("[WebRTC] ICE-restart SetLocalDescription failed — full reconnect will follow on timeout.");
+            yield break;
+        }
+
+        OnSendOffer?.Invoke(desc.sdp);
+        Debug.Log("[WebRTC] ICE-restart offer dispatched.");
+    }
+
     private void FlushPending()
     {
         foreach (var init in _pending)
@@ -336,6 +383,9 @@ public class WebRtcVideoSession : MonoBehaviour
         _pc?.Close();
         _pc?.Dispose();
         _pc = null;
+        // Dispose AFTER the peer connection so the stream's native observer is torn down last.
+        // MediaStream.Dispose() is guarded against double-dispose, so re-entry is safe.
+        _sendStream?.Dispose(); _sendStream = null;
         _remoteDescSet = false;
     }
 

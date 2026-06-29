@@ -5,30 +5,20 @@ using Photon.Pun;
 using Photon.Realtime;
 using ExitGames.Client.Photon;
 
-/// <summary>
-/// Runs on the Worker (Meta Quest 3). Finds OVRSkeleton components automatically,
-/// then broadcasts hand bone world positions to the Expert via Photon event 44
-/// at ~30 fps — but only during Task steps (not Assembly).
-/// Added via AddComponent in LocalWorkerSetup.Initialize().
-/// </summary>
+// Runs on the Worker (Quest 3) and broadcasts hand bone world positions to the Expert via Photon event 44 at ~30 fps.
 public class WorkerHandBroadcaster : MonoBehaviour
 {
-    private const byte HAND_EVENT     = 44;
-    private const float SEND_INTERVAL = 1f / 30f;
+    private const byte  k_handEvent    = 44;
+    private const float k_sendInterval = 1f / 30f;
 
-    private ExperimentManager2 expManager;
-    private bool               isSending;
-    private float              sendTimer;
-
-#if UNITY_ANDROID && !UNITY_EDITOR
-    private OVRSkeleton leftSkeleton;
-    private OVRSkeleton rightSkeleton;
-#endif
+    private ExperimentManager2 _expManager;
+    private bool               _isSending;
+    private float              _sendTimer;
 
     public void Initialize(ExperimentManager2 mgr)
     {
-        expManager = mgr;
-        expManager.OnStateChanged += OnStateChanged;
+        _expManager = mgr;
+        _expManager.OnStateChanged += OnStateChanged;
 
 #if UNITY_ANDROID && !UNITY_EDITOR
         StartCoroutine(FindSkeletons());
@@ -37,7 +27,26 @@ public class WorkerHandBroadcaster : MonoBehaviour
 #endif
     }
 
+    private void OnStateChanged(ExperimentState state)
+    {
+        // Only broadcast during identification Task steps — not Assembly (user requirement)
+        _isSending = state == ExperimentState.TaskRunning &&
+                    _expManager.CurrentStepType == StepType.Task;
 #if UNITY_ANDROID && !UNITY_EDITOR
+        _sendTimer = 0f;
+#endif
+    }
+
+    private void OnDestroy()
+    {
+        if (_expManager != null) _expManager.OnStateChanged -= OnStateChanged;
+    }
+
+    // ── Android (Quest 3) — not compiled for PC / Editor ─────────────────
+#if UNITY_ANDROID && !UNITY_EDITOR
+
+    private OVRSkeleton _leftSkeleton;
+    private OVRSkeleton _rightSkeleton;
 
     private IEnumerator FindSkeletons()
     {
@@ -51,8 +60,8 @@ public class WorkerHandBroadcaster : MonoBehaviour
                 {
                     bool nameContainsLeft  = ContainsInHierarchy(s.transform, "Left");
                     bool nameContainsRight = ContainsInHierarchy(s.transform, "Right");
-                    if (nameContainsLeft  && leftSkeleton  == null) leftSkeleton  = s;
-                    if (nameContainsRight && rightSkeleton == null) rightSkeleton = s;
+                    if (nameContainsLeft  && _leftSkeleton  == null) _leftSkeleton  = s;
+                    if (nameContainsRight && _rightSkeleton == null) _rightSkeleton = s;
                 }
             }
             catch (Exception ex)
@@ -60,7 +69,7 @@ public class WorkerHandBroadcaster : MonoBehaviour
                 Debug.LogWarning($"[WorkerHandBroadcaster] Skeleton search error: {ex.Message}");
             }
 
-            if (leftSkeleton != null && rightSkeleton != null)
+            if (_leftSkeleton != null && _rightSkeleton != null)
             {
                 Debug.Log("[WorkerHandBroadcaster] Found both OVRSkeletons.");
                 yield break;
@@ -87,11 +96,11 @@ public class WorkerHandBroadcaster : MonoBehaviour
 
     private void Update()
     {
-        if (!isSending) return;
+        if (!_isSending) return;
 
-        sendTimer += Time.deltaTime;
-        if (sendTimer < SEND_INTERVAL) return;
-        sendTimer = 0f;
+        _sendTimer += Time.deltaTime;
+        if (_sendTimer < k_sendInterval) return;
+        _sendTimer = 0f;
 
         try { SendHandData(); }
         catch (Exception ex)
@@ -102,12 +111,12 @@ public class WorkerHandBroadcaster : MonoBehaviour
 
     private void SendHandData()
     {
-        float[] leftBones  = PackBones(leftSkeleton);
-        float[] rightBones = PackBones(rightSkeleton);
+        float[] leftBones  = PackBones(_leftSkeleton);
+        float[] rightBones = PackBones(_rightSkeleton);
 
         object[] payload = { leftBones, rightBones };
         var opts = new RaiseEventOptions { Receivers = ReceiverGroup.Others };
-        PhotonNetwork.RaiseEvent(HAND_EVENT, payload, opts, SendOptions.SendReliable);
+        PhotonNetwork.RaiseEvent(k_handEvent, payload, opts, SendOptions.SendReliable);
     }
 
     private static float[] PackBones(OVRSkeleton skeleton)
@@ -137,19 +146,4 @@ public class WorkerHandBroadcaster : MonoBehaviour
     }
 
 #endif // UNITY_ANDROID && !UNITY_EDITOR
-
-    private void OnStateChanged(ExperimentState state)
-    {
-        // Only broadcast during identification Task steps — not Assembly (user requirement)
-        isSending = state == ExperimentState.TaskRunning &&
-                    expManager.CurrentStepType == StepType.Task;
-#if UNITY_ANDROID && !UNITY_EDITOR
-        sendTimer = 0f;
-#endif
-    }
-
-    private void OnDestroy()
-    {
-        if (expManager != null) expManager.OnStateChanged -= OnStateChanged;
-    }
 }

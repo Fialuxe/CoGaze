@@ -116,3 +116,9 @@ InitTestScene*.unity*
 # CoGaze: runtime artifacts pulled from the device / scratch output (not project assets)
 /quest_logs/
 /qr/
+questionnaire_*.json
+
+# CoGaze: tooling / scratch caches (not project assets)
+/.codegraph/
+/.claude/worktrees/
+**/Backup~/

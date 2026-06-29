@@ -1,0 +1,120 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="860" height="540" viewBox="0 0 860 540" font-family="'Helvetica Neue', Arial, sans-serif">
+
+  <!-- Background -->
+  <rect width="860" height="540" fill="#FAFAFA" rx="10"/>
+
+  <!-- Arrow marker -->
+  <defs>
+    <marker id="arr" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+      <path d="M0,0 L0,6 L8,3 z" fill="#9CA3AF"/>
+    </marker>
+  </defs>
+
+  <!-- ── Title ── -->
+  <text x="430" y="34" text-anchor="middle" font-size="15" font-weight="bold" fill="#1F2937">Expert Verbal Scaffolding Protocol</text>
+
+  <!-- ══════════════════════════════════════════════
+       LEFT COLUMN — Identification Task
+  ══════════════════════════════════════════════ -->
+
+  <!-- Column header -->
+  <rect x="40" y="50" width="340" height="34" rx="6" fill="#1D4ED8"/>
+  <text x="210" y="72" text-anchor="middle" font-size="13" font-weight="bold" fill="#FFFFFF">Identification Task  (60 s)</text>
+
+  <!-- Rung 1 -->
+  <rect x="40" y="100" width="340" height="66" rx="6" fill="#EFF6FF" stroke="#93C5FD" stroke-width="1.5"/>
+  <text x="58" y="121" font-size="11" font-weight="bold" fill="#1D4ED8">Rung 1</text>
+  <text x="58" y="138" font-size="11" fill="#374151">Gaze + proximal deixis only</text>
+  <text x="58" y="156" font-size="10" fill="#6B7280">"this one" · "here" · "that one"</text>
+
+  <!-- Arrow 1 (ID) -->
+  <line x1="210" y1="166" x2="210" y2="196" stroke="#9CA3AF" stroke-width="1.5" marker-end="url(#arr)"/>
+  <rect x="140" y="171" width="140" height="20" rx="4" fill="#FEF9C3" stroke="#FCD34D" stroke-width="1"/>
+  <text x="210" y="185" text-anchor="middle" font-size="10" fill="#92400E">no response · 5 s</text>
+
+  <!-- Rung 2 -->
+  <rect x="40" y="196" width="340" height="66" rx="6" fill="#EFF6FF" stroke="#93C5FD" stroke-width="1.5"/>
+  <text x="58" y="217" font-size="11" font-weight="bold" fill="#1D4ED8">Rung 2</text>
+  <rect x="344" y="204" width="30" height="18" rx="3" fill="#1D4ED8"/>
+  <text x="359" y="217" text-anchor="middle" font-size="10" font-weight="bold" fill="#FFFFFF">F2</text>
+  <text x="58" y="234" font-size="11" fill="#374151">+ Feature / relative language</text>
+  <text x="58" y="252" font-size="10" fill="#6B7280">"the red one" · "the left one"</text>
+
+  <!-- Arrow 2 (ID) -->
+  <line x1="210" y1="262" x2="210" y2="292" stroke="#9CA3AF" stroke-width="1.5" marker-end="url(#arr)"/>
+  <rect x="140" y="267" width="140" height="20" rx="4" fill="#FEF9C3" stroke="#FCD34D" stroke-width="1"/>
+  <text x="210" y="281" text-anchor="middle" font-size="10" fill="#92400E">no response · 5 s</text>
+
+  <!-- Rung 3 -->
+  <rect x="40" y="292" width="340" height="66" rx="6" fill="#EFF6FF" stroke="#93C5FD" stroke-width="1.5"/>
+  <text x="58" y="313" font-size="11" font-weight="bold" fill="#1D4ED8">Rung 3</text>
+  <rect x="344" y="300" width="30" height="18" rx="3" fill="#1D4ED8"/>
+  <text x="359" y="313" text-anchor="middle" font-size="10" font-weight="bold" fill="#FFFFFF">F3</text>
+  <text x="58" y="330" font-size="11" fill="#374151">+ Explicit spatial description</text>
+  <text x="58" y="348" font-size="10" fill="#6B7280">"closest to you on the right"</text>
+
+  <!-- No Rung 4 note -->
+  <text x="210" y="384" text-anchor="middle" font-size="10" fill="#9CA3AF">— no rung 4 in identification —</text>
+
+
+  <!-- ══════════════════════════════════════════════
+       RIGHT COLUMN — Assembly Task
+  ══════════════════════════════════════════════ -->
+
+  <!-- Column header -->
+  <rect x="480" y="50" width="340" height="34" rx="6" fill="#C2410C"/>
+  <text x="650" y="72" text-anchor="middle" font-size="13" font-weight="bold" fill="#FFFFFF">Assembly Task  (180 s)</text>
+
+  <!-- Rung 1 -->
+  <rect x="480" y="100" width="340" height="66" rx="6" fill="#FFF7ED" stroke="#FCA5A5" stroke-width="1.5"/>
+  <text x="498" y="121" font-size="11" font-weight="bold" fill="#C2410C">Rung 1</text>
+  <text x="498" y="138" font-size="11" fill="#374151">Gaze + proximal deixis only</text>
+  <text x="498" y="156" font-size="10" fill="#6B7280">"here" · "this position" · "this one"</text>
+
+  <!-- Arrow 1 (AS) -->
+  <line x1="650" y1="166" x2="650" y2="196" stroke="#9CA3AF" stroke-width="1.5" marker-end="url(#arr)"/>
+  <rect x="580" y="171" width="140" height="20" rx="4" fill="#FEF9C3" stroke="#FCD34D" stroke-width="1"/>
+  <text x="650" y="185" text-anchor="middle" font-size="10" fill="#92400E">no response · 10 s</text>
+
+  <!-- Rung 2 -->
+  <rect x="480" y="196" width="340" height="66" rx="6" fill="#FFF7ED" stroke="#FCA5A5" stroke-width="1.5"/>
+  <text x="498" y="217" font-size="11" font-weight="bold" fill="#C2410C">Rung 2</text>
+  <rect x="784" y="204" width="30" height="18" rx="3" fill="#C2410C"/>
+  <text x="799" y="217" text-anchor="middle" font-size="10" font-weight="bold" fill="#FFFFFF">F2</text>
+  <text x="498" y="234" font-size="11" fill="#374151">+ Feature / relative language</text>
+  <text x="498" y="252" font-size="10" fill="#6B7280">"the square piece" · "front-left"</text>
+
+  <!-- Arrow 2 (AS) -->
+  <line x1="650" y1="262" x2="650" y2="292" stroke="#9CA3AF" stroke-width="1.5" marker-end="url(#arr)"/>
+  <rect x="580" y="267" width="140" height="20" rx="4" fill="#FEF9C3" stroke="#FCD34D" stroke-width="1"/>
+  <text x="650" y="281" text-anchor="middle" font-size="10" fill="#92400E">no response · 10 s</text>
+
+  <!-- Rung 3 -->
+  <rect x="480" y="292" width="340" height="66" rx="6" fill="#FFF7ED" stroke="#FCA5A5" stroke-width="1.5"/>
+  <text x="498" y="313" font-size="11" font-weight="bold" fill="#C2410C">Rung 3</text>
+  <rect x="784" y="300" width="30" height="18" rx="3" fill="#C2410C"/>
+  <text x="799" y="313" text-anchor="middle" font-size="10" font-weight="bold" fill="#FFFFFF">F3</text>
+  <text x="498" y="330" font-size="11" fill="#374151">+ Explicit spatial description</text>
+  <text x="498" y="348" font-size="10" fill="#6B7280">"~30 cm to your left"</text>
+
+  <!-- Arrow 3 (AS) — orientation trigger -->
+  <line x1="650" y1="358" x2="650" y2="388" stroke="#9CA3AF" stroke-width="1.5" marker-end="url(#arr)"/>
+  <rect x="540" y="363" width="220" height="20" rx="4" fill="#FEE2E2" stroke="#FCA5A5" stroke-width="1"/>
+  <text x="650" y="377" text-anchor="middle" font-size="10" fill="#991B1B">position correct · orientation wrong</text>
+
+  <!-- Rung 4 -->
+  <rect x="480" y="388" width="340" height="66" rx="6" fill="#FFF7ED" stroke="#FCA5A5" stroke-width="1.5"/>
+  <text x="498" y="409" font-size="11" font-weight="bold" fill="#C2410C">Rung 4</text>
+  <rect x="784" y="396" width="30" height="18" rx="3" fill="#C2410C"/>
+  <text x="799" y="409" text-anchor="middle" font-size="10" font-weight="bold" fill="#FFFFFF">F4</text>
+  <text x="498" y="426" font-size="11" fill="#374151">+ Orientation correction</text>
+  <text x="498" y="444" font-size="10" fill="#6B7280">"rotate 90° clockwise"</text>
+
+
+  <!-- ── Footer note ── -->
+  <rect x="40" y="476" width="780" height="28" rx="5" fill="#F3F4F6" stroke="#D1D5DB" stroke-width="1"/>
+  <text x="430" y="494" text-anchor="middle" font-size="10" fill="#6B7280">
+    NoGaze condition: Rung 1 replaced by speech-only deixis (no shared gaze); escalation structure otherwise identical for both tasks
+  </text>
+
+</svg>

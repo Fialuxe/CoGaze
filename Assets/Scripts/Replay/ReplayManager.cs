@@ -4,10 +4,7 @@ using System.Text;
 using UnityEngine;
 using Newtonsoft.Json;
 
-/// <summary>
-/// Loads a replay JSON file and drives frame-by-frame playback.
-/// Added by ReplayBootstrapper. All other replay components subscribe to its events.
-/// </summary>
+// Loads a replay JSON file and drives frame-by-frame playback; all other replay components subscribe to its events.
 public class ReplayManager : MonoBehaviour
 {
     // ── Events ─────────────────────────────────────────────────────────

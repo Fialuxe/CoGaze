@@ -3,10 +3,7 @@ using Photon.Pun;
 using Photon.Realtime;
 using System;
 
-/// <summary>
-/// Singleton that manages Photon connection and room joining.
-/// Created by SceneBootstrapper in Awake() with DontDestroyOnLoad.
-/// </summary>
+// Singleton managing Photon connection and room joining; created by SceneBootstrapper2 with DontDestroyOnLoad.
 public class NetworkManager : MonoBehaviourPunCallbacks
 {
     public static NetworkManager Instance { get; private set; }
@@ -14,8 +11,8 @@ public class NetworkManager : MonoBehaviourPunCallbacks
     public event Action OnRoomJoined;
     public event Action OnNetworkDisconnected;
 
-    private const string ROOM_NAME = "CoGaze_Room";
-    private const string FIXED_REGION = "asia";
+    private const string k_roomName    = "CoGaze_Room";
+    private const string k_fixedRegion = "asia";
 
     private void Awake()
     {
@@ -36,7 +33,7 @@ public class NetworkManager : MonoBehaviourPunCallbacks
             return;
         }
 
-        PhotonNetwork.PhotonServerSettings.AppSettings.FixedRegion = FIXED_REGION;
+        PhotonNetwork.PhotonServerSettings.AppSettings.FixedRegion = k_fixedRegion;
         PhotonNetwork.ConnectUsingSettings();
         Debug.Log("[NetworkManager] Connecting to Photon (region: asia)...");
     }
@@ -50,7 +47,7 @@ public class NetworkManager : MonoBehaviourPunCallbacks
             IsVisible = true,
             IsOpen = true
         };
-        PhotonNetwork.JoinOrCreateRoom(ROOM_NAME, options, TypedLobby.Default);
+        PhotonNetwork.JoinOrCreateRoom(k_roomName, options, TypedLobby.Default);
     }
 
     public override void OnJoinedRoom()

@@ -1,17 +1,12 @@
 using System;
 using UnityEngine;
 
-/// <summary>
-/// Renders Worker hand skeletons during replay using the 24 OVR bone world positions
-/// stored in ReplayFrameData. Draws spheres at each bone and line renderers along edges.
-/// Hand data is absent (null) for Assembly trials — hands are hidden in that case.
-/// Added by ReplayBootstrapper.
-/// </summary>
+// Renders Worker hand skeletons from 24 OVR bone positions in ReplayFrameData; hidden for Assembly trials.
 public class ReplayHandDriver : MonoBehaviour
 {
     // OVR hand skeleton parent→child edge list (24-bone layout).
     // Index pairs reference positions in the 24-element bone array.
-    private static readonly (int a, int b)[] BONE_EDGES =
+    private static readonly (int a, int b)[] k_boneEdges =
     {
         (0, 1),                               // Wrist → Forearm
         (0, 2), (2, 3), (3, 4), (4, 5), (5, 19),   // Thumb chain → Tip
@@ -21,28 +16,28 @@ public class ReplayHandDriver : MonoBehaviour
         (0, 15), (15, 16), (16, 17), (17, 18), (18, 23) // Pinky chain → Tip
     };
 
-    private ReplayManager   mgr;
-    private Transform[]     leftBones;
-    private Transform[]     rightBones;
-    private LineRenderer[]  leftEdges;
-    private LineRenderer[]  rightEdges;
+    private ReplayManager   _mgr;
+    private Transform[]     _leftBones;
+    private Transform[]     _rightBones;
+    private LineRenderer[]  _leftEdges;
+    private LineRenderer[]  _rightEdges;
 
     public void Initialize(ReplayManager manager)
     {
-        mgr = manager;
+        _mgr = manager;
 
         try
         {
             var leftColor  = new Color(0.3f, 0.8f, 1f, 0.9f);
             var rightColor = new Color(1f, 0.6f, 0.3f, 0.9f);
 
-            leftBones  = CreateBoneSpheres("LeftHand",  leftColor);
-            rightBones = CreateBoneSpheres("RightHand", rightColor);
-            leftEdges  = CreateEdgeLines("LeftEdges",  leftColor);
-            rightEdges = CreateEdgeLines("RightEdges", rightColor);
+            _leftBones  = CreateBoneSpheres("LeftHand",  leftColor);
+            _rightBones = CreateBoneSpheres("RightHand", rightColor);
+            _leftEdges  = CreateEdgeLines("LeftEdges",  leftColor);
+            _rightEdges = CreateEdgeLines("RightEdges", rightColor);
 
-            SetHandVisible(leftBones,  leftEdges,  false);
-            SetHandVisible(rightBones, rightEdges, false);
+            SetHandVisible(_leftBones,  _leftEdges,  false);
+            SetHandVisible(_rightBones, _rightEdges, false);
         }
         catch (Exception ex)
         {
@@ -50,7 +45,7 @@ public class ReplayHandDriver : MonoBehaviour
             return;
         }
 
-        mgr.OnFrameChanged += OnFrameChanged;
+        _mgr.OnFrameChanged += OnFrameChanged;
     }
 
     // ── Scene construction ───────────────────────────────────────────────
@@ -79,10 +74,10 @@ public class ReplayHandDriver : MonoBehaviour
     private LineRenderer[] CreateEdgeLines(string parentName, Color color)
     {
         var parent = new GameObject(parentName);
-        var edges  = new LineRenderer[BONE_EDGES.Length];
+        var edges  = new LineRenderer[k_boneEdges.Length];
         var mat    = new Material(Shader.Find("Sprites/Default")) { color = color };
 
-        for (int i = 0; i < BONE_EDGES.Length; i++)
+        for (int i = 0; i < k_boneEdges.Length; i++)
         {
             var go = new GameObject($"Edge_{i}");
             go.transform.SetParent(parent.transform);
@@ -103,14 +98,14 @@ public class ReplayHandDriver : MonoBehaviour
     {
         try
         {
-            UpdateHand(frame.handL, leftBones,  leftEdges);
-            UpdateHand(frame.handR, rightBones, rightEdges);
+            UpdateHand(frame.handL, _leftBones,  _leftEdges);
+            UpdateHand(frame.handR, _rightBones, _rightEdges);
         }
         catch (Exception ex)
         {
             Debug.LogWarning($"[ReplayHandDriver] Frame update error: {ex.Message}");
-            SetHandVisible(leftBones,  leftEdges,  false);
-            SetHandVisible(rightBones, rightEdges, false);
+            SetHandVisible(_leftBones,  _leftEdges,  false);
+            SetHandVisible(_rightBones, _rightEdges, false);
         }
     }
 
@@ -130,9 +125,9 @@ public class ReplayHandDriver : MonoBehaviour
             bones[i].position = new Vector3(handData[i][0], handData[i][1], handData[i][2]);
         }
 
-        for (int i = 0; i < BONE_EDGES.Length && i < edges.Length; i++)
+        for (int i = 0; i < k_boneEdges.Length && i < edges.Length; i++)
         {
-            int a = BONE_EDGES[i].a, b = BONE_EDGES[i].b;
+            int a = k_boneEdges[i].a, b = k_boneEdges[i].b;
             if (a < bones.Length && b < bones.Length && bones[a] != null && bones[b] != null)
             {
                 edges[i].SetPosition(0, bones[a].position);
@@ -154,6 +149,6 @@ public class ReplayHandDriver : MonoBehaviour
 
     private void OnDestroy()
     {
-        if (mgr != null) mgr.OnFrameChanged -= OnFrameChanged;
+        if (_mgr != null) _mgr.OnFrameChanged -= OnFrameChanged;
     }
 }

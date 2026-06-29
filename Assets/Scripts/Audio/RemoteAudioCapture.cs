@@ -1,31 +1,31 @@
 using System.Collections.Generic;
 using UnityEngine;
 
-/// <summary>
-/// Attached to the Speaker's AudioSource GameObject by VoiceRecorder.AttachRemoteCapture().
-/// Captures incoming PCM on the audio thread via OnAudioFilterRead and appends it to the
-/// shared remoteSamples buffer for WAV recording.  Audio passes through unchanged.
-/// </summary>
+// Captures incoming PCM via OnAudioFilterRead into a shared _buffer for WAV recording; audio passes through unchanged.
 [DisallowMultipleComponent]
 public class RemoteAudioCapture : MonoBehaviour
 {
-    private List<float> buffer;
-    private object      bufferLock;
+    private List<float> _buffer;
+    private object      _bufferLock;
+
+    public int SampleRate { get; private set; }
 
     public void Initialize(List<float> sharedBuffer, object sharedLock)
     {
-        buffer     = sharedBuffer;
-        bufferLock = sharedLock;
+        _buffer     = sharedBuffer;
+        _bufferLock = sharedLock;
+        // OnAudioFilterRead always runs at the output/DSP rate (see Photon SpeakerAudioFilterRead).
+        SampleRate = AudioSettings.outputSampleRate > 0 ? AudioSettings.outputSampleRate : 48000;
     }
 
     private void OnAudioFilterRead(float[] data, int channels)
     {
-        if (buffer == null || bufferLock == null) return;
-        lock (bufferLock)
+        if (_buffer == null || _bufferLock == null) return;
+        lock (_bufferLock)
         {
             if (channels == 1)
             {
-                buffer.AddRange(data);
+                _buffer.AddRange(data);
             }
             else
             {
@@ -33,7 +33,7 @@ public class RemoteAudioCapture : MonoBehaviour
                 {
                     float sum = 0f;
                     for (int c = 0; c < channels; c++) sum += data[i + c];
-                    buffer.Add(sum / channels);
+                    _buffer.Add(sum / channels);
                 }
             }
         }

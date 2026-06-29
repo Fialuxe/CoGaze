@@ -5,16 +5,7 @@ using Unity.WebRTC;
 using Meta.XR;
 #endif
 
-/// <summary>
-/// Runs on the Local Worker (Quest 3) only.
-///
-/// Captures the passthrough camera via PassthroughCameraAccess and blits each
-/// frame into a stable RenderTexture.  WebRtcVideoSession reads that texture and
-/// encodes it with the Snapdragon hardware H.264 encoder — no CPU JPEG, no ReadPixels.
-///
-/// Call TriggerOffer() once the Expert is confirmed in the Photon room so that
-/// WebRtcVideoSession initiates the SDP offer.
-/// </summary>
+// Worker (Quest 3): blits passthrough camera into RenderTexture; WebRtcVideoSession encodes with Snapdragon H.264.
 public class WorkerVideoStream : MonoBehaviour
 {
     [Header("Capture")]
@@ -22,53 +13,49 @@ public class WorkerVideoStream : MonoBehaviour
     [Tooltip("Seconds between blit ticks. 0.033 ≈ 30 fps.")]
     public float frameInterval = 0.033f;
 
-    private ExperimentManager2 expManager;
-    private WebRtcVideoSession session;
-    private RenderTexture      captureRT;
-    private Coroutine          streamCoroutine;
+    private ExperimentManager2 _expManager;
+    private WebRtcVideoSession _session;
+    private RenderTexture      _captureRT;
+    private Coroutine          _streamCoroutine;
 
 #if UNITY_ANDROID && !UNITY_EDITOR
-    private PassthroughCameraAccess pca;
+    private PassthroughCameraAccess _pca;
 #endif
 
 #if UNITY_EDITOR
-    private Camera        editorCam;
-    private RenderTexture editorRT;
+    private Camera        _editorCam;
+    private RenderTexture _editorRT;
 #endif
 
     // ── Init ────────────────────────────────────────────────────────────────
 
     public void Initialize(ExperimentManager2 manager)
     {
-        expManager = manager;
-        expManager.OnStateChanged += OnStateChanged;
+        _expManager = manager;
+        _expManager.OnStateChanged += OnStateChanged;
 
         // Format must match what Unity WebRTC expects for the current graphics API.
         // OpenGLES3 (Quest default) needs R8G8B8A8; Vulkan/D3D needs B8G8R8A8.
         // Using the wrong format throws ArgumentException inside VideoStreamTrack constructor.
         var rtFormat = WebRTC.GetSupportedRenderTextureFormat(SystemInfo.graphicsDeviceType);
-        captureRT = new RenderTexture(requestedResolution.x, requestedResolution.y, 0, rtFormat);
-        captureRT.Create();
+        _captureRT = new RenderTexture(requestedResolution.x, requestedResolution.y, 0, rtFormat);
+        _captureRT.Create();
 
-        session = gameObject.AddComponent<WebRtcVideoSession>();
+        _session = gameObject.AddComponent<WebRtcVideoSession>();
 
 #if UNITY_ANDROID && !UNITY_EDITOR
         SetupPCA();
 #endif
     }
 
-    /// <summary>
-    /// Called by LocalWorkerSetup once the Expert is in the room.
-    /// Starts the WebRTC handshake. Signaling callbacks must already be wired
-    /// before this is called (done in LocalWorkerSetup).
-    /// </summary>
     public void TriggerOffer()
     {
-        Debug.Log($"[WorkerVideoStream] TriggerOffer called. RT={captureRT?.width}x{captureRT?.height} fmt={captureRT?.graphicsFormat} created={captureRT?.IsCreated()} gfx={SystemInfo.graphicsDeviceType}");
-        session.StartAsOfferer(captureRT);
+        Debug.Log($"[WorkerVideoStream] TriggerOffer called. RT={_captureRT?.width}x{_captureRT?.height} fmt={_captureRT?.graphicsFormat} created={_captureRT?.IsCreated()} gfx={SystemInfo.graphicsDeviceType}");
+        StartCapture();   // begin feeding frames so the Expert sees video during Setup
+        _session.StartAsOfferer(_captureRT);
     }
 
-    public WebRtcVideoSession Session => session;
+    public WebRtcVideoSession Session => _session;
 
     // ── PCA setup ───────────────────────────────────────────────────────────
 
@@ -80,10 +67,10 @@ public class WorkerVideoStream : MonoBehaviour
             Debug.LogError("[WorkerVideoStream] PassthroughCameraAccess not supported.");
             return;
         }
-        pca = gameObject.AddComponent<PassthroughCameraAccess>();
-        pca.CameraPosition      = PassthroughCameraAccess.CameraPositionType.Left;
-        pca.RequestedResolution = requestedResolution;
-        pca.enabled = false;
+        _pca = gameObject.AddComponent<PassthroughCameraAccess>();
+        _pca.CameraPosition      = PassthroughCameraAccess.CameraPositionType.Left;
+        _pca.RequestedResolution = requestedResolution;
+        _pca.enabled = false;
         FileLogger.Log("Transport", "[WorkerVideoStream] PCA ready.");
     }
 #endif
@@ -93,31 +80,31 @@ public class WorkerVideoStream : MonoBehaviour
     private void OnStateChanged(ExperimentState state)
     {
         bool active =
-            (state == ExperimentState.TaskRunning   && expManager.CurrentStepType == StepType.Assembly)
-         || (state == ExperimentState.Questionnaire && expManager.CurrentStepType == StepType.Alignment);
-        Debug.Log($"[WorkerVideoStream] OnStateChanged state={state} stepType={expManager.CurrentStepType} active={active}");
+            (state == ExperimentState.TaskRunning   && _expManager.CurrentStepType == StepType.Assembly)
+         || (state == ExperimentState.Questionnaire && _expManager.CurrentStepType == StepType.Alignment);
+        Debug.Log($"[WorkerVideoStream] OnStateChanged state={state} stepType={_expManager.CurrentStepType} active={active}");
         if (active) StartCapture(); else StopCapture();
     }
 
     private void StartCapture()
     {
-        if (streamCoroutine != null) return;
+        if (_streamCoroutine != null) return;
 #if UNITY_ANDROID && !UNITY_EDITOR
-        if (pca != null) pca.enabled = true;
+        if (_pca != null) _pca.enabled = true;
 #else
         SetupEditorCamera();
 #endif
-        streamCoroutine = StartCoroutine(CaptureLoop());
+        _streamCoroutine = StartCoroutine(CaptureLoop());
         FileLogger.Log("Transport", "[WorkerVideoStream] Capture started.");
     }
 
     private void StopCapture()
     {
-        if (streamCoroutine == null) return;
-        StopCoroutine(streamCoroutine);
-        streamCoroutine = null;
+        if (_streamCoroutine == null) return;
+        StopCoroutine(_streamCoroutine);
+        _streamCoroutine = null;
 #if UNITY_ANDROID && !UNITY_EDITOR
-        if (pca != null) pca.enabled = false;
+        if (_pca != null) _pca.enabled = false;
 #endif
         FileLogger.Log("Transport", "[WorkerVideoStream] Capture stopped.");
     }
@@ -131,13 +118,13 @@ public class WorkerVideoStream : MonoBehaviour
         {
             yield return wait;
 #if UNITY_ANDROID && !UNITY_EDITOR
-            if (pca == null || !pca.IsPlaying || !pca.IsUpdatedThisFrame) continue;
-            var src = pca.GetTexture();
-            if (src != null) Graphics.Blit(src, captureRT);
+            if (_pca == null || !_pca.IsPlaying || !_pca.IsUpdatedThisFrame) continue;
+            var src = _pca.GetTexture();
+            if (src != null) Graphics.Blit(src, _captureRT);
 #elif UNITY_EDITOR
-            if (editorCam == null || editorRT == null) continue;
-            editorCam.Render();
-            Graphics.Blit(editorRT, captureRT);
+            if (_editorCam == null || _editorRT == null) continue;
+            _editorCam.Render();
+            Graphics.Blit(_editorRT, _captureRT);
 #endif
         }
     }
@@ -147,32 +134,32 @@ public class WorkerVideoStream : MonoBehaviour
 #if UNITY_EDITOR
     private void SetupEditorCamera()
     {
-        if (editorCam != null) return;
+        if (_editorCam != null) return;
         int w = requestedResolution.x, h = requestedResolution.y;
-        editorRT = new RenderTexture(w, h, 24, RenderTextureFormat.ARGB32);
+        _editorRT = new RenderTexture(w, h, 24, RenderTextureFormat.ARGB32);
 
         OVRCameraRig rig    = Object.FindAnyObjectByType<OVRCameraRig>();
         Transform    anchor = rig != null ? rig.centerEyeAnchor : transform;
 
         var go = new GameObject("EditorCaptureCam");
         go.transform.SetParent(anchor, false);
-        editorCam = go.AddComponent<Camera>();
-        editorCam.fieldOfView   = 90f;
-        editorCam.nearClipPlane = 0.05f;
-        editorCam.farClipPlane  = 100f;
-        editorCam.targetTexture = editorRT;
-        editorCam.enabled       = false;
+        _editorCam = go.AddComponent<Camera>();
+        _editorCam.fieldOfView   = 90f;
+        _editorCam.nearClipPlane = 0.05f;
+        _editorCam.farClipPlane  = 100f;
+        _editorCam.targetTexture = _editorRT;
+        _editorCam.enabled       = false;
     }
 #endif
 
     private void OnDestroy()
     {
-        if (expManager != null) expManager.OnStateChanged -= OnStateChanged;
-        session?.Stop();
-        captureRT?.Release();
-        if (captureRT != null) Destroy(captureRT);
+        if (_expManager != null) _expManager.OnStateChanged -= OnStateChanged;
+        _session?.Stop();
+        _captureRT?.Release();
+        if (_captureRT != null) Destroy(_captureRT);
 #if UNITY_EDITOR
-        if (editorRT != null) { editorRT.Release(); Destroy(editorRT); }
+        if (_editorRT != null) { _editorRT.Release(); Destroy(_editorRT); }
 #endif
     }
 }

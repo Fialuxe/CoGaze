@@ -9,15 +9,7 @@ using Photon.Pun;
 using Meta.XR.MRUtilityKit;
 #endif
 
-/// <summary>
-/// Worker (Quest 3) side: detects QR codes via MRUK and broadcasts their
-/// world-space pose to all Photon clients via RPC.
-///
-/// Expert (PC) side: receives the RPC and instantiates/updates a visual
-/// marker GameObject at the reported position.
-///
-/// Attach this component to a networked Photon prefab that has a PhotonView.
-/// </summary>
+// Worker detects QR via MRUK and broadcasts world pose via Photon RPC; Expert renders marker visuals.
 public class QRSpatialManager : MonoBehaviourPun
 {
     [Header("Marker Visual")]
@@ -26,19 +18,17 @@ public class QRSpatialManager : MonoBehaviourPun
     [SerializeField] private GameObject markerPrefab;
 
     // markerId → instantiated GameObject
-    private readonly Dictionary<string, GameObject> markerObjects = new();
+    private readonly Dictionary<string, GameObject> _markerObjects = new();
+
+    // ビルボードラベルのTransformリスト（Expert のみ。LateUpdate で毎フレームカメラ向きに更新）
+    private readonly List<Transform> _labelTransforms = new();
 
     // ---------------------------------------------------------------
     // Public API
     // ---------------------------------------------------------------
 
-    /// <summary>Read-only view of all currently known markers (id → GameObject).</summary>
-    public IReadOnlyDictionary<string, GameObject> DetectedMarkers => markerObjects;
+    public IReadOnlyDictionary<string, GameObject> DetectedMarkers => _markerObjects;
 
-    /// <summary>
-    /// Fired on all clients whenever a marker is received (new or updated).
-    /// Parameters: markerId, world position, world rotation.
-    /// </summary>
     public event Action<string, Vector3, Quaternion> OnMarkerDetected;
 
     // ---------------------------------------------------------------
@@ -51,6 +41,46 @@ public class QRSpatialManager : MonoBehaviourPun
         // MRUK and the OVR QR tracker only exist on device; the Editor has no passthrough camera,
         // so the entire detection path is compiled out to keep Editor play-mode clean.
 #if UNITY_ANDROID && !UNITY_EDITOR
+        yield return StartAndroid();
+#else
+        Debug.Log("[QRSpatialManager] Non-Android: QR hardware inactive. Use SimulateQRDetection() via Inspector context menu to test.");
+        yield break;
+#endif
+    }
+
+    [ContextMenu("SimulateQRDetection")]
+    public void SimulateQRDetection()
+    {
+        string testId  = "TEST_QR_001";
+        Vector3    pos = new Vector3(0f, 0f, 1f);
+        Quaternion rot = Quaternion.identity;
+        Debug.Log($"[QRSpatialManager] Simulating QR detection: id='{testId}'");
+        FileLogger.Log("QRSpatialManager", $"[SIM] Simulated QR: id='{testId}' pos={pos}");
+
+        // Route through BroadcastMarker so the SharedMesh-relative conversion is applied
+        // identically to the real detection path (in-room or local).
+        BroadcastMarker(testId, pos, rot);
+    }
+
+    private void OnDestroy()
+    {
+#if UNITY_ANDROID && !UNITY_EDITOR
+        OnDestroyAndroid();
+#endif
+    }
+
+    // ---------------------------------------------------------------
+    // MRUK QR tracking — Android (Quest) only
+    // ---------------------------------------------------------------
+
+#if UNITY_ANDROID && !UNITY_EDITOR
+    // markerId → live MRUK trackable. Kept so "QR init" can re-broadcast each QR at its CURRENT
+    // pose (OVR keeps tracking them; MRUK does not re-fire OnTrackableAdded for known markers).
+    private readonly Dictionary<string, Meta.XR.MRUtilityKit.MRUKTrackable> _trackables = new();
+    private Coroutine _periodicBroadcastCoroutine;
+
+    private IEnumerator StartAndroid()
+    {
         // Wait for MRUK singleton to initialize before configuring QR tracking
         float waited = 0f;
         while (MRUK.Instance == null && waited < 10f)
@@ -67,48 +97,13 @@ public class QRSpatialManager : MonoBehaviourPun
 
         Debug.Log($"[QRSpatialManager] MRUK ready after {waited:F2}s — enabling QR tracking.");
         EnableQRTracking();
-#else
-        Debug.Log("[QRSpatialManager] Non-Android: QR hardware inactive. Use SimulateQRDetection() via Inspector context menu to test.");
-        yield break;
-#endif
     }
 
-    /// <summary>
-    /// Editor/test: simulate a QR detection and broadcast via Photon RPC.
-    /// Call via gear icon → SimulateQRDetection in the Inspector.
-    /// </summary>
-    [ContextMenu("SimulateQRDetection")]
-    public void SimulateQRDetection()
+    private void OnDestroyAndroid()
     {
-        string testId  = "TEST_QR_001";
-        Vector3    pos = new Vector3(0f, 0f, 1f);
-        Quaternion rot = Quaternion.identity;
-        Debug.Log($"[QRSpatialManager] Simulating QR detection: id='{testId}'");
-        FileLogger.Log("QRSpatialManager", $"[SIM] Simulated QR: id='{testId}' pos={pos}");
-
-        if (PhotonNetwork.InRoom)
-        {
-            photonView.RPC(nameof(RPC_ReceiveQRMarker), RpcTarget.AllBuffered, testId, pos, rot);
-        }
-        else
-        {
-            Debug.LogWarning("[QRSpatialManager] SimulateQRDetection: not in a Photon room — calling RPC locally.");
-            RPC_ReceiveQRMarker(testId, pos, rot);
-        }
-    }
-
-    private void OnDestroy()
-    {
-#if UNITY_ANDROID && !UNITY_EDITOR
         DisableQRTracking();
-#endif
     }
 
-    // ---------------------------------------------------------------
-    // MRUK QR tracking — Android (Quest) only
-    // ---------------------------------------------------------------
-
-#if UNITY_ANDROID && !UNITY_EDITOR
     private void EnableQRTracking()
     {
         if (MRUK.Instance == null)
@@ -133,6 +128,8 @@ public class QRSpatialManager : MonoBehaviourPun
         MRUK.Instance.LoadSceneFromDevice();
         Debug.Log("[QRSpatialManager] EnableQRTracking: LoadSceneFromDevice called. Listening for QR trackables.");
         FileLogger.Log("QRSpatialManager", "QR tracking enabled.");
+
+        _periodicBroadcastCoroutine = StartCoroutine(PeriodicBroadcastLoop());
     }
 
     private void DisableQRTracking()
@@ -140,12 +137,51 @@ public class QRSpatialManager : MonoBehaviourPun
         if (MRUK.Instance == null) return;
         MRUK.Instance.SceneSettings.TrackableAdded.RemoveListener(OnTrackableAdded);
         MRUK.Instance.SceneSettings.TrackableRemoved.RemoveListener(OnTrackableRemoved);
+        StopPeriodicBroadcast();
+    }
+
+    // 既知 trackable を 1 秒ごとに再ブロードキャストして検出むらを補う。
+    // OnTrackableAdded は一度しか発火しないが MRUK は内部でポーズを更新し続けるため、
+    // ここで現在座標を読み直して送ることで常に最新位置が全クライアントに届く。
+    private IEnumerator PeriodicBroadcastLoop()
+    {
+        var wait = new WaitForSeconds(1f);
+        int pollCount = 0;
+        while (true)
+        {
+            yield return wait;
+            if (_trackables.Count == 0) continue;
+
+            // コピーしてからイテレート（ループ中に _trackables が変更されても安全）
+            var snapshot = new Dictionary<string, MRUKTrackable>(_trackables);
+            foreach (var kvp in snapshot)
+            {
+                if (kvp.Value == null) continue;
+                BroadcastMarker(kvp.Key,
+                                kvp.Value.transform.position,
+                                kvp.Value.transform.rotation,
+                                buffered: false);   // AllBuffered は初回検出時のみ。ポーリングは All を使い蓄積を防ぐ
+            }
+            // ブロードキャスト本体は毎秒のまま。診断ログだけ 30 秒ごとのハートビートに間引いて
+            // 長時間セッションでのデバイスログ肥大・連続ディスク I/O を抑える。
+            if (++pollCount % 30 == 0)
+                FileLogger.Log("QRSpatialManager", $"[Poll] re-broadcast {snapshot.Count} trackable(s) (x{pollCount}).");
+        }
     }
 
     private void OnTrackableAdded(MRUKTrackable trackable)
     {
-        // Only handle QR / marker trackables (MarkerPayloadString is null for non-markers)
-        if (trackable.MarkerPayloadString == null) return;
+        // Only handle QR / marker trackables (MarkerPayloadString is null for non-markers).
+        // Diagnostic: a QR that is physically seen but whose payload failed to decode (e.g. a
+        // floor code viewed at a grazing angle) arrives here with a null payload. Log it so we
+        // can tell "never seen" apart from "seen but undecoded" instead of dropping it silently.
+        if (trackable.MarkerPayloadString == null)
+        {
+            FileLogger.Log("QRSpatialManager",
+                $"Trackable added with NULL payload (non-marker, or QR seen but undecoded) " +
+                $"type={trackable.GetType().Name} pos={trackable.transform.position}");
+            return;
+        }
 
         string     markerId = trackable.MarkerPayloadString;
         Vector3    pos      = trackable.transform.position;
@@ -155,16 +191,20 @@ public class QRSpatialManager : MonoBehaviourPun
         Debug.Log($"[QRSpatialManager] QR DETECTED on Worker: id='{markerId}' pos={pos} rot={rot.eulerAngles}");
         FileLogger.Log("QRSpatialManager", $"QR detected: id='{markerId}' pos={pos} rot={rot.eulerAngles}");
 
-        // AllBuffered caches the RPC on Photon's server, so an Expert who joins after the
-        // QR was scanned still receives the marker pose without requiring a manual resync.
-        photonView.RPC(nameof(RPC_ReceiveQRMarker), RpcTarget.AllBuffered, markerId, pos, rot);
+        _trackables[markerId] = trackable;   // keep the live trackable for QR-init re-broadcast
+
+        // Broadcast in SharedMesh-relative space so the Expert places the marker correctly.
+        BroadcastMarker(markerId, pos, rot);
     }
 
     private void OnTrackableRemoved(MRUKTrackable trackable)
     {
         if (trackable.MarkerPayloadString != null)
+        {
+            _trackables.Remove(trackable.MarkerPayloadString);
             FileLogger.Log("QRSpatialManager", $"QR lost from tracking: id='{trackable.MarkerPayloadString}'" +
                            " (marker object remains in scene)");
+        }
     }
 #endif
 
@@ -183,22 +223,43 @@ public class QRSpatialManager : MonoBehaviourPun
                 return;
             }
 
-            if (markerObjects.TryGetValue(markerId, out GameObject existing))
+            // The pose was broadcast in SharedMesh-relative (local) space so that it lands
+            // in the same place regardless of each client's tracking origin. Convert it back
+            // to THIS client's world space using the local SharedMesh transform. If SharedMesh
+            // is missing, fall back to treating the values as raw world coords (symmetric with
+            // the sender's fallback in BroadcastMarker).
+            Transform sharedMesh = GetSharedMesh();
+            Vector3    worldPos;
+            Quaternion worldRot;
+            if (sharedMesh != null)
+            {
+                worldPos = sharedMesh.TransformPoint(pos);
+                worldRot = sharedMesh.rotation * rot;
+            }
+            else
+            {
+                worldPos = pos;
+                worldRot = rot;
+            }
+
+            if (_markerObjects.TryGetValue(markerId, out GameObject existing))
             {
                 // Update pose of a previously known marker
                 if (existing != null)
-                    existing.transform.SetPositionAndRotation(pos, rot);
+                    existing.transform.SetPositionAndRotation(worldPos, worldRot);
             }
             else
             {
                 // First time we've seen this marker — create a visual
-                GameObject marker = CreateMarkerObject(markerId, pos, rot);
-                markerObjects[markerId] = marker;
+                GameObject marker = CreateMarkerObject(markerId, worldPos, worldRot);
+                _markerObjects[markerId] = marker;
             }
 
-            Debug.Log($"[QRSpatialManager] Marker received: id='{markerId}' pos={pos}");
-            FileLogger.Log("QRSpatialManager", $"RPC_ReceiveQRMarker id='{markerId}' pos={pos}");
-            OnMarkerDetected?.Invoke(markerId, pos, rot);
+            Debug.Log($"[QRSpatialManager] Marker received: id='{markerId}' worldPos={worldPos}");
+            FileLogger.Log("QRSpatialManager", $"RPC_ReceiveQRMarker id='{markerId}' worldPos={worldPos}");
+            // Hand subscribers (e.g. MeshHandler QR calibration) WORLD coords — it reads
+            // rot.eulerAngles.y and expects world space.
+            OnMarkerDetected?.Invoke(markerId, worldPos, worldRot);
         }
         catch (Exception ex)
         {
@@ -207,24 +268,45 @@ public class QRSpatialManager : MonoBehaviourPun
     }
 
     // ---------------------------------------------------------------
-    // Worker-side utility: re-send all known markers (e.g. after reconnect)
+    // Worker-side utility: periodic broadcast control + marker resync
     // ---------------------------------------------------------------
 
-    /// <summary>
-    /// Worker-side only: re-broadcasts every known marker so that a freshly
-    /// joined or reconnected Expert receives the current state.
-    /// </summary>
+    [ContextMenu("Stop Periodic QR Broadcast")]
+    public void StopPeriodicBroadcast()
+    {
+#if UNITY_ANDROID && !UNITY_EDITOR
+        if (_periodicBroadcastCoroutine == null) return;
+        StopCoroutine(_periodicBroadcastCoroutine);
+        _periodicBroadcastCoroutine = null;
+        Debug.Log("[QRSpatialManager] Periodic QR broadcast stopped.");
+        FileLogger.Log("QRSpatialManager", "Periodic QR broadcast stopped.");
+#endif
+    }
+
+    [ContextMenu("Start Periodic QR Broadcast")]
+    public void StartPeriodicBroadcast()
+    {
+#if UNITY_ANDROID && !UNITY_EDITOR
+        if (_periodicBroadcastCoroutine != null) return;
+        _periodicBroadcastCoroutine = StartCoroutine(PeriodicBroadcastLoop());
+        Debug.Log("[QRSpatialManager] Periodic QR broadcast restarted.");
+        FileLogger.Log("QRSpatialManager", "Periodic QR broadcast restarted.");
+#endif
+    }
+
     public void ResyncAllMarkers()
     {
 #if UNITY_ANDROID && !UNITY_EDITOR
-        foreach (var kvp in markerObjects)
+        foreach (var kvp in _markerObjects)
         {
             if (kvp.Value == null) continue;
 
+            // Marker objects are stored in world space; BroadcastMarker re-applies the
+            // world→SharedMesh-local conversion before sending.
             Vector3    pos = kvp.Value.transform.position;
             Quaternion rot = kvp.Value.transform.rotation;
 
-            photonView.RPC(nameof(RPC_ReceiveQRMarker), RpcTarget.AllBuffered, kvp.Key, pos, rot);
+            BroadcastMarker(kvp.Key, pos, rot);
             FileLogger.Log("QRSpatialManager", $"ResyncAllMarkers: resent '{kvp.Key}'");
         }
 #else
@@ -233,9 +315,66 @@ public class QRSpatialManager : MonoBehaviourPun
 #endif
     }
 
+    // Worker-only: manually register a code MRUK missed. Not added to _trackables, so PeriodicBroadcast won't re-send it.
+    public void RegisterManualMarker(string markerId, Vector3 worldPos, Quaternion worldRot)
+    {
+        if (string.IsNullOrEmpty(markerId)) return;
+        Debug.Log($"[QRSpatialManager] Manual marker register: id='{markerId}' worldPos={worldPos}");
+        FileLogger.Log("QRSpatialManager", $"Manual register: id='{markerId}' worldPos={worldPos}");
+        BroadcastMarker(markerId, worldPos, worldRot);
+    }
+
     // ---------------------------------------------------------------
     // Helpers
     // ---------------------------------------------------------------
+
+    // Cached reference to the shared spatial anchor ("SharedMesh"). Both Worker and Expert
+    // keep this GameObject's transform in sync via MeshHandler.RPC_ReceiveMeshTransform, so it
+    // is the common frame of reference for placing markers consistently across clients.
+    private const string k_sharedMeshName = "SharedMesh";
+    private Transform _sharedMesh;
+
+    private Transform GetSharedMesh()
+    {
+        // Re-find if never resolved or if the cached object was destroyed.
+        if (_sharedMesh == null)
+        {
+            var go = GameObject.Find(k_sharedMeshName);
+            _sharedMesh = go != null ? go.transform : null;
+        }
+        return _sharedMesh;
+    }
+
+    // buffered=true: AllBuffered (first detection); false: All (polling re-broadcast, avoids buffer bloat).
+    private void BroadcastMarker(string markerId, Vector3 worldPos, Quaternion worldRot, bool buffered = true)
+    {
+        Transform sharedMesh = GetSharedMesh();
+        Vector3    sendPos;
+        Quaternion sendRot;
+        if (sharedMesh != null)
+        {
+            sendPos = sharedMesh.InverseTransformPoint(worldPos);
+            sendRot = Quaternion.Inverse(sharedMesh.rotation) * worldRot;
+        }
+        else
+        {
+            Debug.LogWarning("[QRSpatialManager] BroadcastMarker: 'SharedMesh' not found — " +
+                             "sending raw world pose (Expert placement may be misaligned).");
+            sendPos = worldPos;
+            sendRot = worldRot;
+        }
+
+        var target = buffered ? RpcTarget.AllBuffered : RpcTarget.All;
+        if (PhotonNetwork.InRoom)
+        {
+            photonView.RPC(nameof(RPC_ReceiveQRMarker), target, markerId, sendPos, sendRot);
+        }
+        else
+        {
+            Debug.LogWarning("[QRSpatialManager] BroadcastMarker: not in a Photon room — calling RPC locally.");
+            RPC_ReceiveQRMarker(markerId, sendPos, sendRot);
+        }
+    }
 
     private GameObject CreateMarkerObject(string markerId, Vector3 pos, Quaternion rot)
     {
@@ -252,14 +391,13 @@ public class QRSpatialManager : MonoBehaviourPun
             marker.transform.SetPositionAndRotation(pos, rot);
             marker.transform.localScale = Vector3.one * 0.2f;
 
-            // Apply red material so it stands out clearly on both Worker and Expert sides
+            // Apply a red, URP-safe material so the sphere is reliably visible on Quest.
+            // The primitive's default sharedMaterial is the Standard/Lit material, which under
+            // URP often renders as invisible or magenta; building from a URP-compatible shader
+            // (with non-URP fallbacks) avoids that.
             var renderer = marker.GetComponent<Renderer>();
             if (renderer != null)
-            {
-                var mat = new Material(renderer.sharedMaterial);
-                mat.color = Color.red;
-                renderer.material = mat;
-            }
+                renderer.material = CreateMarkerMaterial(Color.red);
 
             // Remove collider — these markers are purely visual
             var col = marker.GetComponent<Collider>();
@@ -268,26 +406,87 @@ public class QRSpatialManager : MonoBehaviourPun
 
         marker.name = $"QRMarker_{markerId}";
 
-        AttachLabel(marker, markerId);
+        // Labelling must never prevent the marker from being created/registered.
+        // AttachLabel is already crash-proof, but wrap defensively as a last resort.
+        try
+        {
+            AttachLabel(marker, markerId);
+        }
+        catch (Exception ex)
+        {
+            Debug.LogWarning($"[QRSpatialManager] AttachLabel failed for '{markerId}' (marker kept): {ex.Message}");
+        }
 
         return marker;
     }
 
-    /// <summary>
-    /// Adds a floating TextMeshPro label above the marker showing its ID.
-    /// TMP is available via com.unity.ugui so no conditional compilation is needed.
-    /// </summary>
-    private static void AttachLabel(GameObject marker, string markerId)
+    private static Material CreateMarkerMaterial(Color color)
     {
+        Shader shader = Shader.Find("Universal Render Pipeline/Unlit");
+        if (shader == null) shader = Shader.Find("Unlit/Color");
+        if (shader == null) shader = Shader.Find("Sprites/Default");
+        if (shader == null) shader = Shader.Find("Standard"); // last-ditch: always present
+
+        var mat = new Material(shader);
+
+        // URP/Unlit exposes _BaseColor; built-in unlit/Standard expose _Color.
+        // Set whichever the chosen shader actually has (HasProperty guards both).
+        if (mat.HasProperty("_BaseColor")) mat.SetColor("_BaseColor", color);
+        if (mat.HasProperty("_Color"))     mat.SetColor("_Color", color);
+        // mat.color is a convenience accessor for _Color; harmless if absent.
+        mat.color = color;
+
+        return mat;
+    }
+
+    private void AttachLabel(GameObject marker, string markerId)
+    {
+        // Worker にはラベル不要（ユーザー要件）
+        if (RoleManager.LocalRole != RoleManager.ROLE_EXPERT) return;
+
+        bool tmpAvailable = TMP_Settings.instance != null;
+
         var labelGo = new GameObject("Label");
         labelGo.transform.SetParent(marker.transform, false);
-        // Float slightly above the sphere surface
-        labelGo.transform.localPosition = Vector3.up * 0.12f;
+        // マーカー球の上方 0.25m に表示（球半径 0.1m + 余白）
+        labelGo.transform.localPosition = Vector3.up * 0.25f;
 
-        var tmp = labelGo.AddComponent<TextMeshPro>();
-        tmp.text               = markerId;
-        tmp.fontSize           = 0.05f;
-        tmp.alignment          = TextAlignmentOptions.Center;
-        tmp.textWrappingMode = TMPro.TextWrappingModes.NoWrap;
+        if (tmpAvailable)
+        {
+            var tmp = labelGo.AddComponent<TextMeshPro>();
+            tmp.text             = markerId;
+            tmp.fontSize         = 0.22f;          // 旧: 0.05f → 可読サイズに拡大
+            tmp.color            = new Color(1f, 0.85f, 0.1f);  // 黄色
+            tmp.alignment        = TextAlignmentOptions.Center;
+            tmp.textWrappingMode = TMPro.TextWrappingModes.NoWrap;
+            tmp.fontStyle        = TMPro.FontStyles.Bold;
+        }
+        else
+        {
+            var textMesh = labelGo.AddComponent<TextMesh>();
+            textMesh.text          = markerId;
+            textMesh.characterSize = 0.15f;        // 旧: 0.05f
+            textMesh.fontSize      = 120;           // 旧: 64
+            textMesh.anchor        = TextAnchor.MiddleCenter;
+            textMesh.alignment     = TextAlignment.Center;
+            textMesh.color         = new Color(1f, 0.85f, 0.1f);
+            textMesh.fontStyle     = FontStyle.Bold;
+        }
+
+        _labelTransforms.Add(labelGo.transform);
+    }
+
+    // ビルボード: ラベルを毎フレームカメラ方向に向ける（Expert の PC カメラ向け）
+    private void LateUpdate()
+    {
+        if (_labelTransforms.Count == 0 || Camera.main == null) return;
+        Vector3 camPos = Camera.main.transform.position;
+        for (int i = _labelTransforms.Count - 1; i >= 0; i--)
+        {
+            if (_labelTransforms[i] == null) { _labelTransforms.RemoveAt(i); continue; }
+            Vector3 toCamera = camPos - _labelTransforms[i].position;
+            if (toCamera.sqrMagnitude > 0.0001f)
+                _labelTransforms[i].rotation = Quaternion.LookRotation(toCamera, Vector3.up);
+        }
     }
 }

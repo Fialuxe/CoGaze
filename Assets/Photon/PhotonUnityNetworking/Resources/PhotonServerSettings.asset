@@ -46,6 +46,14 @@ MonoBehaviour:
   - CantHearYou
   - ChangeColour
   - HeresWhy
+  - RPC_ClearMarkers
+  - RPC_ForwardQuestionnaireJson
+  - RPC_SetMeshVisible
+  - RPC_NotifyCalibComplete
+  - ResetDualCalibration
+  - RPC_CorrectHit
+  - RPC_SetTarget
+  - RPC_WrongHit
   DisableAutoOpenWizard: 1
   ShowSettings: 1
   DevRegionSetOnce: 0

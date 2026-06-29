@@ -1,51 +1,39 @@
 using UnityEngine;
 
-/// <summary>
-/// 視線をレイとして描画するVisualizer。
-/// 線分（LineRenderer）ではなく面積（体積）を持つ3Dシリンダーを使用し、
-/// 真正面から見ても「点」にならず視認できるようにする。
-/// 先端のヒットマーカーも3D球体を使用する。
-/// </summary>
+// Ray gaze visualizer: 3D cylinder + hit-sphere so it remains visible head-on.
 public class RayVisualizer : MonoBehaviour
 {
-    private GameObject rayCylinder;
-    private GameObject hitSphere;
-    private Material visualMaterial;
-    private Material markerMaterial;
+    private const float k_rayRadius = 0.008f;
+    private const float k_markerRadius = 0.03f;
 
-    private Color rayColor = new Color(0f, 0.8f, 1f, 0.8f);
-    private float rayRadius = 0.008f; // シリンダーの太さ
-    private float markerRadius = 0.03f; // マーカーの大きさ
+    private static readonly Color k_rayColor = new Color(0f, 0.8f, 1f, 0.8f);
+    private static readonly Color k_markerColor = new Color(1f, 1f, 1f, 0.9f);
+
+    private GameObject _rayCylinder;
+    private GameObject _hitSphere;
+    private Material _visualMaterial;
+    private Material _markerMaterial;
 
     private void Awake()
     {
-        // 半透明UnlitマテリアルとしてSprites/Defaultを利用
-        visualMaterial = new Material(Shader.Find("Sprites/Default"));
-        visualMaterial.color = rayColor;
+        // 半透明UnlitマテリアルとしてSprites/Defaultを利用（VR環境での不在時は UI/Default にフォールバック）
+        var rayShader = Shader.Find("Sprites/Default") ?? Shader.Find("UI/Default");
+        _visualMaterial = new Material(rayShader);
+        _visualMaterial.color = k_rayColor;
 
-        markerMaterial = new Material(Shader.Find("Sprites/Default"));
-        markerMaterial.color = new Color(1f, 1f, 1f, 0.9f);
+        var markerShader = Shader.Find("Sprites/Default") ?? Shader.Find("UI/Default");
+        _markerMaterial = new Material(markerShader);
+        _markerMaterial.color = k_markerColor;
 
         CreateGeometry();
     }
 
-    private void CreateGeometry()
-    {
-        // レイ本体（シリンダー）
-        rayCylinder = GameObject.CreatePrimitive(PrimitiveType.Cylinder);
-        rayCylinder.name = "RayCylinder";
-        rayCylinder.transform.SetParent(transform);
-        Destroy(rayCylinder.GetComponent<Collider>()); // コライダー不要
-        rayCylinder.GetComponent<Renderer>().material = visualMaterial;
-        rayCylinder.SetActive(false);
+    private void OnDisable() => SetVisible(false);
 
-        // 先端マーカー（スフィア）
-        hitSphere = GameObject.CreatePrimitive(PrimitiveType.Sphere);
-        hitSphere.name = "RayHitMarker";
-        hitSphere.transform.SetParent(transform);
-        Destroy(hitSphere.GetComponent<Collider>()); // コライダー不要
-        hitSphere.GetComponent<Renderer>().material = markerMaterial;
-        hitSphere.SetActive(false);
+    private void OnDestroy()
+    {
+        if (_visualMaterial != null) Destroy(_visualMaterial);
+        if (_markerMaterial != null) Destroy(_markerMaterial);
     }
 
     public void UpdateVisualization(Vector3 origin, Vector3 endPoint)
@@ -59,30 +47,45 @@ public class RayVisualizer : MonoBehaviour
 
         Vector3 dir = (endPoint - origin).normalized;
 
-        rayCylinder.SetActive(true);
-        // Cylinderは初期状態で高さ2のY軸方向。なのでYスケールを距離の半分にする。
-        rayCylinder.transform.localScale = new Vector3(rayRadius, distance * 0.5f, rayRadius);
-        // 中心位置は始点と終点の中間
-        rayCylinder.transform.position = origin + dir * (distance * 0.5f);
-        // 向きはZ軸(forward)をY軸(up)に向けるように回転
-        rayCylinder.transform.rotation = Quaternion.LookRotation(dir) * Quaternion.Euler(90f, 0f, 0f);
+        _rayCylinder.SetActive(true);
+        // Cylinderはデフォルトで高さ2のY軸方向なのでYスケールを距離の半分に設定
+        _rayCylinder.transform.localScale = new Vector3(k_rayRadius, distance * 0.5f, k_rayRadius);
+        _rayCylinder.transform.position = origin + dir * (distance * 0.5f);
+        _rayCylinder.transform.rotation = Quaternion.LookRotation(dir) * Quaternion.Euler(90f, 0f, 0f);
 
-        hitSphere.SetActive(true);
-        hitSphere.transform.position = endPoint;
-        hitSphere.transform.localScale = Vector3.one * (markerRadius * 2f);
+        _hitSphere.SetActive(true);
+        _hitSphere.transform.position = endPoint;
+        _hitSphere.transform.localScale = Vector3.one * (k_markerRadius * 2f);
     }
 
     public void SetVisible(bool visible)
     {
-        if (rayCylinder != null) rayCylinder.SetActive(visible);
-        if (hitSphere != null) hitSphere.SetActive(visible);
+        if (_rayCylinder != null) _rayCylinder.SetActive(visible);
+        if (_hitSphere != null) _hitSphere.SetActive(visible);
     }
 
-    private void OnDisable() => SetVisible(false);
-
-    private void OnDestroy()
+    public void SetFallbackMode(bool fallback)
     {
-        if (visualMaterial != null) Destroy(visualMaterial);
-        if (markerMaterial != null) Destroy(markerMaterial);
+        var c = fallback ? new Color(0.7f, 0.7f, 0.7f, 0.5f) : k_rayColor;
+        if (_visualMaterial != null) _visualMaterial.color = c;
+        var cm = fallback ? new Color(0.8f, 0.8f, 0.8f, 0.6f) : k_markerColor;
+        if (_markerMaterial != null) _markerMaterial.color = cm;
+    }
+
+    private void CreateGeometry()
+    {
+        _rayCylinder = GameObject.CreatePrimitive(PrimitiveType.Cylinder);
+        _rayCylinder.name = "RayCylinder";
+        _rayCylinder.transform.SetParent(transform);
+        Destroy(_rayCylinder.GetComponent<Collider>());
+        _rayCylinder.GetComponent<Renderer>().material = _visualMaterial;
+        _rayCylinder.SetActive(false);
+
+        _hitSphere = GameObject.CreatePrimitive(PrimitiveType.Sphere);
+        _hitSphere.name = "RayHitMarker";
+        _hitSphere.transform.SetParent(transform);
+        Destroy(_hitSphere.GetComponent<Collider>());
+        _hitSphere.GetComponent<Renderer>().material = _markerMaterial;
+        _hitSphere.SetActive(false);
     }
 }

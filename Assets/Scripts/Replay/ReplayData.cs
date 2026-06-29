@@ -42,6 +42,9 @@ public class ReplayFrameData
 
     [JsonProperty(NullValueHandling = NullValueHandling.Ignore)]
     public float[][] handR;
+
+    [JsonProperty(NullValueHandling = NullValueHandling.Ignore)]
+    public float[] workerCtrl; // [x, y, z] controller world position — absent if not tracked
 }
 
 public class ReplayData
