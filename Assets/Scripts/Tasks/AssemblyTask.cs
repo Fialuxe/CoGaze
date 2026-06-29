@@ -1,37 +1,31 @@
 using UnityEngine;
 
-/// <summary>
-/// Assembly task controller.
-/// The spatial reference grid is a physical printed sheet on the table —
-/// no virtual overlay is needed or rendered.
-///
-/// Activates when ExperimentState == TaskRunning and StepType == Assembly.
-/// </summary>
+// Assembly task controller; activates when ExperimentState == TaskRunning and StepType == Assembly.
 public class AssemblyTask : MonoBehaviour
 {
-    private ExperimentManager2 experimentManager2;
+    private ExperimentManager2 _experimentManager2;
 
     private void Start()
     {
-        experimentManager2 = Object.FindAnyObjectByType<ExperimentManager2>();
-        if (experimentManager2 == null)
+        _experimentManager2 = Object.FindAnyObjectByType<ExperimentManager2>();
+        if (_experimentManager2 == null)
         {
             Debug.LogError("[AssemblyTask] ExperimentManager2 not found in scene.");
             return;
         }
-        experimentManager2.OnStateChanged += OnStateChanged;
+        _experimentManager2.OnStateChanged += OnStateChanged;
     }
 
     private void OnDestroy()
     {
-        if (experimentManager2 != null)
-            experimentManager2.OnStateChanged -= OnStateChanged;
+        if (_experimentManager2 != null)
+            _experimentManager2.OnStateChanged -= OnStateChanged;
     }
 
     private void OnStateChanged(ExperimentState newState)
     {
         bool run = newState == ExperimentState.TaskRunning
-                && experimentManager2.CurrentStepType == StepType.Assembly;
+                && _experimentManager2.CurrentStepType == StepType.Assembly;
         if (run) StartTask(); else EndTask();
     }
 

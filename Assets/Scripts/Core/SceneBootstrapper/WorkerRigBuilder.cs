@@ -4,10 +4,7 @@ using Photon.Voice;
 using Photon.Voice.Unity;
 using POpusCodec.Enums;
 
-/// <summary>
-/// Configures the Worker role's rig (components, input, audio, video) on the local player GameObject.
-/// Called once by SceneBootstrapper2.SetupWorker; returns the handles the shell must retain.
-/// </summary>
+// Configures the Worker role's rig on the local player GameObject; called once by SceneBootstrapper2.
 internal static class WorkerRigBuilder
 {
     internal struct Result
@@ -48,11 +45,6 @@ internal static class WorkerRigBuilder
         var postureInput   = playerObj.AddComponent<MetaXRPostureInput>();
         var postureHandler = playerObj.GetComponent<PostureHandler>();
         if (postureHandler != null) postureHandler.Initialize(postureInput);
-
-        // GazeHandler + MetaXRGazeInput
-        var gazeInput   = playerObj.AddComponent<MetaXRGazeInput>();
-        var gazeHandler = playerObj.GetComponent<GazeHandler>();
-        if (gazeHandler != null) gazeHandler.Initialize(gazeInput);
 
         // GazeVisualizer — renders the remote Expert's shared gaze on the Worker
         new GameObject("LocalGazeVisualizer").AddComponent<GazeVisualizer>().Initialize();

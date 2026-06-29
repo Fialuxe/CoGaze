@@ -1,32 +1,27 @@
 using System;
 using UnityEngine;
 
-/// <summary>
-/// Drives the gaze visualization during replay. Creates a WorkerHead capsule,
-/// a non-rendering camera for ray reconstruction, and the three visualizer components.
-/// Replicates the same ray math as GazeVisualizer.Update().
-/// Added by ReplayBootstrapper.
-/// </summary>
+// Drives gaze visualization during replay; replicates GazeVisualizer.Update() ray math with non-rendering camera.
 public class ReplayGazeDriver : MonoBehaviour
 {
-    private const float EXPERT_FOV        = 60f;
-    private const float STREAMING_FOV     = 90f;
-    private const float STREAMING_ASPECT  = 4f / 3f;
-    private const float DEFAULT_DISTANCE  = 3f;
-    private const float MAX_RAY_DISTANCE  = 10f;
+    private const float k_expertFov        = 60f;
+    private const float k_streamingFov     = 90f;
+    private const float k_streamingAspect  = 4f / 3f;
+    private const float k_defaultDistance  = 3f;
+    private const float k_maxRayDistance  = 10f;
 
-    private ReplayManager     mgr;
-    private GameObject        workerHead;
-    private GameObject        expertHead;
-    private Camera            replayCamera;
-    private RayVisualizer     rayViz;
-    private CircleVisualizer  circleViz;
-    private FrustumVisualizer frustumViz;
-    private VisualizationMode activeMode;
+    private ReplayManager     _mgr;
+    private GameObject        _workerHead;
+    private GameObject        _expertHead;
+    private Camera            _replayCamera;
+    private RayVisualizer     _rayViz;
+    private CircleVisualizer  _circleViz;
+    private FrustumVisualizer _frustumViz;
+    private VisualizationMode _activeMode;
 
     public void Initialize(ReplayManager manager)
     {
-        mgr = manager;
+        _mgr = manager;
 
         try
         {
@@ -38,44 +33,44 @@ public class ReplayGazeDriver : MonoBehaviour
             return;
         }
 
-        mgr.OnLoaded        += OnLoaded;
-        mgr.OnFrameChanged  += OnFrameChanged;
+        _mgr.OnLoaded        += OnLoaded;
+        _mgr.OnFrameChanged  += OnFrameChanged;
     }
 
     private void BuildScene()
     {
         // Worker head capsule (blue-ish)
-        workerHead = GameObject.CreatePrimitive(PrimitiveType.Capsule);
-        workerHead.name = "WorkerHead";
-        workerHead.transform.localScale = new Vector3(0.2f, 0.2f, 0.2f);
-        var workerCol = workerHead.GetComponent<Collider>();
+        _workerHead = GameObject.CreatePrimitive(PrimitiveType.Capsule);
+        _workerHead.name = "WorkerHead";
+        _workerHead.transform.localScale = new Vector3(0.2f, 0.2f, 0.2f);
+        var workerCol = _workerHead.GetComponent<Collider>();
         if (workerCol != null) Destroy(workerCol);
-        workerHead.GetComponent<MeshRenderer>().material.color = new Color(0.3f, 0.7f, 1f);
-        workerHead.SetActive(false);
+        _workerHead.GetComponent<MeshRenderer>().material.color = new Color(0.3f, 0.7f, 1f);
+        _workerHead.SetActive(false);
 
         // Expert head capsule (orange-ish)
-        expertHead = GameObject.CreatePrimitive(PrimitiveType.Capsule);
-        expertHead.name = "ExpertHead";
-        expertHead.transform.localScale = new Vector3(0.2f, 0.2f, 0.2f);
-        var expertCol = expertHead.GetComponent<Collider>();
+        _expertHead = GameObject.CreatePrimitive(PrimitiveType.Capsule);
+        _expertHead.name = "ExpertHead";
+        _expertHead.transform.localScale = new Vector3(0.2f, 0.2f, 0.2f);
+        var expertCol = _expertHead.GetComponent<Collider>();
         if (expertCol != null) Destroy(expertCol);
-        expertHead.GetComponent<MeshRenderer>().material.color = new Color(1f, 0.55f, 0.2f);
-        expertHead.SetActive(false);
+        _expertHead.GetComponent<MeshRenderer>().material.color = new Color(1f, 0.55f, 0.2f);
+        _expertHead.SetActive(false);
 
         // Non-rendering camera for ray reconstruction — must follow Expert head,
         // because frame.gaze is Expert's normalized viewport coordinate.
         var camGo = new GameObject("ReplayCamera");
-        camGo.transform.SetParent(expertHead.transform);
+        camGo.transform.SetParent(_expertHead.transform);
         camGo.transform.SetLocalPositionAndRotation(Vector3.zero, Quaternion.identity);
-        replayCamera             = camGo.AddComponent<Camera>();
-        replayCamera.enabled     = false;
-        replayCamera.fieldOfView = EXPERT_FOV;
+        _replayCamera             = camGo.AddComponent<Camera>();
+        _replayCamera.enabled     = false;
+        _replayCamera.fieldOfView = k_expertFov;
 
         // Visualizers at scene root — they use world-space coordinates, parenting doesn't matter
         var vizGo = new GameObject("GazeViz");
-        rayViz    = vizGo.AddComponent<RayVisualizer>();
-        circleViz = vizGo.AddComponent<CircleVisualizer>();
-        frustumViz = vizGo.AddComponent<FrustumVisualizer>();
+        _rayViz    = vizGo.AddComponent<RayVisualizer>();
+        _circleViz = vizGo.AddComponent<CircleVisualizer>();
+        _frustumViz = vizGo.AddComponent<FrustumVisualizer>();
 
         HideAll();
         SetActiveVisualizer(VisualizationMode.Ray); // default; updated when file is loaded
@@ -85,34 +80,34 @@ public class ReplayGazeDriver : MonoBehaviour
 
     private void OnLoaded(ReplayData data)
     {
-        workerHead.SetActive(true);
-        expertHead.SetActive(true);
+        _workerHead.SetActive(true);
+        _expertHead.SetActive(true);
 
         // Parse gaze mode from meta
-        if (!Enum.TryParse(data.meta?.gazeMode, out activeMode))
+        if (!Enum.TryParse(data.meta?.gazeMode, out _activeMode))
         {
-            activeMode = VisualizationMode.Ray;
+            _activeMode = VisualizationMode.Ray;
             Debug.LogWarning($"[ReplayGazeDriver] Unknown gazeMode '{data.meta?.gazeMode}', defaulting to Ray.");
         }
 
-        SetActiveVisualizer(activeMode);
+        SetActiveVisualizer(_activeMode);
 
         // Set camera FOV to match the condition's task type
         bool isAssembly = string.Equals(data.meta?.stepType, StepType.Assembly.ToString(),
                                         StringComparison.OrdinalIgnoreCase);
         if (isAssembly)
         {
-            replayCamera.fieldOfView = STREAMING_FOV;
-            replayCamera.aspect      = STREAMING_ASPECT;
+            _replayCamera.fieldOfView = k_streamingFov;
+            _replayCamera.aspect      = k_streamingAspect;
         }
         else
         {
-            replayCamera.fieldOfView = EXPERT_FOV;
-            replayCamera.ResetAspect();
+            _replayCamera.fieldOfView = k_expertFov;
+            _replayCamera.ResetAspect();
         }
 
-        if (activeMode == VisualizationMode.Frustum)
-            frustumViz.SetCameraParams(replayCamera.fieldOfView, replayCamera.aspect);
+        if (_activeMode == VisualizationMode.Frustum)
+            _frustumViz.SetCameraParams(_replayCamera.fieldOfView, _replayCamera.aspect);
 
         ApplyMeshTransform(data.meta);
     }
@@ -159,7 +154,7 @@ public class ReplayGazeDriver : MonoBehaviour
         // Move Worker head
         if (frame.workerHead?.p?.Length >= 3 && frame.workerHead?.r?.Length >= 4)
         {
-            workerHead.transform.SetPositionAndRotation(
+            _workerHead.transform.SetPositionAndRotation(
                 new Vector3(frame.workerHead.p[0], frame.workerHead.p[1], frame.workerHead.p[2]),
                 new Quaternion(frame.workerHead.r[0], frame.workerHead.r[1], frame.workerHead.r[2], frame.workerHead.r[3]));
         }
@@ -167,7 +162,7 @@ public class ReplayGazeDriver : MonoBehaviour
         // Move Expert head
         if (frame.expertHead?.p?.Length >= 3 && frame.expertHead?.r?.Length >= 4)
         {
-            expertHead.transform.SetPositionAndRotation(
+            _expertHead.transform.SetPositionAndRotation(
                 new Vector3(frame.expertHead.p[0], frame.expertHead.p[1], frame.expertHead.p[2]),
                 new Quaternion(frame.expertHead.r[0], frame.expertHead.r[1], frame.expertHead.r[2], frame.expertHead.r[3]));
         }
@@ -177,38 +172,38 @@ public class ReplayGazeDriver : MonoBehaviour
         float x = frame.gaze[0], y = frame.gaze[1], blink = frame.gaze[2];
         if (blink > 0.5f) { HideAll(); return; }
 
-        Ray ray = replayCamera.ViewportPointToRay(new Vector3(x, y, 0f));
+        Ray ray = _replayCamera.ViewportPointToRay(new Vector3(x, y, 0f));
 
-        switch (activeMode)
+        switch (_activeMode)
         {
             case VisualizationMode.Ray:
             {
                 Vector3 start = ray.origin + ray.direction * 0.5f;
-                Vector3 end   = Physics.Raycast(ray, out RaycastHit hit, MAX_RAY_DISTANCE)
+                Vector3 end   = Physics.Raycast(ray, out RaycastHit hit, k_maxRayDistance)
                     ? hit.point
-                    : ray.GetPoint(DEFAULT_DISTANCE);
-                rayViz.UpdateVisualization(start, end);
+                    : ray.GetPoint(k_defaultDistance);
+                _rayViz.UpdateVisualization(start, end);
                 break;
             }
 
             case VisualizationMode.Circle:
             {
-                if (Physics.Raycast(ray, out RaycastHit hit, MAX_RAY_DISTANCE))
+                if (Physics.Raycast(ray, out RaycastHit hit, k_maxRayDistance))
                 {
-                    circleViz.UpdateVisualization(hit.point, hit.normal);
-                    circleViz.SetVisible(true);
+                    _circleViz.UpdateVisualization(hit.point, hit.normal);
+                    _circleViz.SetVisible(true);
                 }
                 else
                 {
-                    circleViz.SetVisible(false);
+                    _circleViz.SetVisible(false);
                 }
                 break;
             }
 
             case VisualizationMode.Frustum:
             {
-                frustumViz.SetCameraParams(replayCamera.fieldOfView, replayCamera.aspect);
-                frustumViz.UpdateVisualization(ray.origin, ray.direction, Vector3.zero, false);
+                _frustumViz.SetCameraParams(_replayCamera.fieldOfView, _replayCamera.aspect);
+                _frustumViz.UpdateVisualization(ray.origin, ray.direction, Vector3.zero, false);
                 break;
             }
         }
@@ -218,22 +213,22 @@ public class ReplayGazeDriver : MonoBehaviour
 
     private void SetActiveVisualizer(VisualizationMode mode)
     {
-        if (rayViz     != null) rayViz.enabled     = mode == VisualizationMode.Ray;
-        if (circleViz  != null) circleViz.enabled  = mode == VisualizationMode.Circle;
-        if (frustumViz != null) frustumViz.enabled = mode == VisualizationMode.Frustum;
+        if (_rayViz     != null) _rayViz.enabled     = mode == VisualizationMode.Ray;
+        if (_circleViz  != null) _circleViz.enabled  = mode == VisualizationMode.Circle;
+        if (_frustumViz != null) _frustumViz.enabled = mode == VisualizationMode.Frustum;
     }
 
     private void HideAll()
     {
-        rayViz?.SetVisible(false);
-        circleViz?.SetVisible(false);
-        frustumViz?.SetVisible(false);
+        _rayViz?.SetVisible(false);
+        _circleViz?.SetVisible(false);
+        _frustumViz?.SetVisible(false);
     }
 
     private void OnDestroy()
     {
-        if (mgr == null) return;
-        mgr.OnLoaded       -= OnLoaded;
-        mgr.OnFrameChanged -= OnFrameChanged;
+        if (_mgr == null) return;
+        _mgr.OnLoaded       -= OnLoaded;
+        _mgr.OnFrameChanged -= OnFrameChanged;
     }
 }

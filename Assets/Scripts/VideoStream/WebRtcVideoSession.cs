@@ -4,17 +4,7 @@ using System.Collections.Generic;
 using UnityEngine;
 using Unity.WebRTC;
 
-/// <summary>
-/// Pure WebRTC peer connection — no Photon dependency.
-///
-/// Worker (offerer)  : StartAsOfferer(captureRT) → fires OnSendOffer, OnSendIce
-/// Expert (answerer) : StartAsAnswerer(onFrame)  → waits for ApplyRemoteOffer(),
-///                     then fires OnSendAnswer, OnSendIce
-///
-/// Caller is responsible for transporting signaling messages in both directions:
-///   outbound: subscribe to OnSendOffer / OnSendAnswer / OnSendIce
-///   inbound:  call ApplyRemoteOffer / ApplyRemoteAnswer / AddRemoteIce
-/// </summary>
+// Pure WebRTC peer connection; Worker offers, Expert answers; caller routes signaling via Photon events EVT_OFFER/ANSWER/ICE.
 public class WebRtcVideoSession : MonoBehaviour
 {
     // Signaling event codes — defined here so setup files can reference them without a separate file.
@@ -23,7 +13,7 @@ public class WebRtcVideoSession : MonoBehaviour
     public const byte EVT_ICE    = 62;
     public const byte EVT_HANGUP = 63;
 
-    private static bool _loopStarted;
+    private static bool s_loopStarted;
 
     // ── Outbound signaling events (caller routes these to the remote peer) ─
 
@@ -62,9 +52,9 @@ public class WebRtcVideoSession : MonoBehaviour
 
     private void Awake()
     {
-        if (!_loopStarted)
+        if (!s_loopStarted)
         {
-            _loopStarted = true;
+            s_loopStarted = true;
             var go = new GameObject("[WebRTC_Pump]");
             DontDestroyOnLoad(go);
             go.AddComponent<WebRtcPumpHost>();
@@ -75,15 +65,11 @@ public class WebRtcVideoSession : MonoBehaviour
     private void OnDestroy()
     {
         CleanUp();
-        // _loopStarted intentionally NOT reset — pump lives on the persistent [WebRTC_Pump] GO.
+        // s_loopStarted intentionally NOT reset — pump lives on the persistent [WebRTC_Pump] GO.
     }
 
     // ── Worker side ─────────────────────────────────────────────────────────
 
-    /// <summary>
-    /// Call once when the Expert is confirmed in the room.
-    /// Fires OnSendOffer when the SDP is ready.
-    /// </summary>
     public void StartAsOfferer(RenderTexture captureRT)
     {
         if (_stopped) return;
@@ -135,10 +121,6 @@ public class WebRtcVideoSession : MonoBehaviour
         Debug.Log("[WebRTC] Offer created and dispatched.");
     }
 
-    /// <summary>
-    /// Retry the offer handshake after a short delay, bounded by MaxHandshakeAttempts. Sequential
-    /// (yields into the next DoOffer) so two handshakes never race on the shared _pc.
-    /// </summary>
     private IEnumerator RetryOfferAfterDelay(int attempt, string reason)
     {
         Debug.LogWarning($"[WebRTC] Offer handshake failed ({reason}).");
@@ -167,10 +149,6 @@ public class WebRtcVideoSession : MonoBehaviour
 
     // ── Expert side ─────────────────────────────────────────────────────────
 
-    /// <summary>
-    /// Call once during initialization.
-    /// onFrame is invoked on the main thread each time a decoded video frame arrives.
-    /// </summary>
     public void StartAsAnswerer(Action<Texture> onFrame)
     {
         _isOfferer = false;
@@ -246,10 +224,6 @@ public class WebRtcVideoSession : MonoBehaviour
         Debug.Log("[WebRTC] Answer created and dispatched.");
     }
 
-    /// <summary>
-    /// Retry the answer handshake after a short delay, bounded by MaxHandshakeAttempts. Sequential
-    /// (yields into the next DoAnswer) so two handshakes never race on the shared _pc.
-    /// </summary>
     private IEnumerator RetryAnswerAfterDelay(string offerSdp, int attempt, string reason)
     {
         Debug.LogWarning($"[WebRTC] Answer handshake failed ({reason}).");
@@ -331,10 +305,6 @@ public class WebRtcVideoSession : MonoBehaviour
         };
     }
 
-    /// <summary>
-    /// ICE Restart を試みる。5 秒以内に Connected に戻らなければ完全再起動する。
-    /// Offerer（Worker）側のみ呼び出すこと。
-    /// </summary>
     private IEnumerator TryIceRestart()
     {
         if (_stopped || !_isOfferer || _pc == null) yield break;
@@ -374,13 +344,6 @@ public class WebRtcVideoSession : MonoBehaviour
         yield return StartCoroutine(DoOffer());
     }
 
-    /// <summary>
-    /// Re-create and dispatch an offer on the EXISTING peer connection (no teardown), so the
-    /// RestartIce()-flagged ICE credentials actually go out. Reusing _pc/_sendTrack/_sendStream
-    /// keeps the media path alive, so a natural Disconnected→Connected recovery can still occur.
-    /// On failure it simply returns; the TryIceRestart 5 s timeout then falls back to a full
-    /// reconnect — strictly no worse than the previous RestartIce()-only no-op.
-    /// </summary>
     private IEnumerator ReOffer()
     {
         if (_stopped || _pc == null) yield break;

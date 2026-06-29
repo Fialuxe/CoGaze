@@ -1,12 +1,7 @@
 using System;
 using UnityEngine;
 
-/// <summary>
-/// Installed by SceneBootstrapper2 immediately after FileLogger.Init().
-/// Replaces Unity's default log handler so that:
-///   Debug.Log     → FileLogger only  (not shown in console)
-///   Debug.LogWarning / LogError / exceptions → FileLogger + console as usual
-/// </summary>
+// Replaces Unity's log handler: Debug.Log → FileLogger only; warnings/errors → FileLogger + console.
 public class UnityLogCapture : MonoBehaviour
 {
     private ILogHandler _defaultHandler;

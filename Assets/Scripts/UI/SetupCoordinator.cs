@@ -3,16 +3,7 @@ using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.UI;
 
-/// <summary>
-/// Tracks the setup conditions (dual-QR calib + all task QRs present + Expert approval) and
-/// drives setup UI for Worker (VR WorldSpace) and Expert (ScreenSpace).
-///
-/// Task QRs are expected to carry single-letter ids 'A'..'A'+(requiredTaskQRCount-1). Because
-/// Quest's MRUK can only auto-track ~6 QR codes at once, any task QR that never auto-detects is
-/// recovered manually: the Worker is shown which letter to register, touches that physical QR
-/// with the right controller, and presses grip — SetupCoordinator registers the controller's
-/// position as that id via QRSpatialManager.RegisterManualMarker (no MRUK slot consumed).
-/// </summary>
+// Tracks dual-QR calib + task-QR presence + Expert approval; drives setup UI for both roles.
 public class SetupCoordinator : MonoBehaviour
 {
     // ── Config ─────────────────────────────────────────────────────────────
@@ -23,15 +14,9 @@ public class SetupCoordinator : MonoBehaviour
     private QRSpatialManager   _qrManager;
 
     // ── State ──────────────────────────────────────────────────────────────
-    private bool                 _calibDone       = false;
+    private bool                 _calibDone;
     private readonly List<string>    _expectedTaskIds  = new();
     private readonly HashSet<string> _detectedTaskIds  = new();
-
-#if UNITY_ANDROID && !UNITY_EDITOR
-    private const float GripThreshold = OVRInputThresholds.Grip;
-    private bool         _gripWasDown = false;
-    private OVRCameraRig _ovrRig;
-#endif
 
     // ── Worker VR UI ───────────────────────────────────────────────────────
     // Preferred path: WorkerHUD2 found at runtime → setup status rendered inside that HUD (no
@@ -42,7 +27,7 @@ public class SetupCoordinator : MonoBehaviour
     private Text       _workerCalibLine;
     private Text       _workerTaskLine;
     private Text       _workerHintLine;
-    private bool       _expertSetupReady = false;   // mirrors the Expert's IsExpertSelfReady (via Photon prop)
+    private bool       _expertSetupReady;
 
     // ── Manual task-QR registration feedback (UX9) ──────────────────────────
     // Declared OUTSIDE the Android #if because RefreshUI (which runs on the non-Android Expert
@@ -125,7 +110,6 @@ public class SetupCoordinator : MonoBehaviour
 
     // ── Task id helpers ────────────────────────────────────────────────────
 
-    /// <summary>A task QR id is any detected marker that is in the expected set (excludes calib).</summary>
     private bool IsTaskId(string id) => _expectedTaskIds.Contains(id);
 
     private int DetectedTaskCount()
@@ -136,7 +120,6 @@ public class SetupCoordinator : MonoBehaviour
         return n;
     }
 
-    /// <summary>First expected task id not yet detected/registered, or null if all present.</summary>
     private string FirstMissingId()
     {
         foreach (var id in _expectedTaskIds)
@@ -186,7 +169,7 @@ public class SetupCoordinator : MonoBehaviour
         string nextMissing = FirstMissingId();
 
         float grip        = OVRInput.Get(OVRInput.Axis1D.PrimaryHandTrigger, OVRInput.Controller.RTouch);
-        bool  gripDown    = grip > GripThreshold;
+        bool  gripDown    = grip > k_gripThreshold;
         bool  justPressed = gripDown && !_gripWasDown;
         _gripWasDown = gripDown;
 
@@ -195,7 +178,26 @@ public class SetupCoordinator : MonoBehaviour
         // can't drop a marker while the operator is aligning the mesh.
         if (OVRInput.Get(OVRInput.Button.One, OVRInput.Controller.LTouch)) return;
 
-        if (!justPressed || nextMissing == null || _qrManager == null) return;
+        if (!justPressed) return;
+
+        // Calib QR grip fallback: when dual-QR calibration is still pending, a grip press registers
+        // the controller position as the next calibration QR point (same gesture as task QR).
+        if (!_calibDone && _meshHandler != null && _meshHandler.IsDualQRMode)
+        {
+            Vector3 calibPos = GetRightControllerWorldPos();
+            if (!IsValidRegistrationPose(calibPos, out string calibRejectReason))
+            {
+                ShowManualRegisterRejected(_meshHandler.NextManualCalibLabel ?? "CALIB", calibRejectReason);
+                OvrHaptics.Pulse(this, 0.3f, 0.3f, 0.08f, OVRInput.Controller.RTouch);
+                return;
+            }
+            bool accepted = _meshHandler.TryManualCalibRegister(calibPos);
+            if (accepted)
+                OvrHaptics.Pulse(this, 0.5f, 0.8f, 0.2f, OVRInput.Controller.RTouch);
+            return;
+        }
+
+        if (nextMissing == null || _qrManager == null) return;
 
         Vector3    pos = GetRightControllerWorldPos();
         Quaternion rot = _ovrRig != null ? _ovrRig.rightHandAnchor.rotation : Quaternion.identity;
@@ -226,20 +228,11 @@ public class SetupCoordinator : MonoBehaviour
     }
 
 #if UNITY_ANDROID && !UNITY_EDITOR
-    // Maximum plausible distance from the headset (centre-eye) to the right controller while the
-    // Worker is physically touching a QR to register it — i.e. arm's reach. Beyond this the pose is
-    // almost certainly NOT "controller on the code" (e.g. a stray grip mid-gesture).
-    // FLAG: this is a usability sanity bound chosen by the implementer, NOT a measured research
-    // parameter. It is deliberately separate from (and far larger than) the 0.20 m identification
-    // ProximityThreshold, which was left untouched. Confirm/adjust with the experiment owner.
-    private const float MaxRegisterReach = 1.2f;   // metres
+    private const float k_gripThreshold    = OVRInputThresholds.Grip;
+    private const float k_maxRegisterReach = 1.2f;  // arm's reach plausibility guard (NOT the 20 cm identification threshold)
+    private bool         _gripWasDown;
+    private OVRCameraRig _ovrRig;
 
-    /// <summary>
-    /// Sanity-checks a manual-registration controller pose before it is recorded as a task-QR
-    /// position. Rejects NaN/Inf, the tracking origin (lost controller), and implausibly far poses.
-    /// Cannot validate ground truth (MRUK failed to detect the code, so there is no true pose to
-    /// compare against) — this only stops obviously corrupt data from poisoning the 20 cm test.
-    /// </summary>
     private bool IsValidRegistrationPose(Vector3 pos, out string reason)
     {
         if (float.IsNaN(pos.x)      || float.IsNaN(pos.y)      || float.IsNaN(pos.z) ||
@@ -257,7 +250,7 @@ public class SetupCoordinator : MonoBehaviour
         }
 
         Transform head = _ovrRig != null ? _ovrRig.centerEyeAnchor : null;
-        if (head != null && Vector3.Distance(pos, head.position) > MaxRegisterReach)
+        if (head != null && Vector3.Distance(pos, head.position) > k_maxRegisterReach)
         {
             reason = "QRにもっと近づけてください";
             return false;
@@ -275,9 +268,7 @@ public class SetupCoordinator : MonoBehaviour
         _workerHintLine.text  = msg;
         _workerHintLine.color = new Color(1f, 0.4f, 0.3f);
     }
-#endif
 
-#if UNITY_ANDROID && !UNITY_EDITOR
     private Vector3 GetRightControllerWorldPos()
     {
         if (_ovrRig == null) _ovrRig = Object.FindAnyObjectByType<OVRCameraRig>();
@@ -315,7 +306,13 @@ public class SetupCoordinator : MonoBehaviour
             }
             else if (!_calibDone)
             {
-                hintText = "QR-A と QR-B を見てください";
+                string cA = _meshHandler?.CalibQRColorA ?? "赤色の枠";
+                string cB = _meshHandler?.CalibQRColorB ?? "青色の枠";
+                bool needsA = _meshHandler == null
+                    || _meshHandler.CurrentDualCalibState == DualQRCalibState.NeedsA;
+                hintText = needsA
+                    ? CoGazeStrings.DualCalib_NeedsA(cA)
+                    : CoGazeStrings.DualCalib_NeedsB(cA, cB);
             }
             else
             {
@@ -446,11 +443,6 @@ public class SetupCoordinator : MonoBehaviour
 
     // ── Expert setup-readiness (Worker display) ─────────────────────────────
 
-    /// <summary>
-    /// Worker side: receive the Expert's granular setup-readiness (routed from SceneBootstrapper2 via
-    /// the "expertSetupReady" Photon player property) and reflect it on the setup panel. The panel is
-    /// only visible during Setup, so this is implicitly Setup-scoped.
-    /// </summary>
     public void SetExpertSetupReady(bool ready)
     {
         _expertSetupReady = ready;
@@ -504,8 +496,8 @@ public class SetupCoordinator : MonoBehaviour
         panelGo.transform.SetParent(canvasGo.transform, false);
         panelGo.AddComponent<Image>().color = new Color(0.04f, 0.06f, 0.20f, 0.92f);
         var rt = panelGo.GetComponent<RectTransform>();
-        rt.anchorMin = new Vector2(0.73f, 0.55f);
-        rt.anchorMax = new Vector2(0.99f, 0.93f);
+        rt.anchorMin = new Vector2(0.68f, 0.48f);
+        rt.anchorMax = new Vector2(0.97f, 0.92f);
         rt.offsetMin = rt.offsetMax = Vector2.zero;
         var pt = panelGo.transform;
 

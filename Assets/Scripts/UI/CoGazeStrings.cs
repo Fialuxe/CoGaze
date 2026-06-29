@@ -1,11 +1,4 @@
-/// <summary>
-/// All user-facing UI display strings for CoGaze, grouped by owner.
-///
-/// Previously split across five partial files (CoGazeStrings_Worker / _Expert2 /
-/// _Startup / _Experiment / _Debug). Consolidated into this single file so a string
-/// can be found in one place instead of guessing which partial holds it. Keep the
-/// `partial` keyword so any future per-feature split is still possible without churn.
-/// </summary>
+// All user-facing UI display strings for CoGaze, grouped by owner.
 public static partial class CoGazeStrings
 {
     // ═══════════════════════════════════════════════════════════════════════
@@ -154,7 +147,14 @@ public static partial class CoGazeStrings
     public const string Calib_Sent         = "✓ 送信完了";
 
     // ── Dual-QR automatic calibration steps ──────────────────────────────
-    public const string DualCalib_NeedsA   = "キャリブレーション: QR-A をスキャンしてください";
-    public const string DualCalib_NeedsB   = "✓ QR-A スキャン済  →  QR-B をスキャンしてください";
-    public const string DualCalib_Complete  = "✓ キャリブレーション完了！ Expert に送信しました";
+    // colorA/colorB = MeshHandler.CalibQRColorA/B (Inspector-set, e.g. "赤色の枠").
+    // These are methods (not consts) so the color label from the inspector flows through.
+    public static string DualCalib_NeedsA(string colorA) =>
+        $"[STEP 1/2] {colorA}のQRを正面から見てください\n" +
+        $"読み取れない場合は、{colorA}のQRに\nコントローラを当てて右グリップを押してください";
+    public static string DualCalib_NeedsB(string colorA, string colorB) =>
+        $"[OK] {colorA}のQR 完了\n" +
+        $"[STEP 2/2] {colorB}のQRを正面から見てください\n" +
+        $"読み取れない場合は、{colorB}のQRに\nコントローラを当てて右グリップを押してください";
+    public const string DualCalib_Complete = "✓ キャリブレーション完了！ Expert に送信しました";
 }

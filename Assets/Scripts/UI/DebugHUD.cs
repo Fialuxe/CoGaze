@@ -10,17 +10,12 @@ using Photon.Voice.PUN;
 using Meta.XR.MRUtilityKit;
 #endif
 
-/// <summary>
-/// In-headset diagnostic overlay for Meta Quest.
-/// Toggle on/off with Y button (left controller).
-/// Shows Photon state, room info, player roles, MRUK status, and recent warnings/errors.
-/// Works from app launch — independent of the experiment flow.
-/// </summary>
+// In-headset diagnostic overlay (Quest): toggle with Y, shows Photon/room/roles/MRUK/warnings — always active.
 public class DebugHUD : MonoBehaviour
 {
     private Canvas _canvas;
     private Text   _text;
-    private bool   _visible = false;
+    private bool   _visible;
 
     private readonly List<(float time, string msg)> _recentLogs = new List<(float, string)>();
     private const int   MaxLogs      = 10;
@@ -32,7 +27,7 @@ public class DebugHUD : MonoBehaviour
     // Long-press guard: Y button must be held for this many seconds to toggle the HUD.
     // Prevents accidental activation when the left controller Y button is brushed mid-task.
     private float _yHoldStart = -1f;
-    private const float YHoldRequired = 1.0f;
+    private const float k_yHoldRequired = 1.0f;
 
     // Voice (HMD→PC outgoing mic level via PV2 Recorder — no extra Microphone.Start, so no
     // Android mic contention) + QR detection feedback so testers can see both work in-headset.
@@ -91,7 +86,7 @@ public class DebugHUD : MonoBehaviour
             _yHoldStart = Time.time;
         if (OVRInput.GetUp(OVRInput.Button.Two, OVRInput.Controller.LTouch))
             _yHoldStart = -1f;
-        if (_yHoldStart >= 0f && Time.time - _yHoldStart >= YHoldRequired)
+        if (_yHoldStart >= 0f && Time.time - _yHoldStart >= k_yHoldRequired)
         {
             _yHoldStart = -1f;
             SetVisible(!_visible);

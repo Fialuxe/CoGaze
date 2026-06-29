@@ -3,15 +3,7 @@ using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.UI;
 
-/// <summary>
-/// Worker-only direct-touch ("touch panel") input for the questionnaire canvas.
-/// The user can poke a button with a fingertip (hand tracking via OVRSkeleton) or a
-/// controller tip — no laser/trigger required.
-///
-/// Self-contained and created at runtime by <see cref="QuestionnaireManager"/>. Reads the
-/// index-finger tip bone from any active OVRSkeleton and the controller anchors, and invokes
-/// a button's onClick when a poke point crosses into the panel over that button.
-/// </summary>
+// Worker-only direct-touch questionnaire input; poke a button with fingertip or controller tip, no laser required.
 public class QuestionnairePokeInput : MonoBehaviour
 {
     [Tooltip("Distance (m) from the panel plane within which a poke counts as a press.")]
@@ -28,7 +20,6 @@ public class QuestionnairePokeInput : MonoBehaviour
     // Per poke-point rising-edge tracking: the button it is currently pressing (null = none).
     private readonly Dictionary<int, Button> _pressing = new();
 
-    /// <summary>True while any poke point is near the panel — used to freeze head-follow.</summary>
     public bool IsEngaged { get; private set; }
 
     public void Configure(RectTransform canvas, OVRCameraRig rig)

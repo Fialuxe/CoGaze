@@ -25,7 +25,8 @@ public enum ExperimentState : byte
     Finished      = 5,
     TaskComplete  = 6,
     NoiseComplete = 7,
-    Setup         = 8
+    Setup         = 8,
+    Tutorial      = 9   // post-Setup gate: Expert runs participant tutorial, Enter to continue
 }
 
 public class ExperimentStep

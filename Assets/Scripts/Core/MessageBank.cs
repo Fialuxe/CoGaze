@@ -2,33 +2,20 @@ using System.Collections.Generic;
 using System.IO;
 using UnityEngine;
 
-/// <summary>
-/// Loads UI messages from StreamingAssets/ui_messages.txt at startup.
-/// Edit ui_messages.txt to change experiment messages without recompiling Unity.
-///
-/// Usage:
-///   MessageBank.Get("calib.pass")
-///   MessageBank.Format("calib.marginal", ("errX", "0.03"), ("errY", "0.04"))
-///   MessageBank.Format("ui.finished.detail", ("participantId", "P01"))
-/// </summary>
+// Loads UI messages from StreamingAssets/ui_messages.txt; edit the file to change strings without recompiling.
 public static class MessageBank
 {
-    private static readonly Dictionary<string, string> _messages = new();
-    private static bool _loaded;
+    private static readonly Dictionary<string, string> s_messages = new();
+    private static bool s_loaded;
 
     // ── Public API ─────────────────────────────────────────────────────────────
 
-    /// <summary>Get a message by key. Returns the key itself if not found.</summary>
     public static string Get(string key)
     {
         EnsureLoaded();
-        return _messages.TryGetValue(key, out var val) ? val : key;
+        return s_messages.TryGetValue(key, out var val) ? val : key;
     }
 
-    /// <summary>
-    /// Get a message and substitute {placeholder} values.
-    /// Example: Format("calib.marginal", ("errX", "0.03"), ("errY", "0.04"))
-    /// </summary>
     public static string Format(string key, params (string placeholder, string value)[] args)
     {
         string s = Get(key);
@@ -41,8 +28,8 @@ public static class MessageBank
 
     private static void EnsureLoaded()
     {
-        if (_loaded) return;
-        _loaded = true;  // set before load to prevent re-entry on error
+        if (s_loaded) return;
+        s_loaded = true;  // set before load to prevent re-entry on error
 
         string path = Path.Combine(Application.streamingAssetsPath, "ui_messages.txt");
 
@@ -62,7 +49,7 @@ public static class MessageBank
         try
         {
             Parse(File.ReadAllText(path, System.Text.Encoding.UTF8));
-            Debug.Log($"[MessageBank] Loaded {_messages.Count} messages from ui_messages.txt");
+            Debug.Log($"[MessageBank] Loaded {s_messages.Count} messages from ui_messages.txt");
         }
         catch (System.Exception ex)
         {
@@ -83,7 +70,7 @@ public static class MessageBank
 
             string key = line.Substring(0, eq).Trim();
             string val = line.Substring(eq + 1).Trim().Replace("\\n", "\n");
-            _messages[key] = val;
+            s_messages[key] = val;
         }
     }
 }

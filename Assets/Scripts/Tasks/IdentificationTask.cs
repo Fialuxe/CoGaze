@@ -17,12 +17,13 @@ public class IdentificationTask : MonoBehaviourPun
 
     public const string QR_CALIB_PREFIX = "QR_CALIB";
 
-    private ExperimentManager2 experimentManager2;
+    private ExperimentManager2 _experimentManager2;
     public string CompletedMarkerId { get; private set; }
     public string CurrentTargetId   { get; private set; }
     public int    Score             { get; private set; }
+    public int    MissCount         { get; private set; }
 
-    private bool             _workerInitDone = false;
+    private bool             _workerInitDone;
     private QRSpatialManager _qrManager;
 
     private bool IsWorker => RoleManager.LocalRole == RoleManager.ROLE_WORKER;
@@ -30,21 +31,21 @@ public class IdentificationTask : MonoBehaviourPun
 #if UNITY_ANDROID && !UNITY_EDITOR
     // Answer = right-hand GRIP near the target QR (matches participant briefing video).
     // Calibration uses the index TRIGGER (MeshHandler) — inputs never overlap.
-    private const float GripThreshold      = OVRInputThresholds.Grip;
-    private const float ProximityThreshold = 0.20f; // 20 cm
-    private bool         _gripWasDown      = false;
+    private const float k_gripThreshold      = OVRInputThresholds.Grip;
+    private const float k_proximityThreshold = 0.20f; // 20 cm
+    private bool        _gripWasDown;
     private OVRCameraRig _ovrRig;
 #endif
 
     private void Start()
     {
-        experimentManager2 = Object.FindAnyObjectByType<ExperimentManager2>();
-        if (experimentManager2 == null)
+        _experimentManager2 = Object.FindAnyObjectByType<ExperimentManager2>();
+        if (_experimentManager2 == null)
         {
             Debug.LogError("[IdentificationTask] ExperimentManager2 not found in scene.");
             return;
         }
-        experimentManager2.OnStateChanged += OnStateChanged;
+        _experimentManager2.OnStateChanged += OnStateChanged;
         SetTaskEnabled(false);
     }
 
@@ -61,15 +62,15 @@ public class IdentificationTask : MonoBehaviourPun
 
     private void OnDestroy()
     {
-        if (experimentManager2 != null)
-            experimentManager2.OnStateChanged -= OnStateChanged;
+        if (_experimentManager2 != null)
+            _experimentManager2.OnStateChanged -= OnStateChanged;
     }
 
     private void OnStateChanged(ExperimentState newState)
     {
         EnsureWorkerInit();
         bool shouldRun = newState == ExperimentState.TaskRunning
-                      && experimentManager2.CurrentStepType == StepType.Task;
+                      && _experimentManager2.CurrentStepType == StepType.Task;
         if (shouldRun) StartTask();
         else           EndTask();
     }
@@ -78,6 +79,7 @@ public class IdentificationTask : MonoBehaviourPun
     {
         Debug.Log("[IdentificationTask] StartTask");
         Score             = 0;
+        MissCount         = 0;
         CurrentTargetId   = null;
         CompletedMarkerId = null;
         OnQRStateChanged?.Invoke(true);
@@ -139,7 +141,7 @@ public class IdentificationTask : MonoBehaviourPun
         if (!IsWorker) return;
 
         float grip        = OVRInput.Get(OVRInput.Axis1D.PrimaryHandTrigger, OVRInput.Controller.RTouch);
-        bool  gripDown    = grip > GripThreshold;
+        bool  gripDown    = grip > k_gripThreshold;
         bool  justPressed = gripDown && !_gripWasDown;
         _gripWasDown = gripDown;
 
@@ -152,7 +154,7 @@ public class IdentificationTask : MonoBehaviourPun
 
         Vector3 controllerPos = GetRightControllerWorldPos();
         string nearestId   = null;
-        float  nearestDist = ProximityThreshold;
+        float  nearestDist = k_proximityThreshold;
         foreach (var kvp in _qrManager.DetectedMarkers)
         {
             if (kvp.Key.StartsWith(QR_CALIB_PREFIX)) continue;
@@ -163,7 +165,7 @@ public class IdentificationTask : MonoBehaviourPun
 
         if (nearestId == null)
         {
-            Debug.Log($"[IdentificationTask] Grip: no QR within {ProximityThreshold * 100:F0} cm.");
+            Debug.Log($"[IdentificationTask] Grip: no QR within {k_proximityThreshold * 100:F0} cm.");
             return;
         }
 
@@ -203,7 +205,8 @@ public class IdentificationTask : MonoBehaviourPun
     [PunRPC]
     private void RPC_WrongHit(string targetId, string grippedId, int currentScore)
     {
-        Debug.Log($"[IdentificationTask] ✗ Wrong: '{grippedId}' (target='{targetId}', score={currentScore})");
+        MissCount++;
+        Debug.Log($"[IdentificationTask] ✗ Wrong: '{grippedId}' (target='{targetId}', score={currentScore}, miss={MissCount})");
         OnIdentificationAttempt?.Invoke(targetId, grippedId, false, currentScore);
     }
 

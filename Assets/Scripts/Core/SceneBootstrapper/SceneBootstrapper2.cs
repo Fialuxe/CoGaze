@@ -12,19 +12,7 @@ using POpusCodec.Enums;
 using ExitGames.Client.Photon;
 using Hashtable = ExitGames.Client.Photon.Hashtable;
 
-/// <summary>
-/// Entry point for ExperimentScene (10-condition design).
-/// Mirrors SceneBootstrapper but uses ExperimentManager2, WorkerHUD2, ExpertUI2.
-///
-/// Pre-place in scene:
-///   [Bootstrapper] with this script
-///   OVRCameraRigSetup (building blocks prefab)
-///   [Managers]/ExperimentManager  → ExperimentManager2 + AudioSource
-///   [Managers]/QRSpatialManager   → QRSpatialManager + PhotonView
-///   [Managers]/QuestionnaireManager → QuestionnaireManager + PhotonView
-///   [Tasks]/IdentificationTask    → IdentificationTask + PhotonView
-///   [Tasks]/AssemblyTask          → AssemblyTask (grid positioned via QR)
-/// </summary>
+// Entry point for ExperimentScene (10-condition design); uses ExperimentManager2, WorkerHUD2, ExpertUI2.
 public class SceneBootstrapper2 : MonoBehaviourPunCallbacks, IOnEventCallback
 {
     [Header("Participant")]
@@ -41,16 +29,16 @@ public class SceneBootstrapper2 : MonoBehaviourPunCallbacks, IOnEventCallback
 #if UNITY_EDITOR
     [Header("Editor Debug")]
     [Tooltip("Force Worker role in Play Mode for testing without Android build.")]
-    [SerializeField] private bool _editorForceWorkerRole = false;
+    [SerializeField] private bool _editorForceWorkerRole;
 #endif
 
-    private const string WORKER_PREFAB = "Prefabs/LocalWorker";
-    private const string EXPERT_PREFAB = "Prefabs/RemoteExpert";
+    private const string k_workerPrefab = "Prefabs/LocalWorker";
+    private const string k_expertPrefab = "Prefabs/RemoteExpert";
 
-    private NetworkManager     networkManager;
+    private NetworkManager     _networkManager;
     private string             _role;
-    private bool               _setupDone        = false;
-    private bool               _offlineMode      = false;
+    private bool               _setupDone;
+    private bool               _offlineMode;
     private string             _selectedMic      = "";
     private WorkerVideoStream  _videoStream;      // Worker side — for WebRTC signaling
     private ExpertVideoDisplay _videoDisplay;     // Expert side — for WebRTC signaling
@@ -69,6 +57,11 @@ public class SceneBootstrapper2 : MonoBehaviourPunCallbacks, IOnEventCallback
         // and rolls the Worker back to "setup". Idempotent; harmless on PC.
         Screen.sleepTimeout = SleepTimeout.NeverSleep;
 
+        // SpeakerPrefab をルーム参加より前に修正する。OnRoomJoined でも設定しているが、
+        // リモートプレイヤーの PhotonVoiceView.Start() が同フレームに走ると間に合わないため
+        // ここで早期に上書きする。
+        FixSpeakerPrefab();
+
         // OVRCameraRig already provides an AudioListener; remove extras to prevent
         // "2 audio listeners" console spam every frame at startup.
         var allListeners = FindObjectsByType<AudioListener>(FindObjectsSortMode.None);
@@ -83,9 +76,9 @@ public class SceneBootstrapper2 : MonoBehaviourPunCallbacks, IOnEventCallback
         gameObject.AddComponent<UnityLogCapture>();
         FileLogger.Log("Setup", $"[FileLogger] {logPath}");
         var nmObj = new GameObject("NetworkManager");
-        networkManager = nmObj.AddComponent<NetworkManager>();
-        networkManager.OnRoomJoined          += OnRoomJoined;
-        networkManager.OnNetworkDisconnected += OnPhotonDisconnected;
+        _networkManager = nmObj.AddComponent<NetworkManager>();
+        _networkManager.OnRoomJoined          += OnRoomJoined;
+        _networkManager.OnNetworkDisconnected += OnPhotonDisconnected;
         StartCoroutine(StartupFlow());
         FileLogger.Log("Setup", "[SceneBootstrapper2] Starting startup flow...");
     }
@@ -136,7 +129,26 @@ public class SceneBootstrapper2 : MonoBehaviourPunCallbacks, IOnEventCallback
         }
         else
         {
-            networkManager.Connect();
+            _networkManager.Connect();
+        }
+    }
+
+    // SpeakerPrefab の型不一致 (InvalidCastException in InstantiateSpeakerPrefab) を防ぐ。
+    // PunVoiceClient の Inspector 参照が誤型になっていることがあるため、Resources から上書きする。
+    // Awake と OnRoomJoined の両方から呼ぶことでタイミング問題を回避。
+    private void FixSpeakerPrefab()
+    {
+        var pvc = FindAnyObjectByType<PunVoiceClient>();
+        if (pvc == null) return;
+        var spk = Resources.Load<GameObject>("Speaker");
+        if (spk != null)
+        {
+            pvc.SpeakerPrefab = spk;
+            FileLogger.Log("Setup", "[SceneBootstrapper2] PunVoiceClient.SpeakerPrefab assigned from Resources/Speaker.");
+        }
+        else
+        {
+            FileLogger.Log("Setup", "[SceneBootstrapper2] Resources.Load<GameObject>(\"Speaker\") returned null; voice playback will be silent.");
         }
     }
 
@@ -150,24 +162,8 @@ public class SceneBootstrapper2 : MonoBehaviourPunCallbacks, IOnEventCallback
 
         // Connect PunVoiceClient after PUN room join to avoid "Provide an AppId" error
         // that occurs when AutoConnectAndJoin fires before Photon Realtime is connected.
+        FixSpeakerPrefab(); // Awake でも設定済みだが念のため再設定
         var pvc = FindAnyObjectByType<PunVoiceClient>();
-        if (pvc != null)
-        {
-            // Assign a known-good Speaker prefab in code so remote voice is audible on both
-            // Android (where SpeakerPrefab is null) and Editor (where the Inspector reference is
-            // wrong-typed and throws InvalidCastException in InstantiateSpeakerPrefab()).
-            // The PV2 demo prefab lives under a Resources/ folder, so it resolves by name.
-            var spk = Resources.Load<GameObject>("Speaker");
-            if (spk != null)
-            {
-                pvc.SpeakerPrefab = spk;
-                FileLogger.Log("Setup", "[SceneBootstrapper2] PunVoiceClient.SpeakerPrefab assigned from Resources/Speaker.");
-            }
-            else
-            {
-                FileLogger.Log("Setup", "[SceneBootstrapper2] Resources.Load<GameObject>(\"Speaker\") returned null; voice playback will be silent.");
-            }
-        }
         if (pvc != null && !pvc.Client.IsConnected)
         {
             FileLogger.Log("Setup", "[SceneBootstrapper2] Connecting PunVoiceClient after room join.");
@@ -247,15 +243,6 @@ public class SceneBootstrapper2 : MonoBehaviourPunCallbacks, IOnEventCallback
 
     // ── Main setup ────────────────────────────────────────────────────────
 
-    /// <summary>
-    /// Resolves the microphone device explicitly per platform instead of trusting the
-    /// persisted config blindly.
-    /// - Worker (Quest/Android): the headset has exactly one capture device, so always use it
-    ///   (Microphone.devices[0] = "Android audio input"). A PC device name accidentally left in
-    ///   the Quest config would otherwise select a non-existent device → silent PV2.
-    /// - Expert (PC): honour the StartupUI choice, but only if that device still exists; else
-    ///   fall back to the system default (devices[0]).
-    /// </summary>
     private string ResolveMicDevice()
     {
         var devices = Microphone.devices;
@@ -291,10 +278,10 @@ public class SceneBootstrapper2 : MonoBehaviourPunCallbacks, IOnEventCallback
         if (_offlineMode)
         {
             // Offline: instantiate locally, skip Photon ownership check
-            var prefab = Resources.Load<GameObject>(isExpert ? EXPERT_PREFAB : WORKER_PREFAB);
+            var prefab = Resources.Load<GameObject>(isExpert ? k_expertPrefab : k_workerPrefab);
             if (prefab == null)
             {
-                Debug.LogError($"[SceneBootstrapper2] Prefab not found: {(isExpert ? EXPERT_PREFAB : WORKER_PREFAB)}");
+                Debug.LogError($"[SceneBootstrapper2] Prefab not found: {(isExpert ? k_expertPrefab : k_workerPrefab)}");
                 yield break;
             }
             playerObj = Instantiate(prefab, Vector3.zero, Quaternion.identity);
@@ -302,10 +289,10 @@ public class SceneBootstrapper2 : MonoBehaviourPunCallbacks, IOnEventCallback
         else
         {
             playerObj = PhotonNetwork.Instantiate(
-                isExpert ? EXPERT_PREFAB : WORKER_PREFAB, Vector3.zero, Quaternion.identity);
+                isExpert ? k_expertPrefab : k_workerPrefab, Vector3.zero, Quaternion.identity);
             if (playerObj == null)
             {
-                Debug.LogError($"[SceneBootstrapper2] PhotonNetwork.Instantiate returned null for {(isExpert ? EXPERT_PREFAB : WORKER_PREFAB)}");
+                Debug.LogError($"[SceneBootstrapper2] PhotonNetwork.Instantiate returned null for {(isExpert ? k_expertPrefab : k_workerPrefab)}");
                 yield break;
             }
             var view = playerObj.GetComponent<PhotonView>();
@@ -433,13 +420,6 @@ public class SceneBootstrapper2 : MonoBehaviourPunCallbacks, IOnEventCallback
             ApplyExpertSetupReady(srb);
     }
 
-    /// <summary>
-    /// Expert side: publish ExperimentManager2.IsExpertSelfReady to the Worker as the Photon player
-    /// property "expertSetupReady" (Worker shows 実験者 準備中/準備完了). That flag flips asynchronously
-    /// after SetupExpert (instruction template load + first OSC pong) and there is no event for it in
-    /// this class, so poll it. Idempotent — only SetCustomProperties when the value actually changes.
-    /// The flag is monotonic (false→true once), so stop polling once true has been published.
-    /// </summary>
     private IEnumerator PublishExpertSetupReadyLoop(ExperimentManager2 expMgr)
     {
         var wait = new WaitForSeconds(0.5f);
@@ -574,10 +554,10 @@ public class SceneBootstrapper2 : MonoBehaviourPunCallbacks, IOnEventCallback
     {
         PhotonNetwork.RemoveCallbackTarget(this);
 
-        if (networkManager != null)
+        if (_networkManager != null)
         {
-            networkManager.OnRoomJoined          -= OnRoomJoined;
-            networkManager.OnNetworkDisconnected -= OnPhotonDisconnected;
+            _networkManager.OnRoomJoined          -= OnRoomJoined;
+            _networkManager.OnNetworkDisconnected -= OnPhotonDisconnected;
         }
 
 #if UNITY_ANDROID && !UNITY_EDITOR

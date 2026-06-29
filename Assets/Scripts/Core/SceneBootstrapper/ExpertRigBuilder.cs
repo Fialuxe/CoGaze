@@ -6,10 +6,7 @@ using Photon.Voice.Unity;
 using POpusCodec.Enums;
 using Hashtable = ExitGames.Client.Photon.Hashtable;
 
-/// <summary>
-/// Configures the Expert role's rig (components, input, audio, video) on the local player GameObject.
-/// Called once by SceneBootstrapper2.SetupExpert; returns the handles the shell must retain.
-/// </summary>
+// Configures Expert rig (input, audio, video) on the local player GameObject; called once by SceneBootstrapper2.SetupExpert.
 internal static class ExpertRigBuilder
 {
     internal struct Result

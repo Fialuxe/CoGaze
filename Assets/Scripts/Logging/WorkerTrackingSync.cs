@@ -4,32 +4,17 @@ using Photon.Pun;
 using ExitGames.Client.Photon;
 using Hashtable = ExitGames.Client.Photon.Hashtable;
 
-/// <summary>
-/// Runs on the Worker (Quest 3) and continuously publishes head and controller
-/// world-space poses to Photon Custom Player Properties so the Expert can read
-/// them without extra PhotonViews or RPCs.
-///
-/// Property keys (all string "x,y,z" in InvariantCulture):
-///   "hPos"  — head (center-eye) world position
-///   "hFwd"  — head (center-eye) world forward direction
-///   "rCtrl" — right controller world position (falls back to left if unavailable)
-///
-/// Added to the Worker GameObject by SceneBootstrapper2.SetupWorker().
-/// </summary>
+// Publishes Worker head/controller poses to Photon Custom Player Properties at ~15 Hz.
 public class WorkerTrackingSync : MonoBehaviour
 {
     // ── Tunables ─────────────────────────────────────────────────────────────
 
-    /// <summary>Maximum send rate in Hz.  At 72-90 Hz Quest render rate we never
-    /// want to saturate the Photon room message limit (~30/s per client).</summary>
     [Tooltip("Maximum sends per second to Photon. Keep below 20.")]
     public float maxSendRate = 15f;
 
-    /// <summary>Minimum position delta (metres) before a send is triggered.</summary>
     [Tooltip("Position change threshold in metres.")]
     public float posThreshold = 0.01f;   // 1 cm
 
-    /// <summary>Forward dot-product threshold.  A dot < this triggers a resend.</summary>
     [Tooltip("Forward direction change threshold (dot product). 0.999 ≈ 2.6°.")]
     public float fwdDotThreshold = 0.999f;
 
@@ -122,8 +107,7 @@ public class WorkerTrackingSync : MonoBehaviour
 
     // ── Helpers ───────────────────────────────────────────────────────────────
 
-    /// <summary>Serialise to "x,y,z" with InvariantCulture so comma-separators
-    /// are unambiguous regardless of the device locale.</summary>
+    // InvariantCulture ensures "x,y,z" stays unambiguous regardless of device locale.
     private static string FmtVec(Vector3 v) =>
         string.Format(CultureInfo.InvariantCulture, "{0:F4},{1:F4},{2:F4}", v.x, v.y, v.z);
 }

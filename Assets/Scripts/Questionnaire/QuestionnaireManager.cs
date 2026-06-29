@@ -6,27 +6,6 @@ using UnityEngine.UI;
 using UnityEngine.EventSystems;   // EventSystem, BaseInputModule, OVRInputModule (Meta XR Core declares OVRInputModule in this namespace)
 using Photon.Pun;
 
-/// <summary>
-/// Manages NASA-TLX (post-condition) and SSQ (post-experiment) questionnaires
-/// for the Worker (Quest 3).
-///
-/// WIRING REQUIREMENTS:
-/// - Attach this script to a GameObject that also has a PhotonView.
-///   Either place it on a scene object with a fixed ViewID, or use
-///   PhotonNetwork.Instantiate so both clients own the same view.
-/// - VR pointer input is set up automatically at runtime on the Worker:
-///   an OVRRaycaster is added to the canvas, and an EventSystem carrying an
-///   OVRInputModule (rayTransform = active controller anchor, click = trigger)
-///   is created/reused so the buttons receive controller-laser pointer events on
-///   Quest. Direct-touch (poke) input is also set up. No scene wiring is required.
-///
-/// Usage (called by SceneBootstrapper2):
-///   questionnaireManager.participantNumber = participantNumber;
-///   questionnaireManager.ShowNASATLX(conditionIndex, conditionName);
-///   questionnaireManager.ShowSSQ();
-///   // subscribe:
-///   questionnaireManager.OnQuestionnaireComplete += () => { ... };
-/// </summary>
 [RequireComponent(typeof(PhotonView))]
 public class QuestionnaireManager : MonoBehaviourPun
 {
@@ -49,17 +28,9 @@ public class QuestionnaireManager : MonoBehaviourPun
 
     // ─── Public API ───────────────────────────────────────────────────────────
 
-    /// <summary>Fired on ALL clients when the Worker submits any questionnaire round.</summary>
-    public event Action OnQuestionnaireComplete;
-
-    /// <summary>
-    /// Fired on ALL clients exactly once per questionnaire submission (NASA-TLX, SSQ, SUS —
-    /// every survey that is finalized/saved here). ExperimentManager2 (Agent 1) subscribes to
-    /// this to gate the Finished/thanks screen on SSQ completion. Raised from
-    /// RPC_QuestionnaireComplete alongside OnQuestionnaireComplete (do NOT also raise it from
-    /// the local submit path, or RpcTarget.All would double-fire on the Worker).
-    /// </summary>
-    public event System.Action OnSurveySubmitted;
+    public event Action              OnQuestionnaireComplete;
+    // Raised via RpcTarget.All only (not locally) — ExperimentManager2 gates Finished screen on this.
+    public event System.Action       OnSurveySubmitted;
 
     // ─── NASA-TLX dimensions (SINGLE SOURCE OF TRUTH — CQ 2-6) ────────────────
     //
@@ -81,10 +52,10 @@ public class QuestionnaireManager : MonoBehaviourPun
     }
 
     // Number of int fields on NasaScores. The assert in SubmitCurrentRound fails LOUDLY
-    // if NasaDimensions ever stops matching this, rather than writing misaligned data.
-    private const int NasaScoresFieldCount = 6;
+    // if s_nasaDimensions ever stops matching this, rather than writing misaligned data.
+    private const int k_nasaScoresFieldCount = 6;
 
-    private static readonly NasaDimension[] NasaDimensions =
+    private static readonly NasaDimension[] s_nasaDimensions =
     {
         new NasaDimension(
             "Mental Demand（精神的要求）\n" +
@@ -131,19 +102,19 @@ public class QuestionnaireManager : MonoBehaviourPun
 
     // Display labels, DERIVED from the single source above so the UI can index them
     // cheaply while remaining impossible to reorder independently of the field mapping.
-    private static readonly string[] NasaLabels = BuildNasaLabels();
+    private static readonly string[] s_nasaLabels = Builds_nasaLabels();
 
-    private static string[] BuildNasaLabels()
+    private static string[] Builds_nasaLabels()
     {
-        var labels = new string[NasaDimensions.Length];
-        for (int i = 0; i < NasaDimensions.Length; i++)
-            labels[i] = NasaDimensions[i].Label;
+        var labels = new string[s_nasaDimensions.Length];
+        for (int i = 0; i < s_nasaDimensions.Length; i++)
+            labels[i] = s_nasaDimensions[i].Label;
         return labels;
     }
 
     // ─── SSQ label strings ────────────────────────────────────────────────────
 
-    private static readonly string[] SsqLabels =
+    private static readonly string[] s_ssqLabels =
     {
         "General discomfort (全般的不快感)",
         "Fatigue (疲労)",
@@ -220,8 +191,8 @@ public class QuestionnaireManager : MonoBehaviourPun
 
     private QuestionnaireRoot _data;
     private string            _saveFilePath;    // computed lazily on first SaveJson
-    private bool              _isVisible    = false;
-    private Transform         _camTransform = null;
+    private bool              _isVisible;
+    private Transform         _camTransform;
 
     // ─── Condition-panel item model (NASA ×2 tasks + gaze constructs + accuracy MC) ──
     // Every item in a condition panel is a 0-6 / 7-button rating; only the label and the
@@ -271,6 +242,10 @@ public class QuestionnaireManager : MonoBehaviourPun
     private QuestionnairePokeInput  _poke;       // direct-touch ("touch panel") input
     private GameObject             _pokeGo;
 
+    // Reticle dot: small crosshair shown on the canvas at the controller ray hit point.
+    private Transform      _controllerAnchor;
+    private RectTransform  _reticleRt;
+
     // ─── Lifecycle ────────────────────────────────────────────────────────────
 
     private void Awake()
@@ -292,23 +267,17 @@ public class QuestionnaireManager : MonoBehaviourPun
     // ─── Public show / hide ───────────────────────────────────────────────────
 
     // Scale-direction hints (set per item — NASA is high=bad, gaze constructs are high=good).
-    private const string NasaScaleHint =
+    private const string k_nasaScaleHint =
         "← 低 / 良い   0 — 1 — 2 — 3 — 4 — 5 — 6   高 / 悪い →";
-    private const string ComprehensionScaleHint =
+    private const string k_comprehensionScaleHint =
         "← 分からなかった   0 — 1 — 2 — 3 — 4 — 5 — 6   はっきり分かった →";
-    private const string UsefulnessScaleHint =
+    private const string k_usefulnessScaleHint =
         "← 役に立たなかった   0 — 1 — 2 — 3 — 4 — 5 — 6   非常に役立った →";
-    private const string AccuracyScaleHint =
+    private const string k_accuracyScaleHint =
         "← 不正確・不安定   0 — 1 — 2 — 3 — 4 — 5 — 6   正確・安定 →";
-    private const string NasaSection = "作業負荷について (NASA-TLX)";
-    private const string GazeSection = "課題と視線について";
+    private const string k_nasaSection = "作業負荷について (NASA-TLX)";
+    private const string k_gazeSection = "課題と視線について";
 
-    /// <summary>
-    /// Show the post-condition survey panel for the Worker: NASA-TLX ×2 (identification +
-    /// assembly) plus the gaze constructs — comprehension for every condition; usefulness and
-    /// the accuracy manipulation-check only when gaze is presented. 17 items for gaze
-    /// conditions, 14 for NoGaze. Method name kept for existing callers. No-op on Expert.
-    /// </summary>
     public void ShowNASATLX(int conditionIndex, string conditionName)
     {
         if (RoleManager.LocalRole != RoleManager.ROLE_WORKER) return;
@@ -354,12 +323,12 @@ public class QuestionnaireManager : MonoBehaviourPun
 
     private static void AddNasaBlock(List<PanelItem> items, PanelTask task, string taskPrefix)
     {
-        for (int dim = 0; dim < NasaLabels.Length; dim++)
+        for (int dim = 0; dim < s_nasaLabels.Length; dim++)
             items.Add(new PanelItem
             {
-                Label        = $"{taskPrefix}\n{NasaLabels[dim]}",
-                ScaleHint    = NasaScaleHint,
-                Section      = NasaSection,
+                Label        = $"{taskPrefix}\n{s_nasaLabels[dim]}",
+                ScaleHint    = k_nasaScaleHint,
+                Section      = k_nasaSection,
                 Construct    = PanelConstruct.Nasa,
                 Task         = task,
                 NasaDimIndex = dim,
@@ -375,8 +344,8 @@ public class QuestionnaireManager : MonoBehaviourPun
         return new PanelItem
         {
             Label     = $"{prefix}\n{body}\n0 = 分からなかった ・ 3 = どちらともいえない ・ 6 = はっきり分かった",
-            ScaleHint = ComprehensionScaleHint,
-            Section   = GazeSection,
+            ScaleHint = k_comprehensionScaleHint,
+            Section   = k_gazeSection,
             Construct = PanelConstruct.Comprehension,
             Task      = task,
         };
@@ -391,8 +360,8 @@ public class QuestionnaireManager : MonoBehaviourPun
         return new PanelItem
         {
             Label     = $"{prefix}\n{body}\n0 = 役に立たなかった ・ 6 = 非常に役立った",
-            ScaleHint = UsefulnessScaleHint,
-            Section   = GazeSection,
+            ScaleHint = k_usefulnessScaleHint,
+            Section   = k_gazeSection,
             Construct = PanelConstruct.Usefulness,
             Task      = task,
         };
@@ -401,22 +370,18 @@ public class QuestionnaireManager : MonoBehaviourPun
     private static PanelItem MakeAccuracyMC() => new PanelItem
     {
         Label     = "【この条件全体】\nエキスパートの視線提示は、対象をどの程度「正確・安定して」指していましたか\n0 = まったく不正確・不安定 ・ 6 = 非常に正確・安定",
-        ScaleHint = AccuracyScaleHint,
-        Section   = GazeSection,
+        ScaleHint = k_accuracyScaleHint,
+        Section   = k_gazeSection,
         Construct = PanelConstruct.AccuracyMC,
         Task      = PanelTask.Condition,
     };
 
-    /// <summary>
-    /// Show SSQ (16 items, 0-3 scale) after all conditions end.
-    /// No-op on Expert client.
-    /// </summary>
     public void ShowSSQ()
     {
         if (RoleManager.LocalRole != RoleManager.ROLE_WORKER) return;
 
         _currentMode = Mode.SSQ;
-        _answers     = new int[SsqLabels.Length];
+        _answers     = new int[s_ssqLabels.Length];
 
         EnsureCanvas();
         SetupVRPointer();                                // controller-laser clicks
@@ -425,7 +390,6 @@ public class QuestionnaireManager : MonoBehaviourPun
         SetVisible(true);
     }
 
-    /// <summary>Hide the questionnaire panel (e.g. experiment aborted).</summary>
     public void Hide()
     {
         SetVisible(false);
@@ -450,6 +414,35 @@ public class QuestionnaireManager : MonoBehaviourPun
 
         _canvasGo.transform.position = Vector3.Lerp(_canvasGo.transform.position, targetPos, Time.deltaTime * 3f);
         _canvasGo.transform.rotation = Quaternion.Slerp(_canvasGo.transform.rotation, targetRot, Time.deltaTime * 3f);
+
+        // Update reticle position: project controller ray onto the canvas plane.
+        UpdateReticle();
+    }
+
+    private void UpdateReticle()
+    {
+        if (_reticleRt == null || _controllerAnchor == null || _canvasGo == null) return;
+
+        Ray   ray   = new Ray(_controllerAnchor.position, _controllerAnchor.forward);
+        Plane plane = new Plane(-_canvasGo.transform.forward, _canvasGo.transform.position);
+
+        if (plane.Raycast(ray, out float dist) && dist > 0.05f && dist < 5f)
+        {
+            Vector3 worldHit  = ray.GetPoint(dist);
+            // InverseTransformPoint converts world coords to canvas local-unit coords.
+            // Because the canvas has scale = panelScaleM, the result is already in canvas units.
+            Vector3 localHit3 = _canvasGo.transform.InverseTransformPoint(worldHit);
+            var     canvasRt  = _canvasGo.GetComponent<RectTransform>();
+            Vector2 half      = canvasRt.sizeDelta * 0.5f;
+
+            if (Mathf.Abs(localHit3.x) <= half.x && Mathf.Abs(localHit3.y) <= half.y)
+            {
+                _reticleRt.anchoredPosition = new Vector2(localHit3.x, localHit3.y);
+                _reticleRt.gameObject.SetActive(true);
+                return;
+            }
+        }
+        _reticleRt.gameObject.SetActive(false);
     }
 
     private void OnDestroy()
@@ -548,14 +541,6 @@ public class QuestionnaireManager : MonoBehaviourPun
 
     // ─── VR pointer (Worker only) ─────────────────────────────────────────────
 
-    /// <summary>
-    /// Ensure the questionnaire canvas can receive controller-laser pointer clicks:
-    ///  1. Make sure the canvas has an OVRRaycaster (so OVRInputModule can hit it).
-    ///  2. Reuse or create exactly ONE EventSystem carrying an OVRInputModule, with
-    ///     rayTransform pointed at the active controller anchor and the click bound
-    ///     to the index trigger.
-    /// Idempotent and self-contained — safe to call every time the panel is shown.
-    /// </summary>
     private void SetupVRPointer()
     {
         if (_canvasGo == null) return;
@@ -644,8 +629,25 @@ public class QuestionnaireManager : MonoBehaviourPun
             if (anchor != null) _ovrInputModule.rayTransform = anchor;
         }
 
-        // 3) Visible laser line — DISABLED. The laser was confusing and did not operate
-        // reliably; the questionnaire is now touch-only (QuestionnaireLaserInput removed).
+        // 3) Reticle dot: a small white square that follows the controller ray on the canvas
+        //    so the subject always knows where they are pointing without a distracting laser.
+        if (camRig != null)
+        {
+            Transform anchor = null;
+            if (camRig.rightControllerAnchor != null) anchor = camRig.rightControllerAnchor;
+            else if (camRig.leftControllerAnchor  != null) anchor = camRig.leftControllerAnchor;
+            _controllerAnchor = anchor;
+        }
+        if (_reticleRt == null && _canvasGo != null)
+        {
+            var rGo = new GameObject("PointerReticle");
+            rGo.transform.SetParent(_canvasGo.transform, false);
+            _reticleRt = rGo.AddComponent<RectTransform>();
+            _reticleRt.sizeDelta = new Vector2(18f, 18f);
+            var img = rGo.AddComponent<Image>();
+            img.color = new Color(1f, 1f, 1f, 0.85f);
+            rGo.SetActive(false);
+        }
 
         // 4) Direct-touch ("touch panel") input — poke buttons with a fingertip or controller tip.
         if (_pokeGo == null)
@@ -657,13 +659,11 @@ public class QuestionnaireManager : MonoBehaviourPun
         _pokeGo.SetActive(true);
     }
 
-    /// <summary>
-    /// Deactivate poke input and re-enable any input modules we suspended.
-    /// The EventSystem / OVRInputModule may be shared, so it is left in
-    /// place (OVRInputModule.Awake also installs a static singleton).
-    /// </summary>
     private void TeardownVRPointer()
     {
+        if (_reticleRt != null) _reticleRt.gameObject.SetActive(false);
+        _controllerAnchor = null;
+
         if (_pokeGo != null) _pokeGo.SetActive(false);
 
         // Disable our OVR module BEFORE re-enabling the scene's own module(s), so
@@ -679,10 +679,6 @@ public class QuestionnaireManager : MonoBehaviourPun
         }
     }
 
-    /// <summary>
-    /// Rebuild the score button row + Next/Submit button for the current questionnaire type.
-    /// Destroys the previous row so it is safe to call multiple times.
-    /// </summary>
     private void BuildItemLayout(int maxScore, int buttonCount)
     {
         if (_buttonRow != null) { Destroy(_buttonRow); _buttonRow = null; }
@@ -742,7 +738,7 @@ public class QuestionnaireManager : MonoBehaviourPun
         // ── Scale hint below buttons (17-25 %) ──
         // Stored so ShowItem can set it PER ITEM: NASA items are high=bad, gaze items are
         // high=good, and a single fixed hint would mislabel one of them (the old UX landmine).
-        string defaultHint = maxScore == 6 ? NasaScaleHint : "← なし   0 — 1 — 2 — 3   ひどく →";
+        string defaultHint = maxScore == 6 ? k_nasaScaleHint : "← なし   0 — 1 — 2 — 3   ひどく →";
         _scaleHintText = MakeText("ScaleHint", _canvasGo.transform,
             new Vector2(0.04f, 0.17f), new Vector2(0.96f, 0.25f),
             defaultHint, 13, TextAnchor.MiddleCenter, new Color(0.65f, 0.65f, 0.65f));
@@ -783,7 +779,7 @@ public class QuestionnaireManager : MonoBehaviourPun
         _selectedScore = -1;
 
         bool      isCondPanel = _currentMode == Mode.ConditionPanel;
-        int       total       = isCondPanel ? _panelItems.Count : SsqLabels.Length;
+        int       total       = isCondPanel ? _panelItems.Count : s_ssqLabels.Length;
         bool      isLast       = (index == total - 1);
         PanelItem item         = isCondPanel ? _panelItems[index] : null;
 
@@ -812,7 +808,7 @@ public class QuestionnaireManager : MonoBehaviourPun
 
         // Question text
         if (_itemText != null)
-            _itemText.text = isCondPanel ? item.Label : SsqLabels[index];
+            _itemText.text = isCondPanel ? item.Label : s_ssqLabels[index];
 
         // Reset score buttons
         HighlightScore(-1);
@@ -841,7 +837,7 @@ public class QuestionnaireManager : MonoBehaviourPun
     {
         if (_selectedScore < 0) return;   // guard: no selection yet
 
-        int total     = _currentMode == Mode.ConditionPanel ? _panelItems.Count : SsqLabels.Length;
+        int total     = _currentMode == Mode.ConditionPanel ? _panelItems.Count : s_ssqLabels.Length;
         int nextIndex = _itemIndex + 1;
 
         if (nextIndex < total)
@@ -890,11 +886,11 @@ public class QuestionnaireManager : MonoBehaviourPun
             if (_panelItems[i].Task == PanelTask.Identification) idNasa++;
             else if (_panelItems[i].Task == PanelTask.Assembly)  asNasa++;
         }
-        if (NasaDimensions.Length != NasaScoresFieldCount || _answers.Length != _panelItems.Count ||
-            idNasa != NasaScoresFieldCount || asNasa != NasaScoresFieldCount)
+        if (s_nasaDimensions.Length != k_nasaScoresFieldCount || _answers.Length != _panelItems.Count ||
+            idNasa != k_nasaScoresFieldCount || asNasa != k_nasaScoresFieldCount)
         {
-            string msg = $"Condition-panel mapping mismatch: dims={NasaDimensions.Length}, " +
-                         $"fields={NasaScoresFieldCount}, idNasa={idNasa}, asNasa={asNasa}, " +
+            string msg = $"Condition-panel mapping mismatch: dims={s_nasaDimensions.Length}, " +
+                         $"fields={k_nasaScoresFieldCount}, idNasa={idNasa}, asNasa={asNasa}, " +
                          $"items={_panelItems.Count}, answers={_answers.Length}. Aborting save.";
             Debug.LogError($"[QuestionnaireManager] {msg}");
             FileLogger.Log("Questionnaire", $"ABORT {msg}");
@@ -913,7 +909,7 @@ public class QuestionnaireManager : MonoBehaviourPun
             int ans  = _answers[i];
             if (item.Construct == PanelConstruct.Nasa)
             {
-                NasaDimensions[item.NasaDimIndex].Assign(
+                s_nasaDimensions[item.NasaDimIndex].Assign(
                     item.Task == PanelTask.Identification ? idScores : asScores, ans);
             }
             else
@@ -1020,12 +1016,6 @@ public class QuestionnaireManager : MonoBehaviourPun
         photonView.RPC(nameof(RPC_QuestionnaireComplete), RpcTarget.All);
     }
 
-    /// <summary>
-    /// Surface a save failure to the operator/subject: keep the panel visible, show a bright
-    /// error on the title, and relabel the action button so the round can be re-submitted.
-    /// Combined with the FileLogger SAVE FAILED entry this converts the whole class of silent
-    /// questionnaire-save failures into something detectable (CQ11).
-    /// </summary>
     private void ShowSaveError(string detail)
     {
         Debug.LogError($"[QuestionnaireManager] SAVE ERROR surfaced to operator: {detail}");
@@ -1052,11 +1042,6 @@ public class QuestionnaireManager : MonoBehaviourPun
         _data.timestamp = DateTime.Now.ToString("yyyy-MM-ddTHH:mm:ss");
     }
 
-    /// <summary>
-    /// Persist the cumulative questionnaire JSON to the HMD, then forward a backup copy to the
-    /// Expert. Returns true only if the LOCAL write succeeded; callers must NOT advance the
-    /// experiment on false (CQ11 / 2-5). The Expert copy is still attempted as a backup either way.
-    /// </summary>
     private bool SaveJson()
     {
         EnsureSavePath();
@@ -1117,10 +1102,6 @@ public class QuestionnaireManager : MonoBehaviourPun
 
     // ─── Photon RPC ──────────────────────────────────────────────────────────
 
-    /// <summary>
-    /// Called on ALL clients (RpcTarget.All) when the Worker submits a round.
-    /// ExperimentManager2 subscribes to OnQuestionnaireComplete to advance.
-    /// </summary>
     [PunRPC]
     private void RPC_QuestionnaireComplete()
     {
@@ -1129,11 +1110,6 @@ public class QuestionnaireManager : MonoBehaviourPun
         OnSurveySubmitted?.Invoke();   // Agent 1 (ExperimentManager2) gates the Finished screen on this
     }
 
-    /// <summary>
-    /// Received by the Expert (PC) each time the Worker saves a questionnaire snapshot.
-    /// Writes the JSON to the PC's data directory so researchers can access it without ADB.
-    /// The file is overwritten on each submit, so only the final cumulative JSON persists.
-    /// </summary>
     [PunRPC]
     private void RPC_ForwardQuestionnaireJson(string json, string pid)
     {
@@ -1204,7 +1180,6 @@ public class QuestionnaireManager : MonoBehaviourPun
         return go;
     }
 
-    /// <summary>Creates a legacy Text component. Prefers <see cref="japaneseFont"/> for CJK support.</summary>
     private Text MakeText(string name, Transform parent,
                           Vector2 anchorMin, Vector2 anchorMax,
                           string defaultText, int fontSize,

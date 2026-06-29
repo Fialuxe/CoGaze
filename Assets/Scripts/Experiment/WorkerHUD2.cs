@@ -37,15 +37,15 @@ public class WorkerHUD2 : MonoBehaviour
     public float alertDistance  = 1.0f;
     public float lookAtAngleDeg = 15f;
 
-    private Image backgroundImage;
-    private Text  connStatusText;
-    private Text  stateText;
-    private Text  timerText;
+    private Image _backgroundImage;
+    private Text  _connStatusText;
+    private Text  _stateText;
+    private Text  _timerText;
 
-    private GameObject alertMarkerGo;
-    private bool       alertActive        = false;
-    private bool       taskTimerExpired   = false;
-    private float      alertActivatedTime = -1f;
+    private GameObject _alertMarkerGo;
+    private bool       _alertActive;
+    private bool       _taskTimerExpired;
+    private float      _alertActivatedTime = -1f;
 
     // ── Breathing guide ───────────────────────────────────────────────────
     private GameObject _breathGo;
@@ -56,16 +56,16 @@ public class WorkerHUD2 : MonoBehaviour
     private Texture2D  _discTex;
     private float      _breathPhase;
     private bool       _breathingActive;
-    private const float BreathCycle = 8f;
+    private const float k_breathCycle = 8f;
 
-    private Transform          cameraAnchor;
-    private ExperimentManager2 manager;
+    private Transform          _cameraAnchor;
+    private ExperimentManager2 _manager;
 
     // UX: calibration indicator
     private Text  _calibText;
-    private bool  _calibTutorialShown = false;
+    private bool  _calibTutorialShown;
 
-    // Setup state rows — shown only during ExperimentState.Setup; replace stateText/timerText.
+    // Setup state rows — shown only during ExperimentState.Setup; replace _stateText/_timerText.
     // Filled by SetupCoordinator via UpdateSetupStatus().
     private Text _setupCalibText;
     private Text _setupTaskText;
@@ -84,23 +84,26 @@ public class WorkerHUD2 : MonoBehaviour
     private Text               _countdownText;
     private ExperimentState    _prevState = ExperimentState.Setup;
 
+    // Gaze availability indicator
+    private Text           _gazeStatusText;
+    private GazeVisualizer _gazeVisualizer;
+    private bool           _lastGazeAvailable = false;
+
     public void Initialize(ExperimentManager2 experimentManager)
     {
-        manager = experimentManager;
+        _manager = experimentManager;
         BuildHUD();
+        _gazeVisualizer = FindAnyObjectByType<GazeVisualizer>();
 
-        manager.OnStateChanged       += HandleStateChanged;
-        manager.OnInstructionChanged += HandleInstructionChanged;
-        manager.OnProgressChanged    += HandleProgressChanged;
+        _manager.OnStateChanged       += HandleStateChanged;
+        _manager.OnInstructionChanged += HandleInstructionChanged;
+        _manager.OnProgressChanged    += HandleProgressChanged;
+        _manager.OnCountdownTick      += HandleCountdownTick;
 
-        if (manager != null)
-            HandleStateChanged(manager.CurrentState);
+        if (_manager != null)
+            HandleStateChanged(_manager.CurrentState);
     }
 
-    /// <summary>
-    /// Wire up calibration feedback. Call after Initialize() once MeshHandler is available.
-    /// UX improvement 1: HUD row, 2: haptic confirmation.
-    /// </summary>
     public void ConnectMeshHandler(MeshHandler meshHandler)
     {
         if (meshHandler == null) return;
@@ -145,15 +148,17 @@ public class WorkerHUD2 : MonoBehaviour
     private void OnDualQRCalibStep(DualQRCalibState step)
     {
         if (_calibText == null) return;
+        string cA = _meshHandler?.CalibQRColorA ?? "赤色の枠";
+        string cB = _meshHandler?.CalibQRColorB ?? "青色の枠";
         switch (step)
         {
             case DualQRCalibState.NeedsA:
                 _calibText.gameObject.SetActive(true);
-                _calibText.text = CoGazeStrings.DualCalib_NeedsA;
+                _calibText.text = CoGazeStrings.DualCalib_NeedsA(cA);
                 break;
             case DualQRCalibState.NeedsB:
                 _calibText.gameObject.SetActive(true);
-                _calibText.text = CoGazeStrings.DualCalib_NeedsB;
+                _calibText.text = CoGazeStrings.DualCalib_NeedsB(cA, cB);
                 break;
             case DualQRCalibState.Complete:
                 StartCoroutine(FlashDualCalibComplete());
@@ -219,10 +224,6 @@ public class WorkerHUD2 : MonoBehaviour
         _calibText.text = CoGazeStrings.Calib_FullHint;
     }
 
-    /// <summary>
-    /// UX improvement 2: haptic pulse + flash "送信完了" on confirm.
-    /// Call from SceneBootstrapper2 after ConnectMeshHandler.
-    /// </summary>
     public void OnCalibrationConfirmed()
     {
 #if UNITY_ANDROID && !UNITY_EDITOR
@@ -247,9 +248,6 @@ public class WorkerHUD2 : MonoBehaviour
         _calibText.gameObject.SetActive(false);
     }
 
-    /// <summary>
-    /// UX improvement 3: update state text based on identification task QR scan state.
-    /// </summary>
     public void ConnectIdentificationTask(IdentificationTask task)
     {
         if (task == null) return;
@@ -257,13 +255,13 @@ public class WorkerHUD2 : MonoBehaviour
         // Stored in a field (not an inline lambda) so OnDestroy can unsubscribe it.
         _qrHandler = qrFound =>
         {
-            if (manager == null || manager.CurrentState != ExperimentState.TaskRunning) return;
+            if (_manager == null || _manager.CurrentState != ExperimentState.TaskRunning) return;
             if (qrFound)
             {
                 // Target armed (IdentificationTask fires this at task start): green instruction +
                 // a light haptic tick on the answer hand as a "ready to point" cue. Use the NoGaze
                 // variant in the control condition so the instruction matches the absent indicator.
-                bool noGaze = manager.CurrentGazeMode == GazeMode.None;
+                bool noGaze = _manager.CurrentGazeMode == GazeMode.None;
                 SetState(noGaze ? CoGazeStrings.Worker_QRFoundNoGaze : CoGazeStrings.Worker_QRFound,
                          new Color(0.3f, 1f, 0.5f));
 #if UNITY_ANDROID && !UNITY_EDITOR
@@ -287,48 +285,49 @@ public class WorkerHUD2 : MonoBehaviour
         };
         task.OnCorrectGrip += _idDoneHandler;
 
-        // Live score display: update stateText to show running count after each correct answer.
-        // Worker must NEVER see targetId — only score is shown.
+        // Update _stateText when target changes to keep QR-state message current.
+        // Worker must NEVER see targetId or score.
         _idScoreHandler = (_, score) =>
         {
-            if (manager == null || manager.CurrentState != ExperimentState.TaskRunning) return;
-            if (stateText == null) return;
-            bool noGaze  = manager.CurrentGazeMode == GazeMode.None;
-            string base2 = noGaze ? CoGazeStrings.Worker_QRFoundNoGaze : CoGazeStrings.Worker_QRFound;
-            stateText.text = $"{base2}\n{CoGazeStrings.Worker_ScoreFormat(score)}";
+            if (_manager == null || _manager.CurrentState != ExperimentState.TaskRunning) return;
+            if (_stateText == null) return;
+            bool noGaze  = _manager.CurrentGazeMode == GazeMode.None;
+            _stateText.text = noGaze ? CoGazeStrings.Worker_QRFoundNoGaze : CoGazeStrings.Worker_QRFound;
         };
         task.OnTargetChanged += _idScoreHandler;
     }
 
     private System.Collections.IEnumerator FlashIdentifyConfirm()
     {
-        if (stateText == null) yield break;
-        Color orig = stateText.color;
-        stateText.color = new Color(0.3f, 1f, 0.5f);
+        if (_stateText == null) yield break;
+        Color orig = _stateText.color;
+        _stateText.color = new Color(0.3f, 1f, 0.5f);
         yield return new WaitForSeconds(0.5f);
-        if (stateText != null) stateText.color = orig;
+        if (_stateText != null) _stateText.color = orig;
     }
 
-    private System.Collections.IEnumerator ShowCountdown()
+    private void HandleCountdownTick(int tick)
     {
-        if (_countdownText == null) yield break;
-        var steps = new (string label, float wait)[] { ("3", 1f), ("2", 1f), ("1", 1f), ("GO！", 0.8f) };
+        if (_countdownText == null) return;
         _countdownText.gameObject.SetActive(true);
-        foreach (var (label, wait) in steps)
-        {
-            _countdownText.text = label;
-            yield return new UnityEngine.WaitForSeconds(wait);
-        }
-        _countdownText.gameObject.SetActive(false);
+        _countdownText.text = tick == 0 ? "GO！" : tick.ToString();
+        if (tick == 0) StartCoroutine(HideCountdownDelayed());
+    }
+
+    private System.Collections.IEnumerator HideCountdownDelayed()
+    {
+        yield return new UnityEngine.WaitForSeconds(0.8f);
+        if (_countdownText != null) _countdownText.gameObject.SetActive(false);
     }
 
     private void OnDestroy()
     {
-        if (manager != null)
+        if (_manager != null)
         {
-            manager.OnStateChanged       -= HandleStateChanged;
-            manager.OnInstructionChanged -= HandleInstructionChanged;
-            manager.OnProgressChanged    -= HandleProgressChanged;
+            _manager.OnStateChanged       -= HandleStateChanged;
+            _manager.OnInstructionChanged -= HandleInstructionChanged;
+            _manager.OnProgressChanged    -= HandleProgressChanged;
+            _manager.OnCountdownTick      -= HandleCountdownTick;
         }
         // MeshHandler/IdentificationTask survive a HUD teardown (e.g. reconnect), so leaving
         // these subscribed would leak and double-fire into the destroyed HUD.
@@ -348,19 +347,32 @@ public class WorkerHUD2 : MonoBehaviour
         // explicitly — otherwise a reconnect would leave a frozen, orphaned canvas in the scene.
         if (_hudCanvas != null) Destroy(_hudCanvas.gameObject);
         if (_breathGo  != null) Destroy(_breathGo);
-        if (alertMarkerGo != null) Destroy(alertMarkerGo);
+        if (_alertMarkerGo != null) Destroy(_alertMarkerGo);
         if (_discTex != null) Destroy(_discTex);
     }
 
     private void Update()
     {
-        if (manager == null) return;
+        if (_manager == null) return;
 
         RefreshConnectionStatus();
         RefreshTimer();
         RefreshAlertBillboard();
         PositionHud(instant: false);
         if (_breathingActive) AnimateBreathing();
+
+        // Gaze availability indicator — only show when Expert is connected but Python stream is missing
+        if (_gazeStatusText != null && _gazeVisualizer != null)
+        {
+            bool isFallback = _gazeVisualizer.IsGazeFallback;
+            if (isFallback != _lastGazeAvailable)
+            {
+                _lastGazeAvailable = isFallback;
+                _gazeStatusText.gameObject.SetActive(isFallback);
+                _gazeStatusText.text  = "GAZE: FALLBACK";
+                _gazeStatusText.color = new Color(1f, 0.6f, 0f);
+            }
+        }
     }
 
     // UX6: comfort-anchor the world-space HUD. Follows head position + yaw only (ignores pitch/roll)
@@ -368,14 +380,14 @@ public class WorkerHUD2 : MonoBehaviour
     // sweeping across it when the subject looks down to assemble.
     private void PositionHud(bool instant)
     {
-        if (_hudCanvas == null || cameraAnchor == null) return;
+        if (_hudCanvas == null || _cameraAnchor == null) return;
 
-        Vector3 fwd = Vector3.ProjectOnPlane(cameraAnchor.forward, Vector3.up);
+        Vector3 fwd = Vector3.ProjectOnPlane(_cameraAnchor.forward, Vector3.up);
         if (fwd.sqrMagnitude < 1e-4f) fwd = Vector3.forward;
         else                          fwd.Normalize();
 
         Vector3 right = Vector3.Cross(Vector3.up, fwd);   // head's right, on the horizontal plane
-        Vector3 target = cameraAnchor.position
+        Vector3 target = _cameraAnchor.position
                        + fwd          * hudOffset.z
                        + right        * hudOffset.x
                        + Vector3.up   * hudOffset.y;
@@ -398,29 +410,38 @@ public class WorkerHUD2 : MonoBehaviour
     {
         if (_setupCalibText != null) _setupCalibText.gameObject.SetActive(show);
         if (_setupTaskText  != null) _setupTaskText.gameObject.SetActive(show);
-        if (_setupHintText  != null) _setupHintText.gameObject.SetActive(show);
-        if (stateText       != null) stateText.gameObject.SetActive(!show);
-        if (timerText       != null) timerText.gameObject.SetActive(!show);
+        if (_setupHintText  != null)
+        {
+            // DualQRキャリブ中は _calibText に詳細指示が出るので、再表示されても二重にしない
+            bool dualCalibPending = show && _meshHandler != null && _meshHandler.IsDualQRMode
+                && _meshHandler.CurrentDualCalibState != DualQRCalibState.Complete;
+            _setupHintText.gameObject.SetActive(show && !dualCalibPending);
+        }
+        if (_stateText  != null) _stateText.gameObject.SetActive(!show);
+        if (_timerText  != null) _timerText.gameObject.SetActive(!show);
     }
 
-    /// <summary>
-    /// Called by SetupCoordinator each time setup state changes (calib complete, task QR detected,
-    /// expert ready). Ignored unless the current experiment state is Setup.
-    /// </summary>
     public void UpdateSetupStatus(bool calibDone, int taskDetected, int taskTotal, string hintText, bool expertReady)
     {
-        if (manager?.CurrentState != ExperimentState.Setup) return;
+        if (_manager?.CurrentState != ExperimentState.Setup) return;
 
-        if (connStatusText != null)
+        // DualQRキャリブ中は _calibText に詳細指示が出るので _setupCalibText/_setupHintText を隠して二重表示を防ぐ
+        bool dualCalibPending = _meshHandler != null && _meshHandler.IsDualQRMode && !calibDone;
+
+        if (_connStatusText != null)
         {
-            connStatusText.text  = expertReady ? CoGazeStrings.Worker_ExpertReady : CoGazeStrings.Worker_ExpertPreparing;
-            connStatusText.color = expertReady ? new Color(0.3f, 1f, 0.5f) : new Color(1f, 0.85f, 0.3f);
+            _connStatusText.text  = expertReady ? CoGazeStrings.Worker_ExpertReady : CoGazeStrings.Worker_ExpertPreparing;
+            _connStatusText.color = expertReady ? new Color(0.3f, 1f, 0.5f) : new Color(1f, 0.85f, 0.3f);
         }
 
         if (_setupCalibText != null)
         {
-            _setupCalibText.text  = $"{(calibDone ? "[OK]" : "[--]")} キャリブレーション";
-            _setupCalibText.color = calibDone ? new Color(0.3f, 1f, 0.5f) : Color.white;
+            _setupCalibText.gameObject.SetActive(!dualCalibPending);
+            if (!dualCalibPending)
+            {
+                _setupCalibText.text  = $"{(calibDone ? "[OK]" : "[--]")} キャリブレーション";
+                _setupCalibText.color = calibDone ? new Color(0.3f, 1f, 0.5f) : Color.white;
+            }
         }
 
         bool taskDone = taskDetected >= taskTotal;
@@ -432,19 +453,20 @@ public class WorkerHUD2 : MonoBehaviour
 
         if (_setupHintText != null)
         {
-            _setupHintText.text  = hintText;
-            _setupHintText.color = hintText.StartsWith("[OK]")
-                ? new Color(0.3f, 1f, 0.5f)
-                : new Color(1f, 0.85f, 0.3f);
+            _setupHintText.gameObject.SetActive(!dualCalibPending);
+            if (!dualCalibPending)
+            {
+                _setupHintText.text  = hintText;
+                _setupHintText.color = hintText.StartsWith("[OK]")
+                    ? new Color(0.3f, 1f, 0.5f)
+                    : new Color(1f, 0.85f, 0.3f);
+            }
         }
     }
 
-    /// <summary>
-    /// Temporarily overrides the hint row with a red error message (e.g., registration rejected).
-    /// </summary>
     public void ShowSetupError(string message)
     {
-        if (_setupHintText == null || manager?.CurrentState != ExperimentState.Setup) return;
+        if (_setupHintText == null || _manager?.CurrentState != ExperimentState.Setup) return;
         _setupHintText.text  = message;
         _setupHintText.color = new Color(1f, 0.4f, 0.3f);
     }
@@ -453,14 +475,14 @@ public class WorkerHUD2 : MonoBehaviour
 
     private void RefreshConnectionStatus()
     {
-        if (connStatusText == null) return;
-        // During Setup, connStatusText is owned by UpdateSetupStatus (fed by SetupCoordinator).
-        if (manager != null && manager.CurrentState == ExperimentState.Setup) return;
+        if (_connStatusText == null) return;
+        // During Setup, _connStatusText is owned by UpdateSetupStatus (fed by SetupCoordinator).
+        if (_manager != null && _manager.CurrentState == ExperimentState.Setup) return;
 
         if (!PhotonNetwork.IsConnected)
         {
-            connStatusText.text  = CoGazeStrings.Worker_ConnDisconnected;
-            connStatusText.color = Color.red;
+            _connStatusText.text  = CoGazeStrings.Worker_ConnDisconnected;
+            _connStatusText.color = Color.red;
             return;
         }
 
@@ -473,22 +495,22 @@ public class WorkerHUD2 : MonoBehaviour
 
         if (expertOnline)
         {
-            connStatusText.text  = CoGazeStrings.Worker_ConnExpertOnline;
-            connStatusText.color = new Color(0.3f, 1f, 0.5f);
+            _connStatusText.text  = CoGazeStrings.Worker_ConnExpertOnline;
+            _connStatusText.color = new Color(0.3f, 1f, 0.5f);
         }
         else
         {
-            connStatusText.text  = CoGazeStrings.Worker_ConnExpertWaiting;
-            connStatusText.color = Color.yellow;
+            _connStatusText.text  = CoGazeStrings.Worker_ConnExpertWaiting;
+            _connStatusText.color = Color.yellow;
         }
     }
 
     private void RefreshTimer()
     {
-        if (timerText == null || manager == null) return;
+        if (_timerText == null || _manager == null) return;
 
-        float rem   = manager.RemainingSeconds;
-        var   state = manager.CurrentState;
+        float rem   = _manager.RemainingSeconds;
+        var   state = _manager.CurrentState;
 
         switch (state)
         {
@@ -498,12 +520,12 @@ public class WorkerHUD2 : MonoBehaviour
                 break;
 
             case ExperimentState.TaskRunning:
-                timerText.text  = FormatTime(rem);
-                timerText.color = rem < 5f ? Color.red : Color.white;
+                _timerText.text  = FormatTime(rem);
+                _timerText.color = rem < 5f ? Color.red : Color.white;
 
-                if (rem <= 0f && !taskTimerExpired)
+                if (rem <= 0f && !_taskTimerExpired)
                 {
-                    taskTimerExpired = true;
+                    _taskTimerExpired = true;
                     ShowAlert();
                 }
                 break;
@@ -515,15 +537,15 @@ public class WorkerHUD2 : MonoBehaviour
 
     private void RefreshAlertBillboard()
     {
-        if (!alertActive || cameraAnchor == null || alertMarkerGo == null) return;
-        if (Time.time - alertActivatedTime < 0.5f) return;
+        if (!_alertActive || _cameraAnchor == null || _alertMarkerGo == null) return;
+        if (Time.time - _alertActivatedTime < 0.5f) return;
 
-        Vector3 d = (cameraAnchor.position - alertMarkerGo.transform.position).normalized;
+        Vector3 d = (_cameraAnchor.position - _alertMarkerGo.transform.position).normalized;
         if (d != Vector3.zero)
-            alertMarkerGo.transform.rotation = Quaternion.LookRotation(d, Vector3.up);
+            _alertMarkerGo.transform.rotation = Quaternion.LookRotation(d, Vector3.up);
 
-        Vector3 toMarker = (alertMarkerGo.transform.position - cameraAnchor.position).normalized;
-        if (Vector3.Angle(cameraAnchor.forward, toMarker) < lookAtAngleDeg)
+        Vector3 toMarker = (_alertMarkerGo.transform.position - _cameraAnchor.position).normalized;
+        if (Vector3.Angle(_cameraAnchor.forward, toMarker) < lookAtAngleDeg)
             DismissAlert();
     }
 
@@ -532,8 +554,8 @@ public class WorkerHUD2 : MonoBehaviour
 #pragma warning disable CS0618
         var rig = Object.FindObjectOfType<OVRCameraRig>();
 #pragma warning restore CS0618
-        cameraAnchor = rig != null ? rig.centerEyeAnchor : Camera.main?.transform;
-        if (cameraAnchor == null)
+        _cameraAnchor = rig != null ? rig.centerEyeAnchor : Camera.main?.transform;
+        if (_cameraAnchor == null)
         {
             Debug.LogWarning("[WorkerHUD2] No camera anchor found - HUD will not be shown.");
             return;
@@ -555,8 +577,8 @@ public class WorkerHUD2 : MonoBehaviour
 
         var bgGo = new GameObject("BG");
         bgGo.transform.SetParent(go.transform, false);
-        backgroundImage = bgGo.AddComponent<Image>();
-        backgroundImage.color = new Color(0.04f, 0.06f, 0.20f, 0.50f);
+        _backgroundImage = bgGo.AddComponent<Image>();
+        _backgroundImage.color = new Color(0.04f, 0.06f, 0.20f, 0.50f);
         StretchFill(bgGo.GetComponent<RectTransform>());
 
         var accent    = new GameObject("Accent");
@@ -567,15 +589,15 @@ public class WorkerHUD2 : MonoBehaviour
         art.anchorMin = Vector2.zero; art.anchorMax = new Vector2(0f, 1f);
         art.offsetMin = Vector2.zero; art.offsetMax = new Vector2(4f, 0f);
 
-        connStatusText = MakeText("ConnStatus", go.transform,
+        _connStatusText = MakeText("ConnStatus", go.transform,
             new Vector2(0.05f, 0.74f), new Vector2(0.98f, 0.98f),
             CoGazeStrings.Worker_ConnChecking, 20, TextAnchor.MiddleLeft, Color.yellow);
 
-        stateText = MakeText("StateText", go.transform,
+        _stateText = MakeText("StateText", go.transform,
             new Vector2(0.05f, 0.38f), new Vector2(0.98f, 0.76f),
             CoGazeStrings.Worker_StateIdle, 22, TextAnchor.MiddleLeft, new Color(0.6f, 0.9f, 1f));
 
-        timerText = MakeText("TimerText", go.transform,
+        _timerText = MakeText("TimerText", go.transform,
             new Vector2(0.05f, 0.02f), new Vector2(0.98f, 0.40f),
             CoGazeStrings.Worker_TimerEmpty, 28, TextAnchor.MiddleCenter, Color.white);
 
@@ -583,7 +605,7 @@ public class WorkerHUD2 : MonoBehaviour
         MakeDivider(go.transform, 0.74f);
 
         // Setup view: calib + task status + instructions (visible only during Setup state).
-        // These overlay the stateText/timerText area; both sets are never shown simultaneously.
+        // These overlay the _stateText/_timerText area; both sets are never shown simultaneously.
         _setupCalibText = MakeText("SetupCalibLine", go.transform,
             new Vector2(0.05f, 0.60f), new Vector2(0.98f, 0.73f),
             "[--] キャリブレーション", 20, TextAnchor.MiddleLeft, Color.white);
@@ -614,6 +636,12 @@ public class WorkerHUD2 : MonoBehaviour
             "", 90, TextAnchor.MiddleCenter, new Color(1f, 0.85f, 0.1f));
         _countdownText.gameObject.SetActive(false);
 
+        // Gaze status indicator (bottom-right of HUD) — hidden when gaze is OK
+        _gazeStatusText = MakeText("GazeStatusText", go.transform,
+            new Vector2(0.5f, 0f), new Vector2(1f, 0.15f),
+            "", 18, TextAnchor.LowerRight, new Color(1f, 0.6f, 0f));
+        _gazeStatusText.gameObject.SetActive(false);
+
         Debug.Log("[WorkerHUD2] HUD built successfully.");
     }
 
@@ -632,42 +660,42 @@ public class WorkerHUD2 : MonoBehaviour
 
     private void BuildAlertMarker()
     {
-        if (cameraAnchor == null) return;
-        alertMarkerGo = new GameObject("WorkerHUD2_AlertMarker");
-        alertMarkerGo.transform.position = cameraAnchor.position + cameraAnchor.forward;
+        if (_cameraAnchor == null) return;
+        _alertMarkerGo = new GameObject("WorkerHUD2_AlertMarker");
+        _alertMarkerGo.transform.position = _cameraAnchor.position + _cameraAnchor.forward;
 
-        var mc = alertMarkerGo.AddComponent<Canvas>();
+        var mc = _alertMarkerGo.AddComponent<Canvas>();
         mc.renderMode = RenderMode.WorldSpace;
-        alertMarkerGo.GetComponent<RectTransform>().sizeDelta = new Vector2(160f, 160f);
-        alertMarkerGo.transform.localScale = Vector3.one * 0.002f;
+        _alertMarkerGo.GetComponent<RectTransform>().sizeDelta = new Vector2(160f, 160f);
+        _alertMarkerGo.transform.localScale = Vector3.one * 0.002f;
 
         var bgGo = new GameObject("AlertBG");
-        bgGo.transform.SetParent(alertMarkerGo.transform, false);
+        bgGo.transform.SetParent(_alertMarkerGo.transform, false);
         bgGo.AddComponent<Image>().color = new Color(0f, 0f, 0f, 0.70f);
         StretchFill(bgGo.GetComponent<RectTransform>());
 
-        MakeText("Excl", alertMarkerGo.transform,
+        MakeText("Excl", _alertMarkerGo.transform,
             new Vector2(0.05f, 0.05f), new Vector2(0.95f, 0.95f),
             CoGazeStrings.Worker_AlertExclamation, 110, TextAnchor.MiddleCenter, new Color(1f, 0.85f, 0.1f));
 
-        alertMarkerGo.SetActive(false);
+        _alertMarkerGo.SetActive(false);
     }
 
     private void HandleStateChanged(ExperimentState state)
     {
+        // Re-enable the HUD canvas on every state transition; the Questionnaire case
+        // will hide it again when needed, keeping the default "visible" contract intact.
+        if (_hudCanvas != null) _hudCanvas.gameObject.SetActive(true);
+
         HideBreathGuide();
         ShowSetupRows(state == ExperimentState.Setup);
 
         if (state != ExperimentState.TaskRunning)
         {
-            taskTimerExpired = false;
+            _taskTimerExpired = false;
             DismissAlert();
         }
 
-        // 3-2-1-GO countdown: fires once when Setup transitions to Idle (first setup approval).
-        // Worker starts a local coroutine here; the Expert's countdown is driven by OnCountdownTick.
-        if (state == ExperimentState.Idle && _prevState == ExperimentState.Setup)
-            StartCoroutine(ShowCountdown());
         _prevState = state;
 
         switch (state)
@@ -696,7 +724,7 @@ public class WorkerHUD2 : MonoBehaviour
 
             case ExperimentState.TaskRunning:
                 SetState(CoGazeStrings.Worker_TaskRunning, new Color(0.6f, 0.9f, 1f));
-                SetTimer(FormatTime(manager.RemainingSeconds), Color.white);
+                SetTimer(FormatTime(_manager.RemainingSeconds), Color.white);
                 SetPanelMode(true);
                 break;
 
@@ -713,7 +741,22 @@ public class WorkerHUD2 : MonoBehaviour
                 break;
 
             case ExperimentState.Questionnaire:
-                SetState(CoGazeStrings.Worker_Questionnaire, new Color(0.4f, 0.8f, 1f));
+                // Hide the HUD entirely during the actual questionnaire to avoid canvas overlap.
+                // Operator-gated sub-steps (ConditionStart, Alignment, Rest) keep the HUD visible.
+                if (_manager != null && _manager.CurrentStepType == StepType.Questionnaire)
+                {
+                    if (_hudCanvas != null) _hudCanvas.gameObject.SetActive(false);
+                }
+                else
+                {
+                    SetState(CoGazeStrings.Worker_Questionnaire, new Color(0.4f, 0.8f, 1f));
+                    SetTimer(CoGazeStrings.Worker_TimerEmpty, Color.white);
+                    SetPanelMode(true);
+                }
+                break;
+
+            case ExperimentState.Tutorial:
+                SetState("チュートリアル中", new Color(0.7f, 0.9f, 1f));
                 SetTimer(CoGazeStrings.Worker_TimerEmpty, Color.white);
                 SetPanelMode(true);
                 break;
@@ -734,16 +777,16 @@ public class WorkerHUD2 : MonoBehaviour
 
     private void HandleProgressChanged(int stepIdx, int totalSteps, StepType stepType)
     {
-        var state = manager != null ? manager.CurrentState : ExperimentState.Idle;
+        var state = _manager != null ? _manager.CurrentState : ExperimentState.Idle;
         if (state == ExperimentState.TaskComplete ||
             state == ExperimentState.NoiseComplete ||
             state == ExperimentState.Finished)
             return;
 
-        int runPos    = manager != null ? manager.CurrentConditionRunPosition : -1;
+        int runPos    = _manager != null ? _manager.CurrentConditionRunPosition : -1;
         int condTotal = ExperimentDesign.Conditions.Length;
         string condLabel = runPos >= 0 ? $"[条件 {runPos + 1}/{condTotal}] " : "";
-        bool noGaze = manager != null && manager.CurrentGazeMode == GazeMode.None;
+        bool noGaze = _manager != null && _manager.CurrentGazeMode == GazeMode.None;
 
         switch (stepType)
         {
@@ -768,7 +811,7 @@ public class WorkerHUD2 : MonoBehaviour
 
             case StepType.Assembly:
             {
-                string fileInstr    = !noGaze && manager != null ? manager.GetInstruction(stepIdx) : null;
+                string fileInstr    = !noGaze && _manager != null ? _manager.GetInstruction(stepIdx) : null;
                 string assemblyText = !string.IsNullOrEmpty(fileInstr)
                     ? condLabel + fileInstr
                     : condLabel + (noGaze
@@ -785,7 +828,7 @@ public class WorkerHUD2 : MonoBehaviour
             case StepType.ConditionStart:
             {
                 // Template LocalInstruction already includes "【条件 X/10】" — no condLabel prefix.
-                string fileInstrCS = manager != null ? manager.GetInstruction(stepIdx) : null;
+                string fileInstrCS = _manager != null ? _manager.GetInstruction(stepIdx) : null;
                 string csText = !string.IsNullOrEmpty(fileInstrCS)
                     ? fileInstrCS
                     : (runPos >= 0 ? $"条件 {runPos + 1}/{condTotal}" : CoGazeStrings.Worker_ConditionNextLabel) + CoGazeStrings.Worker_ConditionStartSuffix;
@@ -808,54 +851,54 @@ public class WorkerHUD2 : MonoBehaviour
 
     private void SetPanelMode(bool full)
     {
-        if (backgroundImage != null)
-            backgroundImage.color = full
+        if (_backgroundImage != null)
+            _backgroundImage.color = full
                 ? new Color(0.04f, 0.06f, 0.20f, 0.50f)
                 : new Color(0.02f, 0.02f, 0.08f, 0.40f);
 
-        if (stateText      != null) stateText.enabled      = full;
-        if (connStatusText != null) connStatusText.enabled  = full;
+        if (_stateText      != null) _stateText.enabled      = full;
+        if (_connStatusText != null) _connStatusText.enabled  = full;
     }
 
     private void ShowAlert()
     {
-        if (alertMarkerGo == null || cameraAnchor == null) return;
+        if (_alertMarkerGo == null || _cameraAnchor == null) return;
 
-        Vector3 fwd   = Vector3.ProjectOnPlane(cameraAnchor.forward, Vector3.up).normalized;
+        Vector3 fwd   = Vector3.ProjectOnPlane(_cameraAnchor.forward, Vector3.up).normalized;
         if (fwd == Vector3.zero) fwd = Vector3.forward;
         Vector3 right = Vector3.Cross(Vector3.up, fwd).normalized;
 
         Vector3 dir = (fwd + right * Mathf.Tan(40f * Mathf.Deg2Rad)).normalized;
         dir = (dir + Vector3.up * Mathf.Tan(10f * Mathf.Deg2Rad)).normalized;
 
-        alertMarkerGo.transform.position = cameraAnchor.position + dir * alertDistance;
-        Vector3 d = (cameraAnchor.position - alertMarkerGo.transform.position).normalized;
+        _alertMarkerGo.transform.position = _cameraAnchor.position + dir * alertDistance;
+        Vector3 d = (_cameraAnchor.position - _alertMarkerGo.transform.position).normalized;
         if (d != Vector3.zero)
-            alertMarkerGo.transform.rotation = Quaternion.LookRotation(d, Vector3.up);
+            _alertMarkerGo.transform.rotation = Quaternion.LookRotation(d, Vector3.up);
 
-        alertActive        = true;
-        alertActivatedTime = Time.time;
-        alertMarkerGo.SetActive(true);
+        _alertActive        = true;
+        _alertActivatedTime = Time.time;
+        _alertMarkerGo.SetActive(true);
     }
 
     private void DismissAlert()
     {
-        if (alertMarkerGo != null) alertMarkerGo.SetActive(false);
-        alertActive = false;
+        if (_alertMarkerGo != null) _alertMarkerGo.SetActive(false);
+        _alertActive = false;
     }
 
     private void SetState(string text, Color color)
     {
-        if (stateText == null) return;
-        stateText.text  = text;
-        stateText.color = color;
+        if (_stateText == null) return;
+        _stateText.text  = text;
+        _stateText.color = color;
     }
 
     private void SetTimer(string text, Color color)
     {
-        if (timerText == null) return;
-        timerText.text  = text;
-        timerText.color = color;
+        if (_timerText == null) return;
+        _timerText.text  = text;
+        _timerText.color = color;
     }
 
     private static string FormatTime(float s)
@@ -875,10 +918,10 @@ public class WorkerHUD2 : MonoBehaviour
 
     private void BuildBreathingGuide()
     {
-        if (cameraAnchor == null) return;
+        if (_cameraAnchor == null) return;
 
         _breathGo = new GameObject("BreathingGuide");
-        _breathGo.transform.SetParent(cameraAnchor, false);
+        _breathGo.transform.SetParent(_cameraAnchor, false);
         _breathGo.transform.localPosition = new Vector3(0f, 0f, 1.0f);
         _breathGo.transform.localRotation = Quaternion.identity;
         _breathGo.transform.localScale    = Vector3.one * hudScaleM;
@@ -951,31 +994,31 @@ public class WorkerHUD2 : MonoBehaviour
 
     private void ShowBreathGuide()
     {
-        int runPos    = manager != null ? manager.CurrentConditionRunPosition : -1;
+        int runPos    = _manager != null ? _manager.CurrentConditionRunPosition : -1;
         int condTotal = ExperimentDesign.Conditions.Length;
 
         if (_breathCond != null)
             _breathCond.text = runPos >= 0
-                ? $"条件  {runPos + 1} / {condTotal}  [{GazeModeLabel(manager.CurrentGazeMode)}]"
+                ? $"条件  {runPos + 1} / {condTotal}  [{GazeModeLabel(_manager.CurrentGazeMode)}]"
                 : CoGazeStrings.Worker_BreathIntervalLabel;
 
         _breathPhase    = 0f;
         _breathingActive = true;
 
         if (_breathGo != null) _breathGo.SetActive(true);
-        if (timerText  != null) timerText.enabled = false;
+        if (_timerText  != null) _timerText.enabled = false;
     }
 
     private void HideBreathGuide()
     {
         _breathingActive = false;
         if (_breathGo  != null) _breathGo.SetActive(false);
-        if (timerText  != null) timerText.enabled = true;
+        if (_timerText  != null) _timerText.enabled = true;
     }
 
     private void AnimateBreathing()
     {
-        _breathPhase = (_breathPhase + Time.deltaTime / BreathCycle) % 1f;
+        _breathPhase = (_breathPhase + Time.deltaTime / k_breathCycle) % 1f;
 
         bool  inhale = _breathPhase < 0.5f;
         float t      = inhale ? (_breathPhase / 0.5f) : ((_breathPhase - 0.5f) / 0.5f);

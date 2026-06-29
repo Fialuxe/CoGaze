@@ -1702,7 +1702,7 @@ MonoBehaviour:
   pythonHost: 127.0.0.1
   sendPort: 9001
   sharedReceiver: {fileID: 0}
-  maxMarginalRetries: 2
+  maxMarginalRetries: 0
 --- !u!1 &1508824412
 GameObject:
   m_ObjectHideFlags: 0

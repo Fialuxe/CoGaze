@@ -1,15 +1,8 @@
+using System.Collections.Generic;
 using UnityEngine;
 using Photon.Pun;
 
-/// <summary>
-/// RemoteExpertの視線データをワールド座標に変換し、
-/// SetMode()で指定された方式（Ray / Circle / Frustum）で表示するメインコントローラー。
-/// Start()でRay/Circle/FrustumVisualizerをAddComponentする。
-///
-/// FOV は ExperimentManager2 の状態に応じて切り替える:
-///   - Identification タスク: Expert の PC カメラ FOV (60°)
-///   - Assembly タスク: PCA カメラの FOV (streamingFov)
-/// </summary>
+// Converts Expert gaze (x,y,blink) to world-space and drives Ray/Circle/Frustum sub-visualizers; FOV switches per task.
 public enum VisualizationMode
 {
     Ray,
@@ -20,195 +13,233 @@ public enum VisualizationMode
 
 public class GazeVisualizer : MonoBehaviour
 {
-    private RayVisualizer rayVisualizer;
-    private CircleVisualizer circleVisualizer;
-    private FrustumVisualizer frustumVisualizer;
+    private RayVisualizer _rayVisualizer;
+    private CircleVisualizer _circleVisualizer;
+    private FrustumVisualizer _frustumVisualizer;
 
-    private VisualizationMode currentMode = VisualizationMode.Ray;
-    private GazeHandler targetGazeHandler;
+    private VisualizationMode _currentMode;
+    private GazeHandler _targetGazeHandler;
 
     // Raycast設定（Quest向け最適化済み）
-    private const float MAX_RAY_DISTANCE = 10f;  // 100m→10mに短縮（部屋のスケールで十分）
-    private LayerMask raycastMask = ~0;           // Initialize to all; narrowed to SharedMesh layer in Initialize()
+    private const float k_maxRayDistance = 10f;  // 100m→10mに短縮（部屋のスケールで十分）
+    private LayerMask _raycastMask = ~0;          // Initialize to all; narrowed to SharedMesh layer in Initialize()
 
     // パフォーマンス最適化用
-    private int frameCounter = 0;
+    private int _frameCounter;
     // On Android (Quest) raycast less frequently — MeshCollider BVH traversal is costlier on mobile.
 #if UNITY_ANDROID && !UNITY_EDITOR
-    private const int RAYCAST_INTERVAL = 6;
+    private const int k_raycastInterval = 6;
 #else
-    private const int RAYCAST_INTERVAL = 3;
+    private const int k_raycastInterval = 3;
 #endif
-    private const int FIND_HANDLER_INTERVAL = 30;  // Expert検索は30フレームに1回
-    private bool lastHit = false;
-    private RaycastHit lastHitInfo;
-    private Ray lastRay;
-    private Camera cachedCamera;
+    private const int k_findHandlerInterval = 30;  // Expert検索は30フレームに1回
+    private bool _lastHit;
+    private RaycastHit _lastHitInfo;
+    private Ray _lastRay;
+    private Camera _cachedCamera;
+
+    // ── Frustum 移動平均バッファ ──────────────────────────────────────────
+    // 90サンプル ≈ 1.5秒 @ 60Hz。ランダムノイズは平均で打ち消し、実注視傾向は残る。
+    private const int k_frustumBufferSize = 90;
+    private readonly Queue<Vector2> _frustumGazeBuffer = new Queue<Vector2>();
+    private Vector2 _frustumGazeSum = Vector2.zero;
 
     // ── FOV 設定 ──────────────────────────────────────────────────────
-    private const float EXPERT_CAMERA_FOV = 60f;   // Expert の PC カメラ (ConnectionHandler)
+    private const float k_expertCameraFov = 60f;   // Expert の PC カメラ (ConnectionHandler)
     // Identification 時の Expert PC レンダリングのアスペクト比。
     // ProjectSettings の defaultScreenWidth/Height = 1920x1080 かつ fullscreenMode=1 のため 16:9。
     // 再構成カメラは Worker(Quest) 上で生成されるので、明示しないと Quest ディスプレイの比率が
     // 使われてしまい、水平方向の視線座標 (横方向のレイ角度) がずれる。
-    private const float EXPERT_CAMERA_ASPECT = 16f / 9f;
-    private float streamingFov = 90f;               // PCA カメラの推定 FOV（Quest 3 left camera）
-    private float streamingAspect = 4f / 3f;        // PCA の解像度比 (640x480 = 4:3)
-    private bool  isStreamingMode = false;
+    private const float k_expertCameraAspect = 16f / 9f;
+    private float _streamingFov = 90f;               // PCA カメラの推定 FOV（Quest 3 left camera）
+    private float _streamingAspect = 4f / 3f;        // PCA の解像度比 (640x480 = 4:3)
+    private bool _isStreamingMode;
+    private bool _isGazeFallback;
+    private int  _fallbackWarnCounter;
+    public bool IsGazeAvailable { get; private set; }
+    public bool IsGazeFallback   { get; private set; }
 
-    /// <summary>各Visualizerを初期化する</summary>
     public void Initialize()
     {
-        rayVisualizer = gameObject.AddComponent<RayVisualizer>();
-        circleVisualizer = gameObject.AddComponent<CircleVisualizer>();
-        frustumVisualizer = gameObject.AddComponent<FrustumVisualizer>();
+        _rayVisualizer = gameObject.AddComponent<RayVisualizer>();
+        _circleVisualizer = gameObject.AddComponent<CircleVisualizer>();
+        _frustumVisualizer = gameObject.AddComponent<FrustumVisualizer>();
 
         // Narrow raycast to SharedMesh's layer only — avoids testing every collider in the scene.
         var sharedMesh = GameObject.Find("SharedMesh");
         if (sharedMesh != null)
-            raycastMask = 1 << sharedMesh.layer;
+            _raycastMask = 1 << sharedMesh.layer;
 
         SetMode(VisualizationMode.Ray);
         Debug.Log("[GazeVisualizer] Initialized with all sub-visualizers.");
     }
 
-    /// <summary>表示モードを切り替える</summary>
     public void SetMode(VisualizationMode mode)
     {
-        currentMode = mode;
+        _currentMode = mode;
 
-        if (rayVisualizer != null) rayVisualizer.enabled = (mode == VisualizationMode.Ray);
-        if (circleVisualizer != null) circleVisualizer.enabled = (mode == VisualizationMode.Circle);
-        if (frustumVisualizer != null) frustumVisualizer.enabled = (mode == VisualizationMode.Frustum);
+        if (_rayVisualizer != null) _rayVisualizer.enabled = (mode == VisualizationMode.Ray);
+        if (_circleVisualizer != null) _circleVisualizer.enabled = (mode == VisualizationMode.Circle);
+        if (_frustumVisualizer != null) _frustumVisualizer.enabled = (mode == VisualizationMode.Frustum);
+
+        // Frustumモードに入るたびにバッファをリセット（前条件の視線履歴を持ち込まない）
+        if (mode == VisualizationMode.Frustum)
+        {
+            _frustumGazeBuffer.Clear();
+            _frustumGazeSum = Vector2.zero;
+        }
 
         Debug.Log($"[GazeVisualizer] Mode changed to: {mode}");
     }
 
-    /// <summary>
-    /// ストリーミング中の PCA カメラパラメータを設定する。
-    /// Assembly 開始時に ExperimentManager2 から呼ばれる。
-    /// </summary>
     public void SetStreamingCameraParams(float fov, float aspect)
     {
-        streamingFov    = fov;
-        streamingAspect = aspect;
+        _streamingFov    = fov;
+        _streamingAspect = aspect;
         Debug.Log($"[GazeVisualizer] Streaming camera params: FOV={fov}, aspect={aspect}");
     }
 
-    /// <summary>
-    /// ストリーミングモード (Assembly) ON/OFF を切り替える。
-    /// cachedCamera の FOV/aspect を適切に更新する。
-    /// </summary>
     public void SetStreamingMode(bool streaming)
     {
-        isStreamingMode = streaming;
-        if (cachedCamera != null)
+        _isStreamingMode = streaming;
+        if (_cachedCamera != null)
         {
-            cachedCamera.fieldOfView = streaming ? streamingFov : EXPERT_CAMERA_FOV;
+            _cachedCamera.fieldOfView = streaming ? _streamingFov : k_expertCameraFov;
             if (streaming)
-                cachedCamera.aspect = streamingAspect;
+                _cachedCamera.aspect = _streamingAspect;
             else
-                cachedCamera.aspect = EXPERT_CAMERA_ASPECT; // Identification: Expert PC の 16:9（Quest 比に戻さない）
+                _cachedCamera.aspect = k_expertCameraAspect; // Identification: Expert PC の 16:9（Quest 比に戻さない）
         }
-        Debug.Log($"[GazeVisualizer] Streaming mode: {streaming}, FOV={cachedCamera?.fieldOfView}");
+        Debug.Log($"[GazeVisualizer] Streaming mode: {streaming}, FOV={_cachedCamera?.fieldOfView}");
     }
 
     private void Update()
     {
-        frameCounter++;
+        _frameCounter++;
 
         // ExpertのGazeHandlerを探す（重いので30フレームに1回だけ）
-        if (targetGazeHandler == null)
+        if (_targetGazeHandler == null)
         {
-            if (frameCounter % FIND_HANDLER_INTERVAL == 0)
-            {
+            if (_frameCounter % k_findHandlerInterval == 0)
                 FindExpertGazeHandler();
-            }
             return;
         }
 
-        Vector3 gazeData = targetGazeHandler.CurrentGazeData;
+        Vector3 gazeData = _targetGazeHandler.CurrentGazeData;
         float x = gazeData.x;
         float y = gazeData.y;
         float blink = gazeData.z;
 
-
         // モードの同期
-        if (currentMode != targetGazeHandler.CurrentMode)
-        {
-            SetMode(targetGazeHandler.CurrentMode);
-        }
+        if (_currentMode != _targetGazeHandler.CurrentMode)
+            SetMode(_targetGazeHandler.CurrentMode);
 
-        // blink中は非表示
-        if (blink > 0.5f)
+        // blink中は非表示、blink<0はヘッドセンター代替
+        bool fallback = blink < 0f;
+        if (!fallback && blink > 0.5f)
         {
             HideAll();
+            IsGazeAvailable = false;
+            if (_isGazeFallback) { _isGazeFallback = false; IsGazeFallback = false; SetFallbackColor(false); }
             return;
         }
 
-        // Expertの視線を正確に再現するため、ExpertのTransformを持つダミーカメラを使用する
-        if (cachedCamera == null)
+        IsGazeAvailable = !fallback;
+
+        if (fallback != _isGazeFallback)
         {
-            cachedCamera = targetGazeHandler.gameObject.AddComponent<Camera>();
-            cachedCamera.enabled = false; // レンダリングはしない
+            _isGazeFallback = fallback;
+            IsGazeFallback  = fallback;
+            SetFallbackColor(fallback);
+        }
+
+        if (fallback)
+        {
+            x = 0.5f; y = 0.5f;
+            _fallbackWarnCounter++;
+            if (_fallbackWarnCounter % 300 == 0)
+                Debug.LogWarning("[GazeVisualizer] Head-centre fallback active — Python gaze stream not available on Expert.");
+        }
+
+        // Expertの視線を正確に再現するため、ExpertのTransformを持つダミーカメラを使用する
+        if (_cachedCamera == null)
+        {
+            _cachedCamera = _targetGazeHandler.gameObject.AddComponent<Camera>();
+            _cachedCamera.enabled = false; // レンダリングはしない
 
             // 現在のモードに応じて FOV を設定
-            if (isStreamingMode)
+            if (_isStreamingMode)
             {
-                cachedCamera.fieldOfView = streamingFov;
-                cachedCamera.aspect      = streamingAspect;
+                _cachedCamera.fieldOfView = _streamingFov;
+                _cachedCamera.aspect      = _streamingAspect;
             }
             else
             {
-                cachedCamera.fieldOfView = EXPERT_CAMERA_FOV;
-                cachedCamera.aspect      = EXPERT_CAMERA_ASPECT; // Identification: Expert PC の 16:9 に固定
+                _cachedCamera.fieldOfView = k_expertCameraFov;
+                _cachedCamera.aspect      = k_expertCameraAspect; // Identification: Expert PC の 16:9 に固定
             }
         }
 
         // 正規化座標をビューポート座標として使用し、Expertの視点からのレイを計算
-        Ray ray = cachedCamera.ViewportPointToRay(new Vector3(x, y, 0));
+        Ray ray = _cachedCamera.ViewportPointToRay(new Vector3(x, y, 0));
 
         // Frustumモードの場合、Raycastは不要（固定長の錐台を描画するだけ）
-        if (currentMode == VisualizationMode.Frustum)
+        // 方向には瞬間の視線点(x,y)ではなく、直近 k_frustumBufferSize サンプルの移動平均重心を使用。
+        // ウェブカメラノイズはランダムなので平均で打ち消され、実注視傾向だけが残る。
+        // Circle/Ray = 瞬間の視線点、Frustum = 最近の注視傾向の領域、という役割分担。
+        if (_currentMode == VisualizationMode.Frustum)
         {
-            if (frustumVisualizer != null && frustumVisualizer.enabled)
+            // 有効サンプルをバッファに蓄積（blink中はここに来ない）
+            var sample = new Vector2(x, y);
+            _frustumGazeSum += sample;
+            _frustumGazeBuffer.Enqueue(sample);
+            if (_frustumGazeBuffer.Count > k_frustumBufferSize)
+                _frustumGazeSum -= _frustumGazeBuffer.Dequeue();
+
+            Vector2 meanGaze = _frustumGazeBuffer.Count > 0
+                ? _frustumGazeSum / _frustumGazeBuffer.Count
+                : new Vector2(0.5f, 0.5f);
+
+            Ray frustumRay = _cachedCamera.ViewportPointToRay(new Vector3(meanGaze.x, meanGaze.y, 0));
+
+            if (_frustumVisualizer != null && _frustumVisualizer.enabled)
             {
-                frustumVisualizer.SetCameraParams(cachedCamera.fieldOfView, cachedCamera.aspect);
-                frustumVisualizer.UpdateVisualization(ray.origin, ray.direction, Vector3.zero, false);
+                _frustumVisualizer.SetCameraParams(_cachedCamera.fieldOfView, _cachedCamera.aspect);
+                _frustumVisualizer.UpdateVisualization(frustumRay.origin, frustumRay.direction, Vector3.zero, false);
             }
             return;
         }
 
         // RaycastはN フレームに1回だけ実行する（MeshColliderへの衝突判定が非常に重いため）
-        if (frameCounter % RAYCAST_INTERVAL == 0)
+        if (_frameCounter % k_raycastInterval == 0)
         {
-            lastHit = Physics.Raycast(ray, out lastHitInfo, MAX_RAY_DISTANCE, raycastMask);
-            lastRay = ray;
+            _lastHit = Physics.Raycast(ray, out _lastHitInfo, k_maxRayDistance, _raycastMask);
+            _lastRay = ray;
         }
 
         // 各Visualizerに情報を渡す（キャッシュされた結果を使用）
-        switch (currentMode)
+        switch (_currentMode)
         {
             case VisualizationMode.Ray:
-                if (rayVisualizer != null && rayVisualizer.enabled)
+                if (_rayVisualizer != null && _rayVisualizer.enabled)
                 {
                     Vector3 rayStart = ray.origin + ray.direction * 0.5f;
-                    Vector3 endPoint = lastHit ? lastHitInfo.point : ray.GetPoint(MAX_RAY_DISTANCE);
-                    rayVisualizer.UpdateVisualization(rayStart, endPoint);
+                    Vector3 endPoint = _lastHit ? _lastHitInfo.point : ray.GetPoint(k_maxRayDistance);
+                    _rayVisualizer.UpdateVisualization(rayStart, endPoint);
                 }
                 break;
 
             case VisualizationMode.Circle:
-                if (circleVisualizer != null && circleVisualizer.enabled)
+                if (_circleVisualizer != null && _circleVisualizer.enabled)
                 {
-                    if (lastHit)
+                    if (_lastHit)
                     {
-                        circleVisualizer.UpdateVisualization(lastHitInfo.point, lastHitInfo.normal);
-                        circleVisualizer.SetVisible(true);
+                        _circleVisualizer.UpdateVisualization(_lastHitInfo.point, _lastHitInfo.normal);
+                        _circleVisualizer.SetVisible(true);
                     }
                     else
                     {
-                        circleVisualizer.SetVisible(false);
+                        _circleVisualizer.SetVisible(false);
                     }
                 }
                 break;
@@ -217,12 +248,18 @@ public class GazeVisualizer : MonoBehaviour
 
     private void HideAll()
     {
-        if (rayVisualizer != null) rayVisualizer.SetVisible(false);
-        if (circleVisualizer != null) circleVisualizer.SetVisible(false);
-        if (frustumVisualizer != null) frustumVisualizer.SetVisible(false);
+        if (_rayVisualizer != null) _rayVisualizer.SetVisible(false);
+        if (_circleVisualizer != null) _circleVisualizer.SetVisible(false);
+        if (_frustumVisualizer != null) _frustumVisualizer.SetVisible(false);
     }
 
-    /// <summary>シーン内のExpert側GazeHandlerを検索する</summary>
+    private void SetFallbackColor(bool fallback)
+    {
+        if (_rayVisualizer      != null) _rayVisualizer.SetFallbackMode(fallback);
+        if (_circleVisualizer   != null) _circleVisualizer.SetFallbackMode(fallback);
+        if (_frustumVisualizer  != null) _frustumVisualizer.SetFallbackMode(fallback);
+    }
+
     private void FindExpertGazeHandler()
     {
         GazeHandler[] handlers = FindObjectsByType<GazeHandler>(FindObjectsSortMode.None);
@@ -231,12 +268,11 @@ public class GazeVisualizer : MonoBehaviour
             PhotonView pv = handler.GetComponent<PhotonView>();
             if (pv != null) // !pv.IsMine の制限を解除し、自分自身のGazeHandlerも探せるようにする
             {
-                // リモートまたはローカルのプレイヤーのGazeHandlerを取得
                 var owner = pv.Owner;
                 string role = RoleManager.GetPlayerRole(owner);
                 if (role == RoleManager.ROLE_EXPERT || role == "expert")
                 {
-                    targetGazeHandler = handler;
+                    _targetGazeHandler = handler;
                     Debug.Log("[GazeVisualizer] Found expert's GazeHandler.");
                     return;
                 }

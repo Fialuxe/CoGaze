@@ -1,14 +1,7 @@
 using System;
 using UnityEngine;
 
-/// <summary>
-/// Scene bootstrapper for the ReplayScene.
-/// Attach this component to a single empty GameObject in the scene.
-/// Awake() wires up all replay components — no other manual setup needed.
-///
-/// Optionally add a floor plane with a MeshCollider so Circle mode
-/// can raycast against something during replay.
-/// </summary>
+// Scene bootstrapper for ReplayScene; Awake() wires up all replay components automatically.
 public class ReplayBootstrapper : MonoBehaviour
 {
     [Header("Log Folder")]

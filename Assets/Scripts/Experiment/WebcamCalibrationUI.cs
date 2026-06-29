@@ -2,27 +2,7 @@ using System.Collections;
 using UnityEngine;
 using UnityEngine.UI;
 
-/// <summary>
-/// Unity-driven 16-point webcam calibration overlay for the Expert PC screen.
-///
-/// Flow:
-///   StartCalibration() →
-///     /calibration/reset  (clear Python-side points)
-///     [2 s instruction]
-///     For each of 16 dots:
-///       0.8 s travel (smooth lerp)
-///       1.5 s dwell  → /calibration/sample [x, y] every 100 ms  (≈15 samples/dot)
-///       0.4 s reward (dot shrinks)
-///     /calibration/compute  (Python fits Ridge, sends /calibration/result)
-///   OnCalibrationSequenceDone fired → caller waits for HandleCalibrationResult
-///
-/// Python's CalibrationManager receives 16 × ~15 = ~240 (local, target) pairs,
-/// which gives the same accuracy as the old Python-window approach that averaged
-/// ~30 samples per dot (Ridge handles redundant points correctly).
-///
-/// Coordinate convention: (0,0) = top-left of screen, (1,1) = bottom-right,
-/// matching Python's calib_window.py TARGETS and screen pixel coordinate system.
-/// </summary>
+// 16-point webcam calibration overlay for Expert PC; drives /calibration/reset → sample × 16 → compute via OSC.
 public class WebcamCalibrationUI : MonoBehaviour
 {
     // ── Timing (serialised so operator can tweak without recompile) ───────────
@@ -39,10 +19,6 @@ public class WebcamCalibrationUI : MonoBehaviour
 
     // ── Public ────────────────────────────────────────────────────────────────
 
-    /// <summary>
-    /// Fired after /calibration/compute is sent (before /calibration/result arrives).
-    /// Caller should wait for OscSessionManager.OnCalibrationResult.
-    /// </summary>
     public event System.Action OnCalibrationSequenceDone;
 
     // ── 16-point grid ─────────────────────────────────────────────────────────
@@ -89,7 +65,6 @@ public class WebcamCalibrationUI : MonoBehaviour
 
     // ── Public API ────────────────────────────────────────────────────────────
 
-    /// <summary>Start the 16-point calibration sequence. Safe to call during any state.</summary>
     public void StartCalibration()
     {
         if (_calibCo != null) StopCoroutine(_calibCo);
@@ -99,7 +74,6 @@ public class WebcamCalibrationUI : MonoBehaviour
         _calibCo = StartCoroutine(RunSequence());
     }
 
-    /// <summary>Abort a running calibration (e.g. operator presses ESC or Del).</summary>
     public void AbortCalibration()
     {
         if (_calibCo != null) { StopCoroutine(_calibCo); _calibCo = null; }
@@ -247,10 +221,6 @@ public class WebcamCalibrationUI : MonoBehaviour
 
     // ── Helpers ───────────────────────────────────────────────────────────────
 
-    /// <summary>
-    /// Convert normalised [0,1] target coords (y=0 → top, y=1 → bottom) to
-    /// Canvas anchoredPosition relative to centre anchor (0.5, 0.5).
-    /// </summary>
     private static Vector2 NormToAnchor(Vector2 norm)
     {
         float w = Screen.width;

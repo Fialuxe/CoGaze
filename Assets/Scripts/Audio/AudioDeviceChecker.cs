@@ -1,20 +1,7 @@
 using System;
 using UnityEngine;
 
-/// <summary>
-/// Pre-experiment microphone check shown before audio initialises.
-///
-/// Lists available input devices, shows a live VU meter so the user can
-/// confirm the mic is picking up sound, and optionally lets them pick a
-/// different device.
-///
-/// Expert (PC): interactive — cycle with ◀/▶ and press Proceed.
-/// Worker (Quest): auto-confirms after AUTO_SECONDS; pressing A or X on the
-/// controller confirms immediately.
-///
-/// Subscribe to OnDeviceConfirmed, then call Initialize(isExpert).
-/// The component destroys itself after the user confirms.
-/// </summary>
+// Pre-experiment mic check: VU meter, device picker; auto-confirms on Quest after k_autoSeconds; destroys itself on confirm.
 public class AudioDeviceChecker : MonoBehaviour
 {
     public event Action<string> OnDeviceConfirmed;
@@ -30,7 +17,7 @@ public class AudioDeviceChecker : MonoBehaviour
     private bool      _isTesting;
 
     private float       _countdown;
-    private const float AUTO_SECONDS = 10f;
+    private const float k_autoSeconds = 10f;
 
     // Cached GUI styles — built once on the first OnGUI call.
     private GUIStyle _titleStyle;
@@ -42,7 +29,7 @@ public class AudioDeviceChecker : MonoBehaviour
     {
         _isExpert  = isExpert;
         _devices   = Microphone.devices;
-        _countdown = AUTO_SECONDS;
+        _countdown = k_autoSeconds;
         if (_devices.Length > 0) StartTest();
     }
 

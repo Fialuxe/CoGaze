@@ -3,15 +3,9 @@ using System.Text;
 using UnityEngine;
 using UnityEngine.UI;
 
-/// <summary>
-/// Worker (Quest/HMD) startup screen — a WorldSpace VR panel shown before the experiment connects.
-/// Replaces the old headless auto-proceed: the participant sees config + pre-flight self-check and
-/// confirms with the RIGHT controller A button to begin. Fatal checks block confirmation.
-/// (IMGUI/StartupUI can't render inside the headset, so this mirrors WorkerHUD2's WorldSpace canvas.)
-/// </summary>
+// Worker (Quest) WorldSpace startup panel; A button confirms, Fatal checks block. Mirrors WorkerHUD2 canvas style.
 public class WorkerStartupPanel : MonoBehaviour
 {
-    /// <summary>Set true once the participant confirms (A button) and no Fatal check blocks it.</summary>
     public bool Confirmed { get; private set; }
 
     private Font       _font;

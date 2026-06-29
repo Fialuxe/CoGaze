@@ -2,15 +2,7 @@ using System.Text;
 using UnityEngine;
 using Photon.Pun;
 
-/// <summary>
-/// Periodically writes key world positions to the FileLogger for offline debugging:
-/// the local head (center eye), every networked player object (Worker / Expert) with its role,
-/// the shared "SharedMesh" anchor, and all current QR markers.
-///
-/// One instance is added per client by SceneBootstrapper2. Output lands in the same
-/// cogaze_*.log under the [Pos] category, e.g.:
-///   [Pos] head(worker)=(6.98,1.20,1.64) fwd=(0.12,-0.01,0.99) LocalWorker(Clone)/worker=(...) RemoteExpert(Clone)/expert=(...) SharedMesh=(...) QR[B]=(...)
-/// </summary>
+// Periodically logs world positions of head, player objects, SharedMesh, and QR markers to FileLogger for offline debugging.
 public class PositionLogger : MonoBehaviour
 {
     [Tooltip("Seconds between log lines.")]

@@ -1,42 +1,39 @@
 using UnityEngine;
 using Photon.Pun;
 
-/// <summary>
-/// Synchronises head pose (position, rotation) over Photon with remote-side interpolation.
-/// </summary>
+// Synchronises head pose (position, rotation) over Photon with remote-side interpolation.
 public class PostureHandler : MonoBehaviourPun, IPunObservable
 {
-    private IPostureInput postureInput;
+    private IPostureInput _postureInput;
 
-    private Vector3 networkPosition;
+    private Vector3 _networkPosition;
     // Must be identity, not default(Quaternion) = (0,0,0,0): a zero-magnitude quaternion
     // makes Quaternion.Lerp assert ("!CompareApproximately(aScalar, 0.0F)") every frame
     // until the first network update arrives.
-    private Quaternion networkRotation = Quaternion.identity;
-    private float lerpSpeed = 10f;
-    // Don't interpolate toward network pose until we've actually received one — otherwise
-    // remote avatars visibly slide in from the world origin on spawn.
-    private bool hasNetworkData = false;
+    private Quaternion _networkRotation = Quaternion.identity;
+    private bool _hasNetworkData;
+
+    private const float k_lerpSpeed = 10f;
 
     public void Initialize(IPostureInput input)
     {
-        postureInput = input;
+        _postureInput = input;
         Debug.Log($"[PostureHandler] Initialized with {input.GetType().Name}");
     }
 
     private void Update()
     {
-        if (photonView.IsMine && postureInput != null)
+        if (photonView.IsMine && _postureInput != null)
         {
-            transform.position = postureInput.Position;
-            transform.rotation = postureInput.Rotation;
+            transform.position = _postureInput.Position;
+            transform.rotation = _postureInput.Rotation;
         }
-        else if (!photonView.IsMine && hasNetworkData)
+        else if (!photonView.IsMine && _hasNetworkData)
         {
             transform.position = Vector3.Lerp(
-                transform.position, networkPosition, Time.deltaTime * lerpSpeed);
+                transform.position, _networkPosition, Time.deltaTime * k_lerpSpeed);
             transform.rotation = Quaternion.Lerp(
-                transform.rotation, networkRotation, Time.deltaTime * lerpSpeed);
+                transform.rotation, _networkRotation, Time.deltaTime * k_lerpSpeed);
         }
     }
 
@@ -49,9 +46,9 @@ public class PostureHandler : MonoBehaviourPun, IPunObservable
         }
         else
         {
-            networkPosition = (Vector3)stream.ReceiveNext();
-            networkRotation = (Quaternion)stream.ReceiveNext();
-            hasNetworkData = true;
+            _networkPosition = (Vector3)stream.ReceiveNext();
+            _networkRotation = (Quaternion)stream.ReceiveNext();
+            _hasNetworkData = true;
         }
     }
 }

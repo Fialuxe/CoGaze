@@ -1,16 +1,12 @@
 using UnityEngine;
 
-/// <summary>
-/// Meta XR HMD の頭部トラッキングデータを取得する。
-/// OVRCameraRig の CenterEyeAnchor を優先的に参照し、
-/// 見つからない場合は Camera.main にフォールバックする。
-/// </summary>
+// Reads HMD head-tracking via OVRCameraRig.centerEyeAnchor; falls back to Camera.main if rig not found.
 public class MetaXRPostureInput : MonoBehaviour, IPostureInput
 {
-    private Transform hmdTransform;
+    private Transform _hmdTransform;
 
-    public Vector3 Position => hmdTransform != null ? hmdTransform.position : Vector3.zero;
-    public Quaternion Rotation => hmdTransform != null ? hmdTransform.rotation : Quaternion.identity;
+    public Vector3 Position => _hmdTransform != null ? _hmdTransform.position : Vector3.zero;
+    public Quaternion Rotation => _hmdTransform != null ? _hmdTransform.rotation : Quaternion.identity;
 
     private void Start()
     {
@@ -19,7 +15,7 @@ public class MetaXRPostureInput : MonoBehaviour, IPostureInput
 
     private void Update()
     {
-        if (hmdTransform == null)
+        if (_hmdTransform == null)
         {
             CacheHMDTransform();
         }
@@ -32,7 +28,7 @@ public class MetaXRPostureInput : MonoBehaviour, IPostureInput
         OVRCameraRig rig = FindAnyObjectByType<OVRCameraRig>();
         if (rig != null)
         {
-            hmdTransform = rig.centerEyeAnchor;
+            _hmdTransform = rig.centerEyeAnchor;
             Debug.Log("[MetaXRPostureInput] Using OVRCameraRig.centerEyeAnchor");
             return;
         }
@@ -41,7 +37,7 @@ public class MetaXRPostureInput : MonoBehaviour, IPostureInput
         Camera mainCam = Camera.main;
         if (mainCam != null)
         {
-            hmdTransform = mainCam.transform;
+            _hmdTransform = mainCam.transform;
             Debug.Log("[MetaXRPostureInput] Fallback: using Camera.main");
         }
         else

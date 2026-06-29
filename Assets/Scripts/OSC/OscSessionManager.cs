@@ -2,30 +2,8 @@ using System.Collections;
 using UnityEngine;
 using extOSC;
 
-/// <summary>
-/// OSC bridge between Unity (Expert PC) and the Python eye-tracking process.
-///
-/// Send port  : 9001  (Unity → Python)
-/// Receive port: 9000 (Python → Unity)
-///
-/// IMPORTANT — port 9000 is shared with OscGazeInput (OscGazeInput.cs).
-/// extOSC binds a UDP socket per OSCReceiver instance; opening a second
-/// OSCReceiver on 9000 causes a SocketException at startup.
-/// Solution: wire the *same* OSCReceiver that OscGazeInput owns into the
-/// SharedReceiver field in the Inspector, OR leave it null and receiver setup
-/// is deferred by one frame so OscGazeInput.Awake() (which creates the shared
-/// receiver) always runs first — even when the component is added dynamically.
-///
-/// Condition flow (for reference):
-///   IR / NoGaze : StartSession → ACK → StartTrial immediately.
-///   Webcam / WebcamFiltered:
-///       StartSession → ACK
-///       → wait for OnFaceMetrics (status == 2 = good)
-///       → StartCalibration → wait for OnCalibrationResult
-///       → StartTrial.
-///   Role check is the caller's responsibility; this component is always present
-///   but ExperimentManager2 should only call its public API on the Expert (PC) side.
-/// </summary>
+// OSC bridge Unity→Python (send 9001) and Python→Unity (recv 9000, shared with OscGazeInput).
+// Port 9000 has one socket — use SharedReceiver in Inspector or defer-frame fallback.
 public class OscSessionManager : MonoBehaviour
 {
     // ── Inspector ────────────────────────────────────────────────────────────
@@ -41,21 +19,20 @@ public class OscSessionManager : MonoBehaviour
 
     [Header("Calibration Retry")]
     [Tooltip("Maximum automatic retries when calibration/result quality = MARGINAL (1).")]
-    [SerializeField] private int maxMarginalRetries = 2;
+    [SerializeField] private int maxMarginalRetries;
+
+    [Header("Python Auto-Launch")]
+    [Tooltip("Pythonインタープリタへのパス（例: python / python3 / C:\\Python312\\python.exe）")]
+    [SerializeField] private string autoLaunchPythonExe = "python";
+    [Tooltip("起動するPythonスクリプトのフルパス。空のままにすると自動起動を無効化。")]
+    [SerializeField] private string autoLaunchScriptPath = "";
 
     // ── Public events ─────────────────────────────────────────────────────────
 
-    /// <summary>Fired when Python sends /calibration/result (terminal result only — after retries).</summary>
-    public event System.Action<int, float, float> OnCalibrationResult;   // quality, err_x, err_y
-
-    /// <summary>Fired on every /face/metrics message. status: 0=noface 1=toofar 2=good 3=tooclose.</summary>
-    public event System.Action<float, float, float, int> OnFaceMetrics;  // iod_norm, cx, cy, status
-
-    /// <summary>Fired when Python acknowledges a command via /experiment/ack.</summary>
-    public event System.Action<string, string> OnAck;                    // command, status
-
-    /// <summary>Fired when Python replies to a /ping.</summary>
-    public event System.Action OnPong;
+    public event System.Action<int, float, float>        OnCalibrationResult;  // quality, err_x, err_y
+    public event System.Action<float, float, float, int> OnFaceMetrics;        // iod_norm, cx, cy, status
+    public event System.Action<string, string>           OnAck;                // command, status
+    public event System.Action                           OnPong;
 
     public event System.Action<int> OnCalibrationRetrying;
 
@@ -73,35 +50,60 @@ public class OscSessionManager : MonoBehaviour
     // ── OSC address constants ─────────────────────────────────────────────────
 
     // Send
-    private const string ADDR_SESSION_START   = "/session/start";
-    private const string ADDR_SESSION_END     = "/experiment/session_end";
-    private const string ADDR_CALIB_START     = "/calibration/start";
-    private const string ADDR_CALIB_ABORT     = "/calibration/abort";
-    private const string ADDR_CALIB_RESET     = "/calibration/reset";
-    private const string ADDR_CALIB_SAMPLE    = "/calibration/sample";
-    private const string ADDR_CALIB_COMPUTE   = "/calibration/compute";
-    private const string ADDR_TRIAL_START     = "/experiment/trial_start";
-    private const string ADDR_TRIAL_END       = "/experiment/trial_end";
-    private const string ADDR_PING            = "/ping";
+    private const string k_addrSessionStart   = "/session/start";
+    private const string k_addrSessionEnd     = "/experiment/session_end";
+    private const string k_addrCalibStart     = "/calibration/start";
+    private const string k_addrCalibAbort     = "/calibration/abort";
+    private const string k_addrCalibReset     = "/calibration/reset";
+    private const string k_addrCalibSample    = "/calibration/sample";
+    private const string k_addrCalibCompute   = "/calibration/compute";
+    private const string k_addrTrialStart     = "/experiment/trial_start";
+    private const string k_addrTrialEnd       = "/experiment/trial_end";
+    private const string k_addrPing            = "/ping";
 
     // Receive
-    private const string ADDR_ACK            = "/experiment/ack";
-    private const string ADDR_CALIB_RESULT   = "/calibration/result";
-    private const string ADDR_FACE_METRICS   = "/face/metrics";
-    private const string ADDR_PONG           = "/pong";
+    private const string k_addrAck            = "/experiment/ack";
+    private const string k_addrCalibResult   = "/calibration/result";
+    private const string k_addrFaceMetrics   = "/face/metrics";
+    private const string k_addrPong           = "/pong";
 
     // ── Public setters ────────────────────────────────────────────────────────
 
-    /// <summary>
-    /// Updates the Python host address at any time, including after Start().
-    /// Replaces the private-field reflection hack in SceneBootstrapper2.
-    /// </summary>
     public void SetPythonHost(string host)
     {
         pythonHost = host;
         if (_transmitter != null)
             _transmitter.RemoteHost = host;
         FileLogger.Log("OSC", $"PythonHost updated → {host}");
+    }
+
+    public bool TryAutoLaunchPython()
+    {
+        if (string.IsNullOrEmpty(autoLaunchScriptPath))
+        {
+            FileLogger.Log("OSC", "TryAutoLaunchPython: autoLaunchScriptPath is empty — skipped.");
+            return false;
+        }
+        try
+        {
+            var psi = new System.Diagnostics.ProcessStartInfo
+            {
+                FileName         = autoLaunchPythonExe,
+                Arguments        = autoLaunchScriptPath,
+                UseShellExecute  = true,
+                CreateNoWindow   = false,
+                WorkingDirectory = System.IO.Path.GetDirectoryName(autoLaunchScriptPath) ?? "",
+            };
+            System.Diagnostics.Process.Start(psi);
+            FileLogger.Log("OSC", $"TryAutoLaunchPython: launched '{autoLaunchPythonExe} {autoLaunchScriptPath}'");
+            return true;
+        }
+        catch (System.Exception ex)
+        {
+            FileLogger.Log("OSC", $"TryAutoLaunchPython: FAILED — {ex.Message}");
+            UnityEngine.Debug.LogWarning($"[OscSessionManager] Python auto-launch failed: {ex.Message}");
+            return false;
+        }
     }
 
     // ── Unity lifecycle ───────────────────────────────────────────────────────
@@ -178,123 +180,79 @@ public class OscSessionManager : MonoBehaviour
         }
 
         // Bind all incoming addresses to this shared receiver.
-        _bindAck         = sharedReceiver.Bind(ADDR_ACK,          OnAckReceived);
-        _bindCalibResult = sharedReceiver.Bind(ADDR_CALIB_RESULT,  OnCalibResultReceived);
-        _bindFaceMetrics = sharedReceiver.Bind(ADDR_FACE_METRICS,  OnFaceMetricsReceived);
-        _bindPong        = sharedReceiver.Bind(ADDR_PONG,          OnPongReceived);
+        _bindAck         = sharedReceiver.Bind(k_addrAck,          OnAckReceived);
+        _bindCalibResult = sharedReceiver.Bind(k_addrCalibResult,  OnCalibResultReceived);
+        _bindFaceMetrics = sharedReceiver.Bind(k_addrFaceMetrics,  OnFaceMetricsReceived);
+        _bindPong        = sharedReceiver.Bind(k_addrPong,          OnPongReceived);
 
-        FileLogger.Log("OSC", $"SEND: {pythonHost}:{sendPort} | RECV: port {sharedReceiver.LocalPort} | Binds: {ADDR_ACK}, {ADDR_CALIB_RESULT}, {ADDR_FACE_METRICS}, {ADDR_PONG}");
+        FileLogger.Log("OSC", $"SEND: {pythonHost}:{sendPort} | RECV: port {sharedReceiver.LocalPort} | Binds: {k_addrAck}, {k_addrCalibResult}, {k_addrFaceMetrics}, {k_addrPong}");
     }
 
     // ── Public API (called by ExperimentManager2 on the Expert side) ───────────
 
-    /// <summary>
-    /// Tell Python to start a session.
-    /// Sends: /session/start [pid: string] [condition: string]
-    /// </summary>
     public void StartSession(string pid, string condition)
     {
         if (_transmitter == null) { LogNotReady("StartSession"); return; }
-        var msg = new OSCMessage(ADDR_SESSION_START,
+        var msg = new OSCMessage(k_addrSessionStart,
             OSCValue.String(pid),
             OSCValue.String(condition));
         _transmitter.Send(msg);
-        FileLogger.Log("OSC", $"SEND → {ADDR_SESSION_START}  pid={pid}  condition={condition}");
+        FileLogger.Log("OSC", $"SEND → {k_addrSessionStart}  pid={pid}  condition={condition}");
     }
 
-    /// <summary>
-    /// Tell Python to end the session.
-    /// Sends: /experiment/session_end
-    /// </summary>
     public void EndSession()
     {
-        SendNoArgs(ADDR_SESSION_END);
+        SendNoArgs(k_addrSessionEnd);
     }
 
-    /// <summary>
-    /// Start a trial.
-    /// Sends: /experiment/trial_start [trial_id: string]
-    /// </summary>
     public void StartTrial(string trialId)
     {
         if (_transmitter == null) { LogNotReady("StartTrial"); return; }
-        var msg = new OSCMessage(ADDR_TRIAL_START, OSCValue.String(trialId));
+        var msg = new OSCMessage(k_addrTrialStart, OSCValue.String(trialId));
         _transmitter.Send(msg);
-        FileLogger.Log("OSC", $"SEND → {ADDR_TRIAL_START}  trial_id={trialId}");
+        FileLogger.Log("OSC", $"SEND → {k_addrTrialStart}  trial_id={trialId}");
     }
 
-    /// <summary>
-    /// End the current trial.
-    /// Sends: /experiment/trial_end
-    /// </summary>
     public void EndTrial()
     {
-        SendNoArgs(ADDR_TRIAL_END);
+        SendNoArgs(k_addrTrialEnd);
     }
 
-    /// <summary>
-    /// Start calibration (Webcam / WebcamFiltered conditions only).
-    /// Sends: /calibration/start
-    /// Resets the MARGINAL-retry counter.
-    /// </summary>
     public void StartCalibration()
     {
         _marginalRetryCount = 0;
-        SendNoArgs(ADDR_CALIB_START);
+        SendNoArgs(k_addrCalibStart);
     }
 
-    /// <summary>
-    /// Abort an in-progress calibration.
-    /// Sends: /calibration/abort
-    /// </summary>
     public void AbortCalibration()
     {
-        SendNoArgs(ADDR_CALIB_ABORT);
+        SendNoArgs(k_addrCalibAbort);
     }
 
-    /// <summary>
-    /// Unity-driven calibration: reset accumulated Python-side calibration points.
-    /// Call once before the dot sequence starts.
-    /// Sends: /calibration/reset
-    /// </summary>
     public void SendCalibrationReset()
     {
-        SendNoArgs(ADDR_CALIB_RESET);
+        SendNoArgs(k_addrCalibReset);
     }
 
-    /// <summary>
-    /// Unity-driven calibration: tell Python to capture one gaze sample for the
-    /// given normalised screen target position. Call ~every 100 ms during each dot dwell.
-    /// Sends: /calibration/sample [x: float] [y: float]
-    /// </summary>
     public void SendCalibrationSample(float x, float y)
     {
         if (_transmitter == null) { LogNotReady("SendCalibrationSample"); return; }
-        var msg = new OSCMessage(ADDR_CALIB_SAMPLE, OSCValue.Float(x), OSCValue.Float(y));
+        var msg = new OSCMessage(k_addrCalibSample, OSCValue.Float(x), OSCValue.Float(y));
         _transmitter.Send(msg);
     }
 
-    /// <summary>
-    /// Unity-driven calibration: tell Python to fit the Ridge model and send back
-    /// /calibration/result. Call once after all dots are complete.
-    /// Sends: /calibration/compute
-    /// </summary>
     public void SendCalibrationCompute()
     {
-        SendNoArgs(ADDR_CALIB_COMPUTE);
+        SendNoArgs(k_addrCalibCompute);
     }
 
-    /// <summary>
-    /// Send a /ping to check Python-side liveness.
-    /// </summary>
     public void Ping()
     {
-        SendNoArgs(ADDR_PING);
+        SendNoArgs(k_addrPing);
     }
 
     // ── Receive handlers ──────────────────────────────────────────────────────
 
-    /// <summary>/experiment/ack [command: string] [status: string]</summary>
     private void OnAckReceived(OSCMessage message)
     {
         if (message.Values == null || message.Values.Count < 2) return;
@@ -302,19 +260,10 @@ public class OscSessionManager : MonoBehaviour
         string command = message.Values[0].StringValue;
         string status  = message.Values[1].StringValue;
 
-        FileLogger.Log("OSC", $"RECV ← {ADDR_ACK}  command={command}  status={status}");
+        FileLogger.Log("OSC", $"RECV ← {k_addrAck}  command={command}  status={status}");
         OnAck?.Invoke(command, status);
     }
 
-    /// <summary>
-    /// /calibration/result [quality: int] [err_x: float] [err_y: float]
-    ///
-    /// quality: 2 = PASS, 1 = MARGINAL, 0 = FAIL
-    ///
-    /// On MARGINAL: silently retry /calibration/start up to maxMarginalRetries times.
-    /// OnCalibrationResult is only fired for the terminal result (PASS, FAIL, or
-    /// MARGINAL after all retries are exhausted).
-    /// </summary>
     private void OnCalibResultReceived(OSCMessage message)
     {
         if (message.Values == null || message.Values.Count < 3) return;
@@ -323,7 +272,7 @@ public class OscSessionManager : MonoBehaviour
         float errX    = message.Values[1].FloatValue;
         float errY    = message.Values[2].FloatValue;
 
-        FileLogger.Log("OSC", $"RECV ← {ADDR_CALIB_RESULT}  quality={quality}  err=({errX:F3}, {errY:F3})");
+        FileLogger.Log("OSC", $"RECV ← {k_addrCalibResult}  quality={quality}  err=({errX:F3}, {errY:F3})");
 
         if (quality == 1 /* MARGINAL */ && _marginalRetryCount < maxMarginalRetries)
         {
@@ -339,7 +288,6 @@ public class OscSessionManager : MonoBehaviour
         OnCalibrationResult?.Invoke(quality, errX, errY);
     }
 
-    /// <summary>/face/metrics [iod_norm: float] [face_cx: float] [face_cy: float] [status: int]</summary>
     private void OnFaceMetricsReceived(OSCMessage message)
     {
         if (message.Values == null || message.Values.Count < 4) return;
@@ -351,15 +299,14 @@ public class OscSessionManager : MonoBehaviour
 
         _faceMetricsCount++;
         if (_faceMetricsCount % 30 == 0)
-            FileLogger.Log("OSC", $"RECV ← {ADDR_FACE_METRICS}  status={status}  iodNorm={iodNorm:F3}  cx={faceCx:F3}  cy={faceCy:F3}");
+            FileLogger.Log("OSC", $"RECV ← {k_addrFaceMetrics}  status={status}  iodNorm={iodNorm:F3}  cx={faceCx:F3}  cy={faceCy:F3}");
 
         OnFaceMetrics?.Invoke(iodNorm, faceCx, faceCy, status);
     }
 
-    /// <summary>/pong (response to /ping)</summary>
     private void OnPongReceived(OSCMessage message)
     {
-        FileLogger.Log("OSC", $"RECV ← {ADDR_PONG}");
+        FileLogger.Log("OSC", $"RECV ← {k_addrPong}");
         OnPong?.Invoke();
     }
 

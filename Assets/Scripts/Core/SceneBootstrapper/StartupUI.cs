@@ -1,10 +1,7 @@
 using System;
 using UnityEngine;
 
-/// <summary>
-/// IMGUI-based startup configuration panel shown on the Expert (PC) side.
-/// Requires no EventSystem or Input Module — works in all Unity input modes.
-/// </summary>
+// IMGUI startup config panel for Expert (PC); no EventSystem required.
 public class StartupUI : MonoBehaviour
 {
     public event Action OnConfirmed;
@@ -25,7 +22,7 @@ public class StartupUI : MonoBehaviour
     private int       _testReadPos;
     private float     _testLevel;   // smoothed 0..1 for the bar
     private float     _testPeak;    // raw peak this frame (0 = no signal)
-    private const int TEST_SR = 16000;
+    private const int k_testSr = 16000;
 
     private GUIStyle _panelStyle;
     private GUIStyle _titleStyle;
@@ -42,7 +39,7 @@ public class StartupUI : MonoBehaviour
 
     // ── Startup self-check (cached; recomputed only when id/order changes) ──
     private System.Collections.Generic.List<StartupSelfCheck.Issue> _issues;
-    private string _checkedId    = null;
+    private string _checkedId;
     private int    _checkedOrder = int.MinValue;
 
     // ── Python process detection ──────────────────────────────────────────────
@@ -54,7 +51,7 @@ public class StartupUI : MonoBehaviour
     private Coroutine         _pingCo;
     private bool              _pongReceived;
 
-    private const float PANEL_W = 480f;
+    private const float k_panelW = 480f;
     private float       _panelH;
 
     public void Initialize(StartupConfig config)
@@ -159,17 +156,17 @@ public class StartupUI : MonoBehaviour
         GUI.DrawTexture(new Rect(0, 0, Screen.width, Screen.height), Texture2D.whiteTexture);
         GUI.color = oldColor;
 
-        float px = (Screen.width  - PANEL_W) * 0.5f;
+        float px = (Screen.width  - k_panelW) * 0.5f;
         float py = (Screen.height - _panelH) * 0.5f;
 
-        GUI.Box(new Rect(px, py, PANEL_W, _panelH), GUIContent.none, _panelStyle);
+        GUI.Box(new Rect(px, py, k_panelW, _panelH), GUIContent.none, _panelStyle);
 
         float x = px + 24f;
-        float w = PANEL_W - 48f;
+        float w = k_panelW - 48f;
         float y = py + 16f;
 
         // ── Title ─────────────────────────────────────────────
-        GUI.Label(new Rect(px, y, PANEL_W, 32f), CoGazeStrings.Startup_Title, _titleStyle);
+        GUI.Label(new Rect(px, y, k_panelW, 32f), CoGazeStrings.Startup_Title, _titleStyle);
         y += 44f;
 
         // ── Participant ID ────────────────────────────────────
@@ -341,7 +338,7 @@ public class StartupUI : MonoBehaviour
         {
             StopTestMic();
             _testDevice = dev;
-            try { _testClip = Microphone.Start(dev, true, 1, TEST_SR); _testReadPos = 0; }
+            try { _testClip = Microphone.Start(dev, true, 1, k_testSr); _testReadPos = 0; }
             catch { _testClip = null; }
         }
         if (_testClip == null) return;
@@ -351,7 +348,7 @@ public class StartupUI : MonoBehaviour
         int pos   = Microphone.GetPosition(_testDevice);
         int avail = (pos - _testReadPos + len) % len;
         if (avail <= 0) { _testLevel = Mathf.Lerp(_testLevel, 0f, Time.deltaTime * 8f); return; }
-        avail = Mathf.Min(avail, TEST_SR / 10);   // up to 100 ms per frame
+        avail = Mathf.Min(avail, k_testSr / 10);   // up to 100 ms per frame
 
         var buf = new float[avail];
         _testClip.GetData(buf, _testReadPos);

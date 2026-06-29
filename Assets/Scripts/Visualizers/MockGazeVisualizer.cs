@@ -1,26 +1,20 @@
 using UnityEngine;
 
-/// <summary>
-/// Visualizerのデバッグ用モック。Photon不要で単体テスト可能。
-/// マウス位置を視線データ (x, y) として使い、クリックでblink。
-/// 
-/// 使い方: 空のGameObjectにアタッチしてPlay。
-///         1/2/3キーでRay/Circle/Frustumモード切替。
-/// </summary>
+// Debug-only visualizer: mouse position → gaze (x,y), click → blink; 1/2/3 keys cycle Ray/Circle/Frustum.
 public class MockGazeVisualizer : MonoBehaviour
 {
-    private RayVisualizer rayVisualizer;
-    private CircleVisualizer circleVisualizer;
-    private FrustumVisualizer frustumVisualizer;
+    private RayVisualizer _rayVisualizer;
+    private CircleVisualizer _circleVisualizer;
+    private FrustumVisualizer _frustumVisualizer;
 
-    private VisualizationMode currentMode = VisualizationMode.Ray;
-    private const float MAX_RAY_DISTANCE = 100f;
+    private VisualizationMode _currentMode = VisualizationMode.Ray;
+    private const float k_maxRayDistance = 100f;
 
     private void Start()
     {
-        rayVisualizer = gameObject.AddComponent<RayVisualizer>();
-        circleVisualizer = gameObject.AddComponent<CircleVisualizer>();
-        frustumVisualizer = gameObject.AddComponent<FrustumVisualizer>();
+        _rayVisualizer = gameObject.AddComponent<RayVisualizer>();
+        _circleVisualizer = gameObject.AddComponent<CircleVisualizer>();
+        _frustumVisualizer = gameObject.AddComponent<FrustumVisualizer>();
 
         SetMode(VisualizationMode.Ray);
         Debug.Log("[MockGazeVisualizer] Started. Keys: 1=Ray, 2=Circle, 3=Frustum");
@@ -51,49 +45,49 @@ public class MockGazeVisualizer : MonoBehaviour
 
         // ビューポート座標からレイ生成
         Ray ray = cam.ViewportPointToRay(new Vector3(x, y, 0));
-        bool hit = Physics.Raycast(ray, out RaycastHit hitInfo, MAX_RAY_DISTANCE);
+        bool hit = Physics.Raycast(ray, out RaycastHit hitInfo, k_maxRayDistance);
 
-        switch (currentMode)
+        switch (_currentMode)
         {
             case VisualizationMode.Ray:
                 Vector3 rayStart = ray.origin + ray.direction * 0.5f;
-                Vector3 rayEnd = hit ? hitInfo.point : ray.GetPoint(MAX_RAY_DISTANCE);
-                rayVisualizer.UpdateVisualization(rayStart, rayEnd);
+                Vector3 rayEnd = hit ? hitInfo.point : ray.GetPoint(k_maxRayDistance);
+                _rayVisualizer.UpdateVisualization(rayStart, rayEnd);
                 break;
 
             case VisualizationMode.Circle:
                 if (hit)
                 {
-                    circleVisualizer.UpdateVisualization(hitInfo.point, hitInfo.normal);
-                    circleVisualizer.SetVisible(true);
+                    _circleVisualizer.UpdateVisualization(hitInfo.point, hitInfo.normal);
+                    _circleVisualizer.SetVisible(true);
                 }
                 else
                 {
-                    circleVisualizer.SetVisible(false);
+                    _circleVisualizer.SetVisible(false);
                 }
                 break;
 
             case VisualizationMode.Frustum:
-                frustumVisualizer.SetCameraParams(cam.fieldOfView, cam.aspect);
-                Vector3 frustumEnd = hit ? hitInfo.point : ray.GetPoint(MAX_RAY_DISTANCE);
-                frustumVisualizer.UpdateVisualization(ray.origin, ray.direction, frustumEnd, hit);
+                _frustumVisualizer.SetCameraParams(cam.fieldOfView, cam.aspect);
+                Vector3 frustumEnd = hit ? hitInfo.point : ray.GetPoint(k_maxRayDistance);
+                _frustumVisualizer.UpdateVisualization(ray.origin, ray.direction, frustumEnd, hit);
                 break;
         }
     }
 
     private void SetMode(VisualizationMode mode)
     {
-        currentMode = mode;
-        rayVisualizer.enabled = (mode == VisualizationMode.Ray);
-        circleVisualizer.enabled = (mode == VisualizationMode.Circle);
-        frustumVisualizer.enabled = (mode == VisualizationMode.Frustum);
+        _currentMode = mode;
+        _rayVisualizer.enabled = (mode == VisualizationMode.Ray);
+        _circleVisualizer.enabled = (mode == VisualizationMode.Circle);
+        _frustumVisualizer.enabled = (mode == VisualizationMode.Frustum);
         Debug.Log($"[MockGazeVisualizer] Mode: {mode}");
     }
 
     private void HideAll()
     {
-        rayVisualizer.SetVisible(false);
-        circleVisualizer.SetVisible(false);
-        frustumVisualizer.SetVisible(false);
+        _rayVisualizer.SetVisible(false);
+        _circleVisualizer.SetVisible(false);
+        _frustumVisualizer.SetVisible(false);
     }
 }

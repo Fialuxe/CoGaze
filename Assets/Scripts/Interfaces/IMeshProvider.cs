@@ -1,6 +1,4 @@
-/// <summary>
-/// Interface for providing pre-placed mesh transform data.
-/// </summary>
+// Interface for providing pre-placed mesh transform data.
 public interface IMeshProvider
 {
     UnityEngine.Vector3 MeshPosition { get; }

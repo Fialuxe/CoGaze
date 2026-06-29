@@ -3,14 +3,7 @@ using System.IO;
 using System.Text;
 using UnityEngine;
 
-/// <summary>
-/// Startup pre-flight checks surfaced on the startup screens (Desktop IMGUI + HMD VR panel)
-/// instead of the Editor console — so a standalone build / headset shows missing instructions,
-/// a duplicate participant log, a missing SharedMesh, etc. before the experiment begins.
-///
-/// Severity: Fatal = block Start/confirm; Warning = allow but flag; Info = neutral status.
-/// Shared by StartupUI (Expert) and WorkerStartupPanel (Worker) so the rules live in one place.
-/// </summary>
+// Pre-flight checks shown on startup screens; Fatal blocks confirm, Warning flags. Shared by StartupUI and WorkerStartupPanel.
 public static class StartupSelfCheck
 {
     public enum Severity { Fatal, Warning, Info }
@@ -87,7 +80,6 @@ public static class StartupSelfCheck
         return n;
     }
 
-    /// <summary>participantOrderIndex → readable run order, so a mistyped index is caught early.</summary>
     public static string ConditionOrderPreview(int orderIndex)
     {
         var order = ExperimentDesign.ComputeOrder(orderIndex);

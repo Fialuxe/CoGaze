@@ -1,25 +1,8 @@
 using UnityEngine;
 
-/// <summary>
-/// Pure (no Photon/OVR) 2-point yaw-constrained rigid registration for QR-based calibration.
-/// Separated from MonoBehaviour so it can be unit-tested in EditMode without Android build.
-///
-/// Gravity constraint: only yaw (rotation around Vector3.up) is solved.
-/// No scale change. Both QR world positions are projected onto the horizontal plane for yaw,
-/// so height differences between QR codes are safely ignored.
-/// </summary>
+// Pure 2-point yaw-constrained rigid registration for QR-based calibration (no Photon/OVR).
 public static class DualQRCalibration
 {
-    /// <summary>
-    /// Computes the world (position, rotation) for SharedMesh so that indicatorA and indicatorB
-    /// (in mesh-local space) align with the two detected QR world positions.
-    /// </summary>
-    /// <param name="aLocal">Indicator A in SharedMesh local space. Invariant under mesh motion
-    ///   when the indicators are children of SharedMesh — use InverseTransformPoint or localPosition.</param>
-    /// <param name="bLocal">Indicator B in SharedMesh local space.</param>
-    /// <param name="aWorld">QR-A detected world position.</param>
-    /// <param name="bWorld">QR-B detected world position.</param>
-    /// <returns>(meshWorldPosition, meshWorldRotation) to apply via SetPositionAndRotation.</returns>
     public static (Vector3 position, Quaternion rotation) ComputePose(
         Vector3 aLocal, Vector3 bLocal, Vector3 aWorld, Vector3 bWorld)
     {

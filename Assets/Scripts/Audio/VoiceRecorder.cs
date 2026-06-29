@@ -5,37 +5,35 @@ using System.IO;
 using UnityEngine;
 using Photon.Voice.Unity;
 
-/// <summary>
-/// Records local mic and remote audio to WAV, independent of Photon Voice's Recorder.
-/// Uses a separate Microphone.Start() so recording continues even if PV2 drops.
-/// Remote audio is captured via RemoteAudioCapture attached to the Speaker's AudioSource.
-/// Call AttachRemoteCapture() after the remote player's Speaker is confirmed active.
-/// </summary>
+// Records mic + remote audio to per-condition WAV pairs; independent of PV2 so recording survives voice drops.
 public class VoiceRecorder : MonoBehaviour
 {
-    private const int SAMPLE_RATE         = 16000;
+    private const int k_sampleRate         = 16000;
     // Initial buffer reservation per session. Audio is flushed + cleared at each condition boundary
     // (see SaveSession), so a single session never approaches the old 30-minute whole-run size.
-    private const int RECORDING_CAPACITY  = SAMPLE_RATE * 60 * 10;
+    private const int k_recordingCapacity  = k_sampleRate * 60 * 10;
 
     // Mic-start watchdog tuning.
-    private const int   MIC_MAX_RETRIES   = 5;     // restart attempts before giving up (and alerting)
-    private const float MIC_STALL_TIMEOUT = 3f;    // seconds without a position advance => stalled
+    private const int   k_micMaxRetries   = 5;     // restart attempts before giving up (and alerting)
+    private const float k_micStallTimeout = 3f;    // seconds without a position advance => stalled
 
-    private string saveDir;
-    private string micDevice;
-    private string wavTimestamp;
+    private string _saveDir;
+    private string _micDevice;
+    private string _wavTimestamp;
 
-    private AudioClip     micClip;
-    private int           lastMicSample;
-    private bool          isCapturing;
-    private List<float>   localSamples  = new List<float>(RECORDING_CAPACITY);
+    private AudioClip     _micClip;
+    private int           _lastMicSample;
+    private bool          _isCapturing;
+    private List<float>   _localSamples  = new List<float>(k_recordingCapacity);
 
-    private List<float>   remoteSamples = new List<float>(RECORDING_CAPACITY);
+    private List<float>   _remoteSamples = new List<float>(k_recordingCapacity);
     internal readonly object remoteLock = new object();
     // Actual capture rate of the remote stream (DSP/output rate, ~48kHz) — NOT 16kHz. Used so the
     // remote WAV header matches the data; mismatching it corrupts the remote research channel.
     private int           _remoteSampleRate;
+
+    // Actual capture sample rate (may differ from k_sampleRate on USB devices with restricted caps).
+    private int           _localSampleRate = k_sampleRate;
 
     // Mic health/watchdog state (all touched only on the main thread: StartMic + the coroutines).
     private int           _lastMicPos;
@@ -49,15 +47,15 @@ public class VoiceRecorder : MonoBehaviour
 
     // Path of the most recently written per-session local WAV (falls back to the first session's
     // name until anything is saved, so a consumer reading it early still gets a sensible path).
-    public string LocalWavPath => _lastLocalWavPath ?? (string.IsNullOrEmpty(saveDir) ? null
-        : Path.Combine(saveDir, $"voice_local_{wavTimestamp}_s01.wav"));
+    public string LocalWavPath => _lastLocalWavPath ?? (string.IsNullOrEmpty(_saveDir) ? null
+        : Path.Combine(_saveDir, $"voice_local_{_wavTimestamp}_s01.wav"));
 
-    public float RecordingSeconds => localSamples.Count / (float)SAMPLE_RATE;
+    public float RecordingSeconds => _localSamples.Count / (float)k_sampleRate;
 
-    public void Initialize(bool isExpert, string saveDirectory, string preferredDevice = null)
+    public void Initialize(bool isExpert, string _saveDirectory, string preferredDevice = null)
     {
-        saveDir      = saveDirectory;
-        wavTimestamp = DateTime.Now.ToString("yyyyMMdd_HHmmss");
+        _saveDir      = _saveDirectory;
+        _wavTimestamp = DateTime.Now.ToString("yyyyMMdd_HHmmss");
         // Default remote rate to the current DSP/output rate; refined to the capture component's
         // value in AttachRemoteCapture. Only used when remote samples actually exist.
         _remoteSampleRate = AudioSettings.outputSampleRate > 0 ? AudioSettings.outputSampleRate : 48000;
@@ -71,7 +69,7 @@ public class VoiceRecorder : MonoBehaviour
         if (_experiment != null) _experiment.OnStateChanged += OnExperimentStateChanged;
         else Debug.LogWarning("[VoiceRecorder] ExperimentManager2 not found — per-session save disabled (will still save on destroy).");
 
-        Debug.Log($"[VoiceRecorder] Ready  mic={micDevice ?? "(default)"}  dir={saveDir}");
+        Debug.Log($"[VoiceRecorder] Ready  mic={_micDevice ?? "(default)"}  dir={_saveDir}");
     }
 
     // Call once the remote Speaker is available (e.g. PhotonVoiceView.SpeakerInUse != null).
@@ -81,7 +79,7 @@ public class VoiceRecorder : MonoBehaviour
         var src = speaker.GetComponent<AudioSource>();
         if (src == null) { Debug.LogWarning("[VoiceRecorder] Speaker has no AudioSource."); return; }
         var cap = src.gameObject.AddComponent<RemoteAudioCapture>();
-        cap.Initialize(remoteSamples, remoteLock);
+        cap.Initialize(_remoteSamples, remoteLock);
         // Record the stream's true (DSP/output) capture rate so the remote WAV header is correct.
         if (cap.SampleRate > 0) _remoteSampleRate = cap.SampleRate;
         Debug.Log($"[VoiceRecorder] Remote audio capture attached  rate={_remoteSampleRate}Hz mono.");
@@ -94,36 +92,50 @@ public class VoiceRecorder : MonoBehaviour
             if (Microphone.devices.Length == 0)
             {
                 ReportMicFailure("No microphone devices available.");
-                micDevice = null; micClip = null; isCapturing = false;
+                _micDevice = null; _micClip = null; _isCapturing = false;
                 return false;
             }
             bool ok = !string.IsNullOrEmpty(preferred)
                    && Array.Exists(Microphone.devices, d => d == preferred);
-            micDevice = ok ? preferred : Microphone.devices[0];
-            micClip = Microphone.Start(micDevice, true, 10, SAMPLE_RATE);
-            if (micClip == null)
+            _micDevice = ok ? preferred : Microphone.devices[0];
+
+            // Query device-supported frequencies; USB audio devices may not support 16kHz
+            // and will stall silently if forced to that rate.
+            Microphone.GetDeviceCaps(_micDevice, out int minFreq, out int maxFreq);
+            int freq = k_sampleRate;
+            if (minFreq > 0 || maxFreq > 0)
+            {
+                if (maxFreq > 0 && freq > maxFreq) freq = maxFreq;
+                if (minFreq > 0 && freq < minFreq) freq = minFreq;
+            }
+            if (freq != k_sampleRate)
+                FileLogger.Log("VoiceRecorder", $"Mic '{_micDevice}' caps [{minFreq},{maxFreq}]Hz — using {freq}Hz instead of {k_sampleRate}Hz.");
+            _localSampleRate = freq;
+
+            _micClip = Microphone.Start(_micDevice, true, 10, freq);
+            if (_micClip == null)
             {
                 ReportMicFailure($"Microphone.Start returned null for '{MicName}'.");
-                isCapturing = false;
+                _isCapturing = false;
                 return false;
             }
             // Warm-up / stall detection is confirmed asynchronously by MicWatchdog (no busy-wait that
             // would block the main thread). Seed progress tracking so the watchdog has a baseline.
-            lastMicSample        = 0;
+            _lastMicSample        = 0;
             _lastMicPos          = 0;
             _lastMicProgressTime = Time.realtimeSinceStartup;
-            isCapturing          = true;
+            _isCapturing          = true;
             return true;
         }
         catch (Exception ex)
         {
             ReportMicFailure($"Mic start failed: {ex.Message}");
-            isCapturing = false;
+            _isCapturing = false;
             return false;
         }
     }
 
-    private string MicName => string.IsNullOrEmpty(micDevice) ? "(default)" : micDevice;
+    private string MicName => string.IsNullOrEmpty(_micDevice) ? "(default)" : _micDevice;
 
     // Persistent + operator-visible alert. Debug.LogError surfaces as a red console/logcat entry;
     // FileLogger gives a durable on-disk record (no-op until FileLogger.Init has run, never throws).
@@ -143,10 +155,10 @@ public class VoiceRecorder : MonoBehaviour
         {
             yield return wait;
 
-            bool recording = isCapturing && micClip != null && Microphone.IsRecording(micDevice);
+            bool recording = _isCapturing && _micClip != null && Microphone.IsRecording(_micDevice);
             if (recording)
             {
-                int pos = Microphone.GetPosition(micDevice);
+                int pos = Microphone.GetPosition(_micDevice);
                 if (pos != _lastMicPos)
                 {
                     // Mic is producing samples — healthy.
@@ -166,35 +178,35 @@ public class VoiceRecorder : MonoBehaviour
             // Not advancing yet — covers BOTH "IsRecording not true yet" (Android mic warm-up can lag
             // Start) and "recording but position stuck". The grace window gates ALL restarts so we never
             // churn-restart a mic that is merely warming up and fire a false silence alarm.
-            if (Time.realtimeSinceStartup - _lastMicProgressTime < MIC_STALL_TIMEOUT) continue;
+            if (Time.realtimeSinceStartup - _lastMicProgressTime < k_micStallTimeout) continue;
 
-            if (retries >= MIC_MAX_RETRIES)
+            if (retries >= k_micMaxRetries)
             {
                 if (!_micGaveUp)
                 {
                     _micGaveUp = true;
                     ReportMicFailure($"Mic '{MicName}' still not producing samples after " +
-                                     $"{MIC_MAX_RETRIES} restarts — LOCAL AUDIO MAY BE SILENT.");
+                                     $"{k_micMaxRetries} restarts — LOCAL AUDIO MAY BE SILENT.");
                 }
                 continue;
             }
 
             retries++;
-            ReportMicFailure($"Mic '{MicName}' not recording/stalled — restart {retries}/{MIC_MAX_RETRIES}.");
+            ReportMicFailure($"Mic '{MicName}' not recording/stalled — restart {retries}/{k_micMaxRetries}.");
             RestartMic();
         }
     }
 
-    // Restart the mic without discarding already-captured localSamples (only the clip read cursor is
+    // Restart the mic without discarding already-captured _localSamples (only the clip read cursor is
     // reset). All callers are main-thread coroutines, so no locking is needed for the local buffer.
     private void RestartMic()
     {
-        try { if (micClip != null && Microphone.IsRecording(micDevice)) Microphone.End(micDevice); }
+        try { if (_micClip != null && Microphone.IsRecording(_micDevice)) Microphone.End(_micDevice); }
         catch (Exception ex) { Debug.LogWarning($"[VoiceRecorder] Mic stop before restart failed: {ex.Message}"); }
-        micClip       = null;
-        isCapturing   = false;
+        _micClip       = null;
+        _isCapturing   = false;
         _micConfirmed = false;
-        StartMic(micDevice);
+        StartMic(_micDevice);
     }
 
     private IEnumerator CaptureLoop()
@@ -203,50 +215,45 @@ public class VoiceRecorder : MonoBehaviour
         while (true)
         {
             yield return wait;
-            if (!isCapturing || micClip == null) continue;
+            if (!_isCapturing || _micClip == null) continue;
             try
             {
-                int pos       = Microphone.GetPosition(micDevice);
-                int available = (pos - lastMicSample + micClip.samples) % micClip.samples;
+                int pos       = Microphone.GetPosition(_micDevice);
+                int available = (pos - _lastMicSample + _micClip.samples) % _micClip.samples;
                 if (available <= 0) continue;
                 available = Mathf.Min(available, 2560); // cap to 8×320 frames per tick
                 var buf = new float[available];
-                micClip.GetData(buf, lastMicSample);
-                lastMicSample = (lastMicSample + available) % micClip.samples;
-                localSamples.AddRange(buf);
+                _micClip.GetData(buf, _lastMicSample);
+                _lastMicSample = (_lastMicSample + available) % _micClip.samples;
+                _localSamples.AddRange(buf);
             }
             catch (Exception ex) { Debug.LogWarning($"[VoiceRecorder] Capture error: {ex.Message}"); }
         }
     }
 
-    /// <summary>
-    /// Save the audio buffered since the last call to a numbered per-session WAV pair, then clear the
-    /// buffers. Called at each condition boundary (Questionnaire) and on Finished/destroy, so a crash
-    /// or force-quit loses at most the current session, and RAM does not grow across a long run.
-    /// </summary>
     public void SaveSession()
     {
-        if (string.IsNullOrEmpty(saveDir)) return;
+        if (string.IsNullOrEmpty(_saveDir)) return;
 
-        // Snapshot + clear. localSamples is touched only on the main thread (CaptureLoop coroutine +
-        // this call); remoteSamples is also written from the audio thread — so lock only that one.
-        var localSnap = new List<float>(localSamples);
-        localSamples.Clear();
+        // Snapshot + clear. _localSamples is touched only on the main thread (CaptureLoop coroutine +
+        // this call); _remoteSamples is also written from the audio thread — so lock only that one.
+        var localSnap = new List<float>(_localSamples);
+        _localSamples.Clear();
         List<float> remoteSnap;
-        lock (remoteLock) { remoteSnap = new List<float>(remoteSamples); remoteSamples.Clear(); }
+        lock (remoteLock) { remoteSnap = new List<float>(_remoteSamples); _remoteSamples.Clear(); }
 
         if (localSnap.Count == 0 && remoteSnap.Count == 0) return; // nothing buffered this session
 
-        try   { Directory.CreateDirectory(saveDir); }
+        try   { Directory.CreateDirectory(_saveDir); }
         catch (Exception ex) { Debug.LogWarning($"[VoiceRecorder] Cannot create dir: {ex.Message}"); return; }
 
         _sessionIndex++;
-        string tag = $"{wavTimestamp}_s{_sessionIndex:D2}";
-        _lastLocalWavPath = Path.Combine(saveDir, $"voice_local_{tag}.wav");
-        // Local mic is captured at SAMPLE_RATE (16kHz) mono; remote is captured at the DSP/output rate
-        // (~48kHz) and mono-downmixed by RemoteAudioCapture — each WAV must declare its OWN rate.
-        WriteWav(localSnap,  _lastLocalWavPath,                                  SAMPLE_RATE,       1);
-        WriteWav(remoteSnap, Path.Combine(saveDir, $"voice_remote_{tag}.wav"),   _remoteSampleRate, 1);
+        string tag = $"{_wavTimestamp}_s{_sessionIndex:D2}";
+        _lastLocalWavPath = Path.Combine(_saveDir, $"voice_local_{tag}.wav");
+        // Local mic is captured at _localSampleRate (usually 16kHz, may be higher for USB devices);
+        // remote is captured at the DSP/output rate (~48kHz) — each WAV declares its OWN rate.
+        WriteWav(localSnap,  _lastLocalWavPath,                                  _localSampleRate,  1);
+        WriteWav(remoteSnap, Path.Combine(_saveDir, $"voice_remote_{tag}.wav"),   _remoteSampleRate, 1);
     }
 
     private void OnExperimentStateChanged(ExperimentState state)
@@ -266,7 +273,7 @@ public class VoiceRecorder : MonoBehaviour
     {
         if (samples == null || samples.Count == 0)
         { Debug.LogWarning($"[VoiceRecorder] No audio for {path}"); return; }
-        if (sampleRate <= 0) { sampleRate = SAMPLE_RATE; }   // defensive: never write a 0Hz header
+        if (sampleRate <= 0) { sampleRate = k_sampleRate; }   // defensive: never write a 0Hz header
         if (channels  <= 0) { channels  = 1; }
         try
         {
@@ -294,9 +301,9 @@ public class VoiceRecorder : MonoBehaviour
 
     private void OnDestroy()
     {
-        isCapturing = false;
+        _isCapturing = false;
         if (_experiment != null) _experiment.OnStateChanged -= OnExperimentStateChanged;
-        try { if (micClip != null) Microphone.End(micDevice); } catch { }
+        try { if (_micClip != null) Microphone.End(_micDevice); } catch { }
         try { SaveSession(); } catch { }   // persist whatever remains in the final, unflushed session
     }
 }
