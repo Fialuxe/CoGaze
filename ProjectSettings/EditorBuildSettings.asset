@@ -8,6 +8,9 @@ EditorBuildSettings:
   - enabled: 1
     path: Assets/Scenes/ExperimentScene.unity
     guid: 8139bc4e9187c1c4eb63144cbf9947bc
+  - enabled: 0
+    path: Assets/Scenes/ExperimentScene_GazeFix.unity
+    guid: c47d2e8ab19f36d4f9a05c1e78b2d4a3
   m_configObjects:
     com.unity.input.settings.actions: {fileID: -944628639613478452, guid: 052faaac586de48259a63d0c4782560b, type: 3}
     com.unity.xr.management.loader_settings: {fileID: 11400000, guid: 29af42509d838734daca8e7b682c59ee, type: 2}
