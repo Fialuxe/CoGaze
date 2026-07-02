@@ -135,6 +135,32 @@ public class DebugHUD : MonoBehaviour
 
         sb.AppendLine($"[LocalRole] {RoleManager.LocalRole}");
 
+        // [Build] / [GazeFix] — build identification + gaze-fix liveness. Lets the operator confirm
+        // in-headset that the intended scene/APK is running and that the projection fixes are
+        // actually active — a silent fallback (or a wrong build) would otherwise only be visible
+        // in logcat, and a whole session could be wasted before anyone noticed.
+        sb.AppendLine($"[Build] {UnityEngine.SceneManagement.SceneManager.GetActiveScene().name}  v{Application.version}");
+        var gazeFix = GazeProjectionFixConfig.Instance;
+        sb.Append("[GazeFix] ");
+        if (gazeFix == null)
+        {
+            sb.AppendLine("absent (legacy scene)");
+        }
+        else
+        {
+            // Flags read "on"/"OFF" so a disabled fix stands out at a glance.
+            sb.AppendLine($"pillarbox={(gazeFix.remapPillarbox ? "on" : "OFF")} " +
+                          $"intrinsics={(gazeFix.useRealIntrinsics ? "on" : "OFF")} " +
+                          $"pcaPose={(gazeFix.usePcaPoseOrigin ? "on" : "OFF")}");
+            sb.AppendLine(WorkerVideoStream.GazeFixIntrinsicsPushed
+                ? $"  intrinsics: vFOV={WorkerVideoStream.GazeFixVFov:F1}°  aspect={WorkerVideoStream.GazeFixAspect:F3}"
+                : "  intrinsics: not pushed yet (default 90°/4:3)");
+            // Pose being unavailable outside Assembly is normal — phrase it neutrally.
+            sb.AppendLine(WorkerVideoStream.TryGetPcaCameraPose(out _)
+                ? "  PCA pose: LIVE"
+                : "  PCA pose: n/a (not streaming)");
+        }
+
 #if UNITY_ANDROID && !UNITY_EDITOR
         sb.AppendLine($"[MRUK] {(MRUK.Instance != null ? "OK" : "null — QR unavailable")}");
 #endif

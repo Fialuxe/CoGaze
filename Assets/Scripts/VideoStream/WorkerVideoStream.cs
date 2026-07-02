@@ -23,6 +23,13 @@ public class WorkerVideoStream : MonoBehaviour
     private static WorkerVideoStream s_instance;
     private bool _intrinsicsPushed;
 
+    // GazeFix HUD diagnostics (DebugHUD): whether REAL intrinsics were pushed and what values.
+    // Statics live outside platform ifdefs so DebugHUD compiles on every platform; they are
+    // only ever assigned on the Quest (inside PushRealIntrinsics).
+    public static bool  GazeFixIntrinsicsPushed { get; private set; }
+    public static float GazeFixVFov   { get; private set; }
+    public static float GazeFixAspect { get; private set; }
+
 #if UNITY_ANDROID && !UNITY_EDITOR
     private PassthroughCameraAccess _pca;
 #endif
@@ -37,6 +44,7 @@ public class WorkerVideoStream : MonoBehaviour
     public void Initialize(ExperimentManager2 manager)
     {
         s_instance  = this;
+        GazeFixIntrinsicsPushed = false;   // stale static from a previous run would mislead the HUD
         _expManager = manager;
         _expManager.OnStateChanged += OnStateChanged;
 
@@ -179,6 +187,9 @@ public class WorkerVideoStream : MonoBehaviour
             viz.SetStreamingPrincipalPointOffset(ppOffset);
         }
         _intrinsicsPushed = true;
+        GazeFixIntrinsicsPushed = true;   // HUD diagnostics
+        GazeFixVFov   = vFov;
+        GazeFixAspect = aspect;
         FileLogger.Log("Transport",
             $"[WorkerVideoStream] GazeFix intrinsics: sensor={sensor} current={current} " +
             $"f={intr.FocalLength} pp={intr.PrincipalPoint} → vFOV={vFov:F2}° aspect={aspect:F4} ppOffset={ppOffset}");

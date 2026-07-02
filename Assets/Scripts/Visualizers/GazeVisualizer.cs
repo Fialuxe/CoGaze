@@ -61,6 +61,8 @@ public class GazeVisualizer : MonoBehaviour
     // which during Assembly is the Worker's own head pose round-tripped through Photon twice
     // (Worker→Expert follow→Worker) — laggy, and offset from the left passthrough camera.
     private Camera _pcaPoseCamera;
+    // GazeFix scene only: one-time CSV header for the GazeHit log (see LogGazeHit).
+    private bool _gazeHitHeaderLogged;
     private bool _isStreamingMode;
     private bool _isGazeFallback;
     private int  _fallbackWarnCounter;
@@ -277,6 +279,12 @@ public class GazeVisualizer : MonoBehaviour
         {
             _lastHit = Physics.Raycast(ray, out _lastHitInfo, k_maxRayDistance, _raycastMask);
             _lastRay = ray;
+
+            // GazeFix scene only: 実際に表示した視線位置の記録（raycast と同じ ~12Hz、blink 中はここに来ない）。
+            // Expert 側 frames.csv は補正前の画面座標しか持たないため、Worker が見たヒット点の
+            // 正解データはここでしか取れない。オフライン分析・残留誤差検証（QR 注視プロトコル）用。
+            if (fixCfg != null && fixCfg.logGazeHits)
+                LogGazeHit(ray, x + pp.x, y + pp.y, fallback, rayCamera == _pcaPoseCamera);
         }
 
         // 各Visualizerに情報を渡す（キャッシュされた結果を使用）
@@ -312,6 +320,25 @@ public class GazeVisualizer : MonoBehaviour
     {
         if (_pcaPoseCamera != null)
             Destroy(_pcaPoseCamera.gameObject);
+    }
+
+    // GazeFix scene only: 表示済み視線のヒット点を FileLogger に CSV で追記する。
+    // FileLogger.Log は Init 前・書き込み失敗時は黙って no-op なので実験ループを壊さない。
+    private void LogGazeHit(Ray ray, float vx, float vy, bool fallback, bool usedPcaCamera)
+    {
+        if (!_gazeHitHeaderLogged)
+        {
+            _gazeHitHeaderLogged = true;
+            FileLogger.Log("GazeHit",
+                "header: t,mode,streaming,fallback,vx,vy,hit,hitX,hitY,hitZ,origX,origY,origZ,dirX,dirY,dirZ,cam");
+        }
+        Vector3 hp = _lastHit ? _lastHitInfo.point : Vector3.zero;
+        FileLogger.Log("GazeHit",
+            $"{Time.realtimeSinceStartup:F3},{_currentMode},{(_isStreamingMode ? 1 : 0)},{(fallback ? 1 : 0)}," +
+            $"{vx:F4},{vy:F4},{(_lastHit ? 1 : 0)},{hp.x:F4},{hp.y:F4},{hp.z:F4}," +
+            $"{ray.origin.x:F4},{ray.origin.y:F4},{ray.origin.z:F4}," +
+            $"{ray.direction.x:F4},{ray.direction.y:F4},{ray.direction.z:F4}," +
+            $"{(usedPcaCamera ? "pca" : "legacy")}");
     }
 
     private void HideAll()

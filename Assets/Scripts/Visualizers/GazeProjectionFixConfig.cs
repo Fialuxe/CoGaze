@@ -25,6 +25,12 @@ public class GazeProjectionFixConfig : MonoBehaviour
     [Header("Fix 3 — local PCA pose as ray origin")]
     public bool usePcaPoseOrigin = true;
 
+    [Header("Gaze hit-point logging")]
+    // Logs the gaze overlay position actually displayed (world-space hit point + ray context)
+    // to FileLogger at the raycast cadence (~12Hz on device). Ground truth for offline analysis
+    // and for the residual-error validation protocol (Expert stares at a known QR marker).
+    public bool logGazeHits = true;
+
     public static GazeProjectionFixConfig Instance { get; private set; }
 
     private void Awake()
@@ -36,7 +42,8 @@ public class GazeProjectionFixConfig : MonoBehaviour
         }
         Instance = this;
         Debug.Log($"[GazeProjectionFixConfig] Gaze fixes active: pillarbox={remapPillarbox} " +
-                  $"intrinsics={useRealIntrinsics} pcaPose={usePcaPoseOrigin} screenAspect={expertScreenAspect:F3}");
+                  $"intrinsics={useRealIntrinsics} pcaPose={usePcaPoseOrigin} hitLog={logGazeHits} " +
+                  $"screenAspect={expertScreenAspect:F3}");
     }
 
     private void OnDestroy()
