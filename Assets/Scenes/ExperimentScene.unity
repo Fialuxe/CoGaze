@@ -392,6 +392,7 @@ MonoBehaviour:
   m_EditorClassIdentifier: 
   participantOrderIndex: 0
   participantId: P00
+  requiredTaskQRCount: 5
   _editorForceWorkerRole: 0
 --- !u!4 &587506043
 Transform:
@@ -1259,7 +1260,7 @@ Transform:
   m_GameObject: {fileID: 1322018730}
   serializedVersion: 2
   m_LocalRotation: {x: -0, y: -0, z: -0, w: 1}
-  m_LocalPosition: {x: -1.3589997, y: 0.21399999, z: 1.957}
+  m_LocalPosition: {x: -1.297, y: 0.21399999, z: 1.992}
   m_LocalScale: {x: 1, y: 1, z: 1}
   m_ConstrainProportionsScale: 0
   m_Children: []
@@ -1703,6 +1704,8 @@ MonoBehaviour:
   sendPort: 9001
   sharedReceiver: {fileID: 0}
   maxMarginalRetries: 0
+  autoLaunchPythonExe: python
+  autoLaunchScriptPath: 
 --- !u!1 &1508824412
 GameObject:
   m_ObjectHideFlags: 0
@@ -1976,7 +1979,7 @@ Transform:
   m_GameObject: {fileID: 1806413832}
   serializedVersion: 2
   m_LocalRotation: {x: -0, y: -0, z: -0, w: 1}
-  m_LocalPosition: {x: -0.61899996, y: 0.22600001, z: -0.5970001}
+  m_LocalPosition: {x: -0.559, y: 0.22600001, z: -0.634}
   m_LocalScale: {x: 1, y: 1, z: 1}
   m_ConstrainProportionsScale: 0
   m_Children: []
@@ -2084,7 +2087,6 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: 
   meshObjectName: SharedMesh
-  moveSpeed: 1
   rotateSpeed: 45
   bakedCollisionMeshes:
   - {fileID: 4300000, guid: 0b12aa106b5158c4493ebb0c423fef2f, type: 2}
@@ -2096,6 +2098,8 @@ MonoBehaviour:
   calibrationQRIdB: QR_CALIB_B
   indicatorA: {fileID: 1322018731}
   indicatorB: {fileID: 1806413833}
+  calibQRColorA: "\u8D64\u8272\u306E\u67A0"
+  calibQRColorB: "\u9752\u8272\u306E\u67A0"
 --- !u!1 &1863939272
 GameObject:
   m_ObjectHideFlags: 0

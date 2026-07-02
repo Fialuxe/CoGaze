@@ -91,7 +91,7 @@ public class WorkerVideoStream : MonoBehaviour
         if (_streamCoroutine != null) return;
 #if UNITY_ANDROID && !UNITY_EDITOR
         if (_pca != null) _pca.enabled = true;
-#else
+#elif UNITY_EDITOR
         SetupEditorCamera();
 #endif
         _streamCoroutine = StartCoroutine(CaptureLoop());
