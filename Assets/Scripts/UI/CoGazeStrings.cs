@@ -130,7 +130,9 @@ public static partial class CoGazeStrings
     // ── Rest break (auto-inserted every few conditions; operator resumes with Enter) ──────
     // Resume is operator-driven (Expert presses Enter), so tell the subject the concrete
     // signal to give (speak up) rather than implying an in-HMD control exists.
-    public const string Rest_Worker = "休憩中です\n再開の準備ができたら、声で担当者にお知らせください";
+    // Protocol: the subject removes the headset during breaks — say so explicitly, and the
+    // put-back-on step must come BEFORE the speak-up step (they can't read this text later).
+    public const string Rest_Worker = "休憩中です — ヘッドセットを外して休憩してください\n再開するときはヘッドセットを着け直してから、\n声で担当者にお知らせください";
     public const string Rest_Expert = "休憩中 — 再開するには Enter を押してください";
 
     // ── Expert setup readiness, shown on the Worker during Setup ──────────
