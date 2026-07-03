@@ -58,11 +58,8 @@ public class CircleVisualizer : MonoBehaviour
 
     public void SetFallbackMode(bool fallback)
     {
-        if (_lineRenderer == null) return;
-        var c = fallback ? new Color(0.7f, 0.7f, 0.7f, 0.5f) : k_circleColor;
-        _lineRenderer.startColor = c;
-        _lineRenderer.endColor   = c;
-        if (_lineRenderer.material != null) _lineRenderer.material.color = c;
+        if (_lineRenderer == null || _lineRenderer.material == null) return;
+        _lineRenderer.material.color = fallback ? new Color(0.7f, 0.7f, 0.7f, 0.5f) : k_circleColor;
     }
 
     private void CreateCircleRenderer()
@@ -75,9 +72,12 @@ public class CircleVisualizer : MonoBehaviour
         _lineRenderer.useWorldSpace = true;
         // Sprites/Default が VR の LineRenderer で描画されないことがあるため UI/Default を使用する（FrustumVisualizer 参照）
         _lineRenderer.material = new Material(Shader.Find("UI/Default"));
+        // 色はマテリアル側のみに持たせる。UI/Default は頂点色×マテリアル色を乗算するため、
+        // start/endColor にも同色を入れると二重乗算になり (1,0.4,0,0.9)² ≈ (1,0.16,0,0.81) と
+        // 設計値より暗く・薄く表示されてしまう（Frustum の縁と同じ持ち方に統一）。
         _lineRenderer.material.color = k_circleColor;
-        _lineRenderer.startColor = k_circleColor;
-        _lineRenderer.endColor = k_circleColor;
+        _lineRenderer.startColor = Color.white;
+        _lineRenderer.endColor = Color.white;
         _lineRenderer.enabled = false;
     }
 }

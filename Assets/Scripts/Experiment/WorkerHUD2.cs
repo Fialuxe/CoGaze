@@ -778,9 +778,14 @@ public class WorkerHUD2 : MonoBehaviour
     private void HandleProgressChanged(int stepIdx, int totalSteps, StepType stepType)
     {
         var state = _manager != null ? _manager.CurrentState : ExperimentState.Idle;
-        if (state == ExperimentState.TaskComplete ||
-            state == ExperimentState.NoiseComplete ||
-            state == ExperimentState.Finished)
+        // ステップ文言は、ステップが実際に走っている状態でだけ表示する。Transition() は
+        // どの状態遷移でも OnProgressChanged を発火し、CurrentStepType の初期値は Noise(=0)
+        // なので、ここで無条件に描くと実験開始前（Tutorial/Idle など）の状態表示が
+        // 「呼吸してください」等の古い/初期ステップ文言で上書きされてしまう
+        // （呼吸ガイド本体は WhiteNoise 状態でしか出ないため、文言だけが取り残される）。
+        if (state != ExperimentState.WhiteNoise &&
+            state != ExperimentState.TaskRunning &&
+            state != ExperimentState.Questionnaire)
             return;
 
         int runPos    = _manager != null ? _manager.CurrentConditionRunPosition : -1;

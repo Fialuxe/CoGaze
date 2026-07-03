@@ -1,6 +1,6 @@
 using UnityEngine;
 
-// Frustum gaze visualizer: pyramid mesh showing Expert FOV; face-only for Expert, full for Worker.
+// Frustum gaze visualizer: pyramid mesh showing Expert FOV; far face + edge lines, identical on Expert and Worker.
 public class FrustumVisualizer : MonoBehaviour
 {
     // ピンクバグを防ぐため Sprites/Default を使用
@@ -131,28 +131,12 @@ public class FrustumVisualizer : MonoBehaviour
             new Vector3(-halfH_far,   halfV_far,  k_frustumLength), // 7 far TL
         };
 
-        // In replay scene there is no Photon role — default to Expert style (far face only)
-        // so the frustum doesn't obscure the observer's view.
-        bool isExpert = string.IsNullOrEmpty(RoleManager.LocalRole) ||
-                        RoleManager.LocalRole == RoleManager.ROLE_EXPERT;
-
-        int[] tris;
-        if (isExpert)
-        {
-            // Expert本人の場合、遠面（大きい四角形）だけを描画し、視界を塞がないようにする
-            tris = new int[] { 4,5,7, 5,6,7 };
-        }
-        else
-        {
-            // Workerから見る場合は、遠面と側面を描画する（近面は顔に埋まるので描画しない）
-            tris = new int[] {
-                4,5,7, 5,6,7,   // 遠面
-                0,1,4, 1,5,4,   // 下面
-                2,3,6, 3,7,6,   // 上面
-                0,4,3, 3,4,7,   // 左面
-                1,2,5, 2,6,5    // 右面
-            };
-        }
+        // 面は Expert/Worker とも遠面のみ。錐台の頂点は（Assembly 中は PCA ポーズ経由で）
+        // Worker 自身の頭に一致するため、側面を張ると視界周辺を半透明の壁が囲み作業を妨げる。
+        // また役割で形状を変えると Expert と Worker で見えているものが異なり、システム紹介
+        // 画像で両者のスクリーンショットが食い違う。縁は UpdateEdgeLines で遠面4辺+側辺4本
+        // のみ描き、方向（錐台の広がり）は側辺のラインだけで伝える。
+        int[] tris = { 4,5,7, 5,6,7 };
 
         if (_frustumMesh == null)
         {
@@ -168,10 +152,10 @@ public class FrustumVisualizer : MonoBehaviour
         _frustumMesh.triangles = tris;
         _frustumMesh.RecalculateNormals();
 
-        UpdateEdgeLines(verts, isExpert);
+        UpdateEdgeLines(verts);
     }
 
-    private void UpdateEdgeLines(Vector3[] v, bool isExpert)
+    private void UpdateEdgeLines(Vector3[] v)
     {
         (int a, int b)[] edges = {
             (0,1),(1,2),(2,3),(3,0),     // 近面 0-3
@@ -185,21 +169,12 @@ public class FrustumVisualizer : MonoBehaviour
         LineRenderer[] lrs = _cachedLineRenderers;
         for (int i = 0; i < Mathf.Min(lrs.Length, edges.Length); i++)
         {
-            if (isExpert)
+            // 遠面の4辺(4〜7)と手前から奥へ伸びる側辺(8〜11)のみ表示。近面の縁(0〜3)は
+            // 頂点=頭から5cmの位置に来て目の前を横切るため、どちらの役割でも描かない。
+            bool show = i >= 4;
+            lrs[i].enabled = show;
+            if (show)
             {
-                // Expertは遠面の4辺(4〜7)と、手前から奥へ伸びる側面(8〜11)を表示する（近面0〜3だけ隠す）
-                bool show = i >= 4;
-                lrs[i].enabled = show;
-                if (show)
-                {
-                    lrs[i].SetPosition(0, v[edges[i].a]);
-                    lrs[i].SetPosition(1, v[edges[i].b]);
-                }
-            }
-            else
-            {
-                // Workerは全エッジ表示
-                lrs[i].enabled = true;
                 lrs[i].SetPosition(0, v[edges[i].a]);
                 lrs[i].SetPosition(1, v[edges[i].b]);
             }

@@ -139,6 +139,17 @@ public static partial class CoGazeStrings
     public const string Worker_ExpertPreparing = "実験者: 準備中…";
     public const string Worker_ExpertReady     = "実験者: 準備完了";
 
+    // ── Expert-activity notices (broadcast to the Worker during the ConditionStart gate) ──
+    // The webcam gaze calibration runs ~1 minute on the Expert PC with nothing visible in the
+    // HMD; without these the subject sits in an unexplained wait (and may think it froze).
+    // Say what is happening and that no action is needed.
+    public const string Worker_ExpertCalibrating =
+        "実験者が視線の調整（キャリブレーション）を行っています\nそのままお待ちください（1分ほどかかります）";
+    public const string Worker_ExpertCalibDone =
+        "視線の調整が完了しました\nまもなく次に進みます";
+    public const string Worker_ExpertCalibIssue =
+        "実験者が準備を行っています\nそのままお待ちください";
+
     // ── Condition start (Worker HUD) ──────────────────────────────────────
     // Must NOT use MessageBank: Android skips file loading, so keys leak as raw English.
     public static string Exp_CondStartWorker(int pos, int total) =>
