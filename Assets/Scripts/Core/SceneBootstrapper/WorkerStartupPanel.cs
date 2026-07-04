@@ -2,16 +2,31 @@ using System.Collections.Generic;
 using System.Text;
 using UnityEngine;
 using UnityEngine.UI;
+using Photon.Pun;
 
 // Worker (Quest) WorldSpace startup panel; A button confirms, Fatal checks block. Mirrors WorkerHUD2 canvas style.
+//
+// The panel deliberately does NOT show the local participant id: the real id is adopted from the
+// Expert's room properties at join, so the on-device value is only a stale fallback and showing it
+// ("参加者: P00") repeatedly misled operators. Instead the panel shows live connectivity checks:
+// Photon reachability and whether the Expert's room already exists (lobby preview — no room join
+// until the A-button confirm; SceneBootstrapper2 starts ConnectForRoomPreview alongside this panel).
 public class WorkerStartupPanel : MonoBehaviour
 {
     public bool Confirmed { get; private set; }
 
     private Font       _font;
     private Text       _hintText;
+    private Text       _netLine;    // Photon connectivity (online mode only)
+    private Text       _roomLine;   // Expert room presence (online mode only)
     private bool       _hasFatal;
+    private bool       _offline;
+    private float      _nextNetRefresh;
     private GameObject _panelGo;   // canvas root (parented to centerEyeAnchor, NOT to this object)
+
+    private static readonly Color k_ok   = new Color(0.4f, 1f, 0.6f);
+    private static readonly Color k_warn = new Color(1f, 0.85f, 0.3f);
+    private static readonly Color k_dim  = new Color(0.7f, 0.75f, 0.8f);
 
     public void Initialize(StartupConfig config)
     {
@@ -19,15 +34,20 @@ public class WorkerStartupPanel : MonoBehaviour
              ?? Resources.Load<Font>("Fonts/NotoSansCJK-Regular")
              ?? Resources.Load<Font>("Fonts/NotoSansJP");
 
+        _offline = config.offlineMode;
+
         // Worker skips the instructions-file check (Android StreamingAssets isn't a readable File
-        // path; the Expert authority covers it).
-        var issues = StartupSelfCheck.Run(config.participantId, config.participantOrderIndex, includeInstructions: false);
+        // path; the Expert authority covers it) and the participant-id checks (the id is adopted
+        // from the Expert at join — the local value is never used for recording).
+        var issues = StartupSelfCheck.Run(config.participantId, config.participantOrderIndex,
+                                          includeInstructions: false, micDevice: null,
+                                          checkParticipantId: false);
         _hasFatal  = StartupSelfCheck.HasFatal(issues);
 
-        Build(config, issues);
+        Build(issues);
     }
 
-    private void Build(StartupConfig config, List<StartupSelfCheck.Issue> issues)
+    private void Build(List<StartupSelfCheck.Issue> issues)
     {
         var rig = Object.FindAnyObjectByType<OVRCameraRig>();
         Transform anchor = rig != null ? rig.centerEyeAnchor : Camera.main != null ? Camera.main.transform : null;
@@ -64,9 +84,18 @@ public class WorkerStartupPanel : MonoBehaviour
         MakeText("Title", go.transform, new Vector2(0.04f, 0.86f), new Vector2(0.96f, 0.99f),
             "セットアップ準備", 30, TextAnchor.MiddleCenter, new Color(0.7f, 0.9f, 1f));
 
-        string mode = config.offlineMode ? "オフライン" : "オンライン";
-        MakeText("Config", go.transform, new Vector2(0.05f, 0.72f), new Vector2(0.95f, 0.85f),
-            $"参加者: {config.participantId}    /    {mode}", 20, TextAnchor.MiddleLeft, new Color(0.8f, 0.85f, 0.9f));
+        MakeText("Config", go.transform, new Vector2(0.05f, 0.78f), new Vector2(0.95f, 0.86f),
+            _offline ? "モード: オフライン（ローカルテスト）"
+                     : "モード: オンライン（参加者IDは Expert から自動設定）",
+            18, TextAnchor.MiddleLeft, k_dim);
+
+        if (!_offline)
+        {
+            _netLine  = MakeText("NetLine", go.transform, new Vector2(0.05f, 0.71f), new Vector2(0.95f, 0.78f),
+                "… Photon サーバ: 接続中", 19, TextAnchor.MiddleLeft, k_warn);
+            _roomLine = MakeText("RoomLine", go.transform, new Vector2(0.05f, 0.64f), new Vector2(0.95f, 0.71f),
+                "… Expert ルーム: 確認中", 19, TextAnchor.MiddleLeft, k_dim);
+        }
 
         // Self-check rows (skip the long condition-order line — keep VR text readable)
         var sb = new StringBuilder();
@@ -78,7 +107,7 @@ public class WorkerStartupPanel : MonoBehaviour
                                                                            : "✓ ";
             sb.AppendLine(pfx + iss.Message);
         }
-        MakeText("SelfCheck", go.transform, new Vector2(0.05f, 0.28f), new Vector2(0.95f, 0.70f),
+        MakeText("SelfCheck", go.transform, new Vector2(0.05f, 0.28f), new Vector2(0.95f, 0.62f),
             sb.ToString(), 19, TextAnchor.UpperLeft, new Color(0.9f, 0.92f, 0.95f));
 
         _hintText = MakeText("Hint", go.transform, new Vector2(0.04f, 0.04f), new Vector2(0.96f, 0.25f),
@@ -97,12 +126,45 @@ public class WorkerStartupPanel : MonoBehaviour
         else
         {
             _hintText.text  = "準備ができたら 右コントローラの A ボタン で開始";
-            _hintText.color = new Color(0.4f, 1f, 0.6f);
+            _hintText.color = k_ok;
+        }
+    }
+
+    // Live connectivity lines: cheap poll 4×/s. Purely informational — the Worker may confirm
+    // before the Expert has started (worker-first join is fully supported), so neither line gates
+    // the A button.
+    private void RefreshNetworkLines()
+    {
+        if (_offline || _netLine == null) return;
+        if (Time.unscaledTime < _nextNetRefresh) return;
+        _nextNetRefresh = Time.unscaledTime + 0.25f;
+
+        bool ready = PhotonNetwork.IsConnectedAndReady;
+        _netLine.text  = ready ? "✓ Photon サーバ: 接続OK" : "… Photon サーバ: 接続中";
+        _netLine.color = ready ? k_ok : k_warn;
+
+        bool? room = NetworkManager.Instance != null ? NetworkManager.Instance.ExpertRoomVisible : null;
+        if (room == true)
+        {
+            _roomLine.text  = "✓ Expert ルーム: 検出（PC側 起動済み）";
+            _roomLine.color = k_ok;
+        }
+        else if (room == false)
+        {
+            _roomLine.text  = "▲ Expert ルーム: 未検出（PC側の［開始］後に検出／先に開始しても可）";
+            _roomLine.color = k_warn;
+        }
+        else
+        {
+            _roomLine.text  = "… Expert ルーム: 確認中";
+            _roomLine.color = k_dim;
         }
     }
 
     private void Update()
     {
+        RefreshNetworkLines();
+
         if (Confirmed || _hasFatal) return;
 
         if (OVRInput.GetDown(OVRInput.Button.One, OVRInput.Controller.RTouch))

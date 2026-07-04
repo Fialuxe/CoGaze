@@ -105,6 +105,11 @@ public class SceneBootstrapper2 : MonoBehaviourPunCallbacks, IOnEventCallback
             // A button (was a headless auto-proceed). Fatal checks block the confirm.
             var panel = gameObject.AddComponent<WorkerStartupPanel>();
             panel.Initialize(config);
+            // Lobby-only connection in parallel so the panel can show Photon reachability and
+            // whether the Expert's room already exists. The room itself is joined only after
+            // the A-button confirm (JoinExperimentRoom below).
+            if (!config.offlineMode)
+                _networkManager.ConnectForRoomPreview();
             yield return new WaitUntil(() => panel.Confirmed);
             Destroy(panel);
         }
@@ -129,7 +134,9 @@ public class SceneBootstrapper2 : MonoBehaviourPunCallbacks, IOnEventCallback
         }
         else
         {
-            _networkManager.Connect();
+            // Joins the room from any prior state — fresh boot (Expert) or the Worker's
+            // lobby-preview connection started alongside the startup panel.
+            _networkManager.JoinExperimentRoom();
         }
     }
 

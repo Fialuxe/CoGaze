@@ -26,7 +26,12 @@ public static class StartupSelfCheck
     /// this verifies the selection maps to a native device so the mic-test meter (Unity path)
     /// isn't the only, misleading, signal.
     /// </param>
-    public static List<Issue> Run(string participantId, int orderIndex, bool includeInstructions, string micDevice = null)
+    /// <param name="checkParticipantId">
+    /// false on the Worker: its local config id is only a stale fallback (the real id is adopted
+    /// from the Expert's room properties at join), so the empty-id Fatal and the existing-logs-dir
+    /// warning would mislead the operator about a value that is never used.
+    /// </param>
+    public static List<Issue> Run(string participantId, int orderIndex, bool includeInstructions, string micDevice = null, bool checkParticipantId = true)
     {
         var issues = new List<Issue>();
 
@@ -41,7 +46,7 @@ public static class StartupSelfCheck
 #endif
 
         // ── participant id (Fatal) ──
-        if (string.IsNullOrWhiteSpace(participantId))
+        if (checkParticipantId && string.IsNullOrWhiteSpace(participantId))
             issues.Add(new Issue(Severity.Fatal, "参加者IDが未入力です"));
 
         // ── instructions_new.txt (Fatal, Desktop only) ──
@@ -62,7 +67,7 @@ public static class StartupSelfCheck
             : new Issue(Severity.Fatal, "SharedMesh/MeshHandler がシーンにありません"));
 
         // ── existing participant log dir (Warning: CSV append/overwrite) ──
-        if (!string.IsNullOrWhiteSpace(participantId))
+        if (checkParticipantId && !string.IsNullOrWhiteSpace(participantId))
         {
             string logDir = Path.Combine(Application.persistentDataPath, "logs", participantId);
             bool exists = false;
