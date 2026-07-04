@@ -155,9 +155,12 @@ internal static class ExpertRigBuilder
 
         if (!isOfflineMode)
         {
+            // The Expert is the authority on participant identity — publish both values so the
+            // Worker adopts them instead of trusting its own (typically stale) on-device config.
             PhotonNetwork.CurrentRoom?.SetCustomProperties(new Hashtable
             {
-                { "participantId", participantId }
+                { "participantId",         participantId },
+                { "participantOrderIndex", participantOrderIndex }
             });
         }
 

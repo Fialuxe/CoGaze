@@ -270,6 +270,28 @@ public class SceneBootstrapper2 : MonoBehaviourPunCallbacks, IOnEventCallback
             Debug.LogError("[SceneBootstrapper2] ExperimentManager2 not found in scene.");
             yield break;
         }
+
+        // The Expert publishes the authoritative participant identity as room properties. When the
+        // Worker joins AFTER they were set (PC started first — the usual order), PUN2 never fires
+        // OnRoomPropertiesUpdate for pre-existing properties, so read them directly here. Otherwise
+        // the rig (VoiceRecorder log dir, QuestionnaireManager identity) is built with the stale
+        // on-device config values (typically P00 / index 0).
+        if (!isExpert && !_offlineMode && PhotonNetwork.CurrentRoom != null)
+        {
+            var roomProps = PhotonNetwork.CurrentRoom.CustomProperties;
+            if (roomProps.TryGetValue("participantId", out object pidObj) &&
+                pidObj is string roomPid && !string.IsNullOrWhiteSpace(roomPid))
+            {
+                FileLogger.Log("Setup", $"[SceneBootstrapper2] Worker read participantId={roomPid} from room properties at join.");
+                ApplyWorkerParticipantId(roomPid);
+            }
+            if (roomProps.TryGetValue("participantOrderIndex", out object oiObj) && oiObj is int roomOi)
+            {
+                FileLogger.Log("Setup", $"[SceneBootstrapper2] Worker read participantOrderIndex={roomOi} from room properties at join.");
+                ApplyWorkerParticipantOrderIndex(roomOi);
+            }
+        }
+
         expMgr.participantOrderIndex = participantOrderIndex;
         expMgr.participantNumber     = participantOrderIndex;  // was unset → BuildConditionOrder logged "P0"
         expMgr.participantId         = participantId;
@@ -458,21 +480,65 @@ public class SceneBootstrapper2 : MonoBehaviourPunCallbacks, IOnEventCallback
 
     public override void OnRoomPropertiesUpdate(ExitGames.Client.Photon.Hashtable changedProps)
     {
-        if (!_setupDone || _offlineMode) return;
+        // No _setupDone gate: this handler only assigns identity fields, which is safe (and
+        // necessary) even while the rig is still being built — dropping an early update here
+        // would leave the Worker on its stale local id.
+        if (_offlineMode) return;
         if (_role != RoleManager.ROLE_WORKER) return;
-        if (!changedProps.ContainsKey("participantId")) return;
 
-        var val = changedProps["participantId"] as string;
-        if (val == null) return;
-        participantId = val;
+        if (changedProps.TryGetValue("participantId", out object idObj) &&
+            idObj is string id && !string.IsNullOrWhiteSpace(id))
+        {
+            FileLogger.Log("Setup", $"[SceneBootstrapper2] Worker received participantId={id} from room properties.");
+            ApplyWorkerParticipantId(id);
+        }
+        if (changedProps.TryGetValue("participantOrderIndex", out object oiObj) && oiObj is int oi)
+        {
+            FileLogger.Log("Setup", $"[SceneBootstrapper2] Worker received participantOrderIndex={oi} from room properties.");
+            ApplyWorkerParticipantOrderIndex(oi);
+        }
+    }
+
+    // Worker: adopt the Expert-synced participantId into this bootstrapper, ExperimentManager2,
+    // QuestionnaireManager (its JSON save path is computed lazily on first submit — the synced id
+    // must be set before then), and the on-device config, so the next boot's startup panel shows
+    // the last real id instead of a stale default (P00).
+    private void ApplyWorkerParticipantId(string id)
+    {
+        participantId = id;
         var expMgr = FindAnyObjectByType<ExperimentManager2>();
-        if (expMgr != null) expMgr.participantId = participantId;
-        // Propagate to QuestionnaireManager so its JSON filename uses the correct id
-        // (QM computes the save path lazily on first submit — by that time the Expert-synced
-        //  id must already be set or the file gets the stale name from the Worker's local config).
+        if (expMgr != null) expMgr.participantId = id;
         var qm = FindAnyObjectByType<QuestionnaireManager>();
-        if (qm != null) qm.participantId = participantId;
-        FileLogger.Log("Setup", $"[SceneBootstrapper2] Worker received participantId={participantId} from room properties.");
+        if (qm != null) qm.participantId = id;
+        var cfg = StartupConfig.LoadOrDefault();
+        if (cfg.participantId != id)
+        {
+            cfg.participantId = id;
+            cfg.Save();
+        }
+    }
+
+    // Worker: adopt the Expert-synced order index. On the Worker this value is only identity
+    // metadata (questionnaire fallback id, log lines) — condition sequencing always follows the
+    // Expert's state broadcasts — but keeping it synced makes the Expert the single authority.
+    private void ApplyWorkerParticipantOrderIndex(int idx)
+    {
+        idx = Mathf.Clamp(idx, 0, 23);
+        participantOrderIndex = idx;
+        var expMgr = FindAnyObjectByType<ExperimentManager2>();
+        if (expMgr != null)
+        {
+            expMgr.participantOrderIndex = idx;
+            expMgr.participantNumber     = idx;
+        }
+        var qm = FindAnyObjectByType<QuestionnaireManager>();
+        if (qm != null) qm.participantNumber = idx;
+        var cfg = StartupConfig.LoadOrDefault();
+        if (cfg.participantOrderIndex != idx)
+        {
+            cfg.participantOrderIndex = idx;
+            cfg.Save();
+        }
     }
 
     // ── Disconnect ────────────────────────────────────────────────────────
