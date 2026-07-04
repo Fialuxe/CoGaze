@@ -32,6 +32,18 @@ public class WorkerVideoStream : MonoBehaviour
 
 #if UNITY_ANDROID && !UNITY_EDITOR
     private PassthroughCameraAccess _pca;
+
+    // Stall watchdog: leaving the Guardian/RoomScale boundary makes HzOS revoke passthrough
+    // camera access, and the PCA session never self-recovers once access is granted again (its
+    // built-in stop/resume only covers OnApplicationPause, which a boundary exit does not fire)
+    // — the Expert's video stays frozen on the last frame while everything else keeps working.
+    // Toggling PassthroughCameraAccess.enabled tears the session down (OnDisable → Stop) and
+    // recreates it (OnEnable → Play), resuming frames into the same RenderTexture so the WebRTC
+    // track recovers without renegotiation. If Play fails (still outside the boundary), the PCA
+    // disables itself and the watchdog retries after the cooldown.
+    private const float k_pcaStallSeconds = 3f;
+    private float _lastPcaFrameTime;
+    private float _lastPcaRestartTime;
 #endif
 
 #if UNITY_EDITOR
@@ -105,6 +117,8 @@ public class WorkerVideoStream : MonoBehaviour
         if (_streamCoroutine != null) return;
 #if UNITY_ANDROID && !UNITY_EDITOR
         if (_pca != null) _pca.enabled = true;
+        _lastPcaFrameTime   = Time.unscaledTime;   // grace period before the stall watchdog fires
+        _lastPcaRestartTime = Time.unscaledTime;
 #elif UNITY_EDITOR
         SetupEditorCamera();
 #endif
@@ -205,10 +219,26 @@ public class WorkerVideoStream : MonoBehaviour
         {
             yield return wait;
 #if UNITY_ANDROID && !UNITY_EDITOR
-            if (_pca == null || !_pca.IsPlaying || !_pca.IsUpdatedThisFrame) continue;
-            if (!_intrinsicsPushed) PushRealIntrinsics();
-            var src = _pca.GetTexture();
-            if (src != null) Graphics.Blit(src, _captureRT);
+            if (_pca == null) continue;
+            if (_pca.IsPlaying && _pca.IsUpdatedThisFrame)
+            {
+                _lastPcaFrameTime = Time.unscaledTime;
+                if (!_intrinsicsPushed) PushRealIntrinsics();
+                var src = _pca.GetTexture();
+                if (src != null) Graphics.Blit(src, _captureRT);
+            }
+            else if (Time.unscaledTime - _lastPcaFrameTime   > k_pcaStallSeconds &&
+                     Time.unscaledTime - _lastPcaRestartTime > k_pcaStallSeconds)
+            {
+                // No fresh frame for a while (boundary exit / camera revoked) — restart the session.
+                FileLogger.Log("Transport",
+                    $"[WorkerVideoStream] PCA stalled {Time.unscaledTime - _lastPcaFrameTime:F1}s — restarting camera session.");
+                _lastPcaRestartTime = Time.unscaledTime;
+                _pca.enabled = false;      // OnDisable → Stop() + texture teardown
+                yield return null;         // let the teardown settle one frame
+                _pca.enabled = true;       // OnEnable → Play(); self-disables on failure → retried
+                _intrinsicsPushed = false; // resolution can change across restarts — re-derive
+            }
 #elif UNITY_EDITOR
             if (_editorCam == null || _editorRT == null) continue;
             _editorCam.Render();
