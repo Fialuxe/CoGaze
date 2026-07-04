@@ -84,9 +84,7 @@ internal static class ExpertRigBuilder
 
         // Photon Voice 2 — Recorder must be on the prefab; configure it here
         var recorder = playerObj.GetComponentInChildren<Recorder>();
-        if (recorder != null && !string.IsNullOrEmpty(micDevice))
-            recorder.MicrophoneDevice = new DeviceInfo(micDevice);
-        else if (recorder == null)
+        if (recorder == null)
             Debug.LogWarning("[SceneBootstrapper2] Recorder not found on RemoteExpert prefab.");
 
         if (recorder != null)
@@ -99,11 +97,50 @@ internal static class ExpertRigBuilder
             // at irregular intervals. Photon native capture bypasses the Unity singleton entirely
             // (same fix the Worker already uses for the Android mic-contention issue).
             recorder.MicrophoneType = Recorder.MicType.Photon;
+
+            // The native pusher only reads DeviceInfo.IDInt; a string-constructed DeviceInfo (Unity
+            // name) carries IDInt=0 and silently opens native device index 0 — on a Quest Link PC
+            // that is the mute Oculus Virtual Audio Device, so the Worker hears nothing. Resolve the
+            // operator's Unity-name selection to a native enumeration ID; if that fails, fall back
+            // to the native default capture device (Windows' own default mic) rather than index 0.
+#if UNITY_STANDALONE_WIN || UNITY_EDITOR_WIN
+            if (!string.IsNullOrEmpty(micDevice))
+            {
+                if (PhotonMicDeviceResolver.TryResolve(micDevice, out var nativeMic, out string micDetail))
+                {
+                    recorder.MicrophoneDevice = nativeMic;
+                    Debug.Log($"[ExpertRigBuilder] Photon native mic {nativeMic} resolved from '{micDevice}' ({micDetail}).");
+                }
+                else
+                {
+                    recorder.MicrophoneDevice = DeviceInfo.Default;
+                    Debug.LogError($"[ExpertRigBuilder] Could not map mic '{micDevice}' to a native device ({micDetail}). " +
+                                   "Falling back to the Windows default capture device — verify the Worker hears the Expert.");
+                }
+            }
+            else
+            {
+                recorder.MicrophoneDevice = DeviceInfo.Default;
+            }
+#else
+            if (!string.IsNullOrEmpty(micDevice))
+                recorder.MicrophoneDevice = new DeviceInfo(micDevice);
+#endif
+
+            // On failure the Recorder would otherwise silently fall back to Unity Microphone and
+            // fight VoiceRecorder for the device (the freeze-loop bug all over again). Fail loud:
+            // no audio + an error log is diagnosable, a re-frozen loop mid-experiment is not.
+            recorder.UseMicrophoneTypeFallback = false;
+
             var dsp = recorder.gameObject.GetComponent<WebRtcAudioDsp>()
                       ?? recorder.gameObject.AddComponent<WebRtcAudioDsp>();
             dsp.AEC = false; dsp.NoiseSuppression = true; dsp.AGC = true;
             dsp.AgcCompressionGain = 18; dsp.AgcTargetLevel = 3;
-            recorder.SamplingRate  = SamplingRate.Sampling48000; // PC mic does not support 16000; use 48000
+            // WindowsAudioInPusher captures at a fixed 16 kHz (Voice Capture DSP hardcode); the
+            // encoder rate must match or PV2 inserts a FramerResampler upsampling 16k→48k for
+            // nothing. The old 48000 comment ("PC mic does not support 16000") only applied to the
+            // Unity Microphone path, which is no longer used here.
+            recorder.SamplingRate  = SamplingRate.Sampling16000;
             recorder.FrameDuration = OpusCodec.FrameDuration.Frame20ms;
             recorder.Bitrate       = 24000;
         }

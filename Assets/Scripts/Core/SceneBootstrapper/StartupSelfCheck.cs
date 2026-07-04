@@ -20,9 +20,25 @@ public static class StartupSelfCheck
     /// inside the APK and isn't a readable File path, so the Worker skips it (the Expert authority
     /// covers it). Callers pass false on the headset.
     /// </param>
-    public static List<Issue> Run(string participantId, int orderIndex, bool includeInstructions)
+    /// <param name="micDevice">
+    /// Unity Microphone name selected in StartupUI, or null to skip the mic check (Worker). The
+    /// Expert sends voice through Photon's native Windows capture, which ignores Unity names —
+    /// this verifies the selection maps to a native device so the mic-test meter (Unity path)
+    /// isn't the only, misleading, signal.
+    /// </param>
+    public static List<Issue> Run(string participantId, int orderIndex, bool includeInstructions, string micDevice = null)
     {
         var issues = new List<Issue>();
+
+        // ── Photon native mic mapping (Windows Expert only) ──
+#if UNITY_STANDALONE_WIN || UNITY_EDITOR_WIN
+        if (!string.IsNullOrEmpty(micDevice) && micDevice != "(no microphone found)")
+        {
+            issues.Add(PhotonMicDeviceResolver.TryResolve(micDevice, out var nativeMic, out string micDetail)
+                ? new Issue(Severity.Info,    $"✓ 送信マイク（ネイティブ）: {nativeMic}")
+                : new Issue(Severity.Warning, $"送信マイクをネイティブ列挙で特定できません（{micDetail}）— Windows既定マイクで送信されます"));
+        }
+#endif
 
         // ── participant id (Fatal) ──
         if (string.IsNullOrWhiteSpace(participantId))

@@ -37,10 +37,11 @@ public class StartupUI : MonoBehaviour
     private Texture2D _barFillTex;
     private bool     _stylesBuilt;
 
-    // ── Startup self-check (cached; recomputed only when id/order changes) ──
+    // ── Startup self-check (cached; recomputed only when id/order/mic changes) ──
     private System.Collections.Generic.List<StartupSelfCheck.Issue> _issues;
     private string _checkedId;
     private int    _checkedOrder = int.MinValue;
+    private string _checkedMic;
 
     // ── Python process detection ──────────────────────────────────────────────
     private enum PythonStatus { Unknown, Checking, Running, NotRunning, Launching }
@@ -301,14 +302,17 @@ public class StartupUI : MonoBehaviour
         GUI.enabled = true;
     }
 
-    // Recompute the self-check only when the participant id / order index changes (OnGUI runs
-    // every frame; the checks do file I/O, so caching avoids per-frame disk hits).
+    // Recompute the self-check only when the participant id / order index / mic selection changes
+    // (OnGUI runs every frame; the checks do file I/O and native device enumeration, so caching
+    // avoids per-frame hits).
     private void RefreshIssues()
     {
-        if (_issues != null && _participantId == _checkedId && _orderIndex == _checkedOrder) return;
+        string mic = _micDevices[Mathf.Clamp(_micIndex, 0, _micDevices.Length - 1)];
+        if (_issues != null && _participantId == _checkedId && _orderIndex == _checkedOrder && mic == _checkedMic) return;
         _checkedId    = _participantId;
         _checkedOrder = _orderIndex;
-        _issues = StartupSelfCheck.Run(_participantId, _orderIndex, includeInstructions: true);
+        _checkedMic   = mic;
+        _issues = StartupSelfCheck.Run(_participantId, _orderIndex, includeInstructions: true, micDevice: mic);
     }
 
     private void Confirm()
