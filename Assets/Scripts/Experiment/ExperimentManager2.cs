@@ -112,6 +112,7 @@ public class ExperimentManager2 : MonoBehaviour, IOnEventCallback
     private const byte k_countdownTick = 0xFE;
     private const byte k_workerPaused  = 0xFD;
     private const byte k_expertNotice  = 0xFC;
+    private const byte k_tutorialDone  = 0xFB;   // Worker finished the self-guided tutorial pages
 
     // Expert-activity notice codes sent via k_expertNotice. The webcam calibration runs entirely
     // on the Expert PC (calib.* messages fire only local OnInstructionChanged there), so without
@@ -389,6 +390,16 @@ public class ExperimentManager2 : MonoBehaviour, IOnEventCallback
         if (CurrentState != ExperimentState.Tutorial) return;
         Transition(ExperimentState.Idle);
         TryTransitionToReady();
+    }
+
+    // Worker-side: TutorialGuide finished its last page — tell the Expert so its UI shows
+    // "completed, press Enter" instead of relying on a verbal hand-off from the subject.
+    public void NotifyTutorialComplete()
+    {
+        if (IsExpert) return;
+        object[] data = { k_tutorialDone };
+        var opts = new RaiseEventOptions { Receivers = ReceiverGroup.Others };
+        PhotonNetwork.RaiseEvent(k_photonEvent, data, opts, SendOptions.SendReliable);
     }
 
     private IEnumerator CountdownThenStartExperiment()
@@ -1004,6 +1015,16 @@ public class ExperimentManager2 : MonoBehaviour, IOnEventCallback
                         StopTimer();
                     }
                     OnInstructionChanged?.Invoke("⚠ Worker の HMD が外されました。装着後、自動で再開します。");
+                }
+                return;
+            }
+
+            if (first == k_tutorialDone)
+            {
+                if (IsExpert && CurrentState == ExperimentState.Tutorial)
+                {
+                    FileLogger.Log("Experiment", "[ExperimentManager2] Worker finished self-guided tutorial.");
+                    OnInstructionChanged?.Invoke("✓ Worker がチュートリアルを完了しました。[Enter] で実験を開始できます。");
                 }
                 return;
             }

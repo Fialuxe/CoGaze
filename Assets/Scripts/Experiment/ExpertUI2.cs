@@ -468,9 +468,10 @@ public class ExpertUI2 : MonoBehaviour
                 SetZoneA("チュートリアル",
                     new Color(0.50f, 0.85f, 1.00f),
                     new Color(0.00f, 0.07f, 0.16f, 0.85f));
-                SetZoneB("参加者へのチュートリアルを実施してください",
-                    "タスク概要・QRコードの操作方法を参加者に説明してください。\n" +
-                    "準備ができたら Enter を押して開始してください。",
+                SetZoneB("Worker が画面の指示で操作を練習しています",
+                    "チュートリアルは Worker の HUD 上で自動進行します（説明不要）。\n" +
+                    "完了すると「✓ チュートリアル完了」と表示されます。\n" +
+                    "補足があれば音声で伝え、Enter で実験開始へ進んでください。",
                     "[Enter] チュートリアル完了");
                 _timerText.text  = CoGazeStrings.Expert2_TimerBlank;
                 _timerText.color = Color.white;

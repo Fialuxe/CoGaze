@@ -756,9 +756,10 @@ public class WorkerHUD2 : MonoBehaviour
                 break;
 
             case ExperimentState.Tutorial:
-                SetState("チュートリアル中", new Color(0.7f, 0.9f, 1f));
-                SetTimer(CoGazeStrings.Worker_TimerEmpty, Color.white);
-                SetPanelMode(true);
+                // TutorialGuide owns the screen during the self-guided tutorial — hide the status
+                // HUD to avoid canvas overlap (same pattern as the questionnaire; HandleStateChanged
+                // re-enables the canvas on the next transition).
+                if (_hudCanvas != null) _hudCanvas.gameObject.SetActive(false);
                 break;
 
             case ExperimentState.Finished:

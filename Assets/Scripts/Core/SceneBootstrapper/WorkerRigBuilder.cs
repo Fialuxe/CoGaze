@@ -77,6 +77,11 @@ internal static class WorkerRigBuilder
         var setupCoord = playerObj.AddComponent<SetupCoordinator>();
         setupCoord.Initialize(isWorker: true, expMgr, requiredTaskQRCount);
 
+        // TutorialGuide — self-guided paged tutorial (A-button pages + grip practice) shown during
+        // the Tutorial state; replaces the operator's verbal briefing and notifies the Expert on
+        // completion.
+        playerObj.AddComponent<TutorialGuide>().Initialize(expMgr);
+
         // Photon Voice 2 — Recorder must be on the prefab; we configure it here
         var recorder = playerObj.GetComponentInChildren<Recorder>();
         if (recorder != null && !string.IsNullOrEmpty(micDevice))
