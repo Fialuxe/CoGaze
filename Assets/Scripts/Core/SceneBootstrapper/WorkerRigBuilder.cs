@@ -82,6 +82,9 @@ internal static class WorkerRigBuilder
         // completion.
         playerObj.AddComponent<TutorialGuide>().Initialize(expMgr);
 
+        // ExpertAvatarHider — hides the Expert's (fixed-pose) avatar while the Assembly task runs.
+        playerObj.AddComponent<ExpertAvatarHider>().Initialize(expMgr);
+
         // Photon Voice 2 — Recorder must be on the prefab; we configure it here
         var recorder = playerObj.GetComponentInChildren<Recorder>();
         if (recorder != null && !string.IsNullOrEmpty(micDevice))
