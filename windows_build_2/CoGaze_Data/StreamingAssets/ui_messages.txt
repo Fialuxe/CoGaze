@@ -1,0 +1,77 @@
+# CoGaze 実験UIメッセージ設定
+# ─────────────────────────────────────────────────────────────────────────────
+# このファイルを編集してメッセージを変更できます。Unity を再起動する必要はありません。
+# ルール:
+#   - # で始まる行はコメント (無視されます)
+#   - キー = 値  の形式で1行に1メッセージ
+#   - \n で改行  (例: 1行目\n2行目)
+#   - {変数名} でプレースホルダー (例: {errX}, {participantId})
+#   - = の右側の先頭・末尾の空白は無視されます
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+# ── キャリブレーション ────────────────────────────────────────────────────────
+
+calib.running  = キャリブレーション実施中...\n画面の点を見てください。\n\n完了まで [Enter] は無効です。
+calib.retrying = キャリブレーション再開中...\n画面の点を見てください。
+calib.pass     = キャリブレーション完了 (PASS)\n[Enter] で次のステップへ進んでください。
+calib.marginal = キャリブレーション MARGINAL (精度低め)\nerr=({errX}, {errY})\n[Enter] で続ける / [R] でリトライ
+calib.fail     = キャリブレーション失敗または中断\n[Enter] でスキップ / [R] でリトライ
+
+
+# ── ExpertUI — 各状態のラベル・詳細・ヒント ───────────────────────────────────
+# 形式: ui.{状態}.state / .action / .detail / .hint
+
+ui.idle.state  = 待機中
+ui.idle.action = 接続を待っています
+ui.idle.detail = Workerデバイス（Quest3）の接続と\nPythonプロセスの起動を\n確認しています。\n\n上部のPython表示を確認してください。
+ui.idle.hint   =
+
+ui.ready.state  = 準備完了
+ui.ready.action = 実験を開始できます
+ui.ready.detail = キャリブレーション状況を確認し、\n問題なければ [Enter] で\n実験を開始してください。
+ui.ready.hint   = [Enter] 開始
+
+ui.noise.state  = インターバル
+ui.noise.action = 休憩中
+ui.noise.detail = Worker が呼吸ガイドを\n実施しています。\n\n次の条件に備えてください。
+ui.noise.hint   = [Del] スキップ
+
+ui.task.state = タスク実行中
+ui.task.hint  = [Del] スキップ
+
+ui.condstart.state      = 条件開始準備
+ui.condstart.action     = 条件開始準備
+ui.condstart.hint       = [Enter] 開始
+ui.condstart.hint_calib = キャリブレーション完了後に [Enter] で開始
+
+ui.alignment.state  = アライメント中
+ui.alignment.action = 位置合わせ中
+ui.alignment.detail = Workerの位置にカメラが\n移動しました。\n\nキャリブレーション確認後、\n[Enter] で次へ進んでください。
+ui.alignment.hint   = [Enter] 確認完了
+
+ui.questionnaire.state  = アンケート中
+ui.questionnaire.action = アンケート中
+ui.questionnaire.detail = Worker がアンケートに\n回答しています。\n\n完了を待ってください。
+ui.questionnaire.hint   = 回答完了で自動的に進みます
+
+ui.taskcomplete.state  = タスク完了
+ui.taskcomplete.action = タスク完了
+ui.taskcomplete.detail = Worker にアンケートを\n実施してもらってください。\n\n完了したら [Enter] を押してください。
+ui.taskcomplete.hint   = [Enter] 次へ
+
+ui.noisecomplete.state  = インターバル終了
+ui.noisecomplete.action = インターバル終了
+ui.noisecomplete.detail = インターバルが終わりました。\n\n[Enter] で次のステップへ\n進んでください。
+ui.noisecomplete.hint   = [Enter] 次へ
+
+ui.finished.state  = 実験終了
+ui.finished.action = 実験終了
+ui.finished.detail = 全条件が終了しました。\nご協力ありがとうございました。\n\n参加者ID: {participantId}
+
+
+# ── 条件開始ステップの指示文 ──────────────────────────────────────────────────
+# {pos} = 現在の条件番号, {total} = 総条件数, {name} = 条件名
+
+step.condstart.expert  = 【条件 {pos}/{total}】  {name}\nアイトラッキングを確認し、準備ができたら [Enter] を押してください。
+step.condstart.worker  = 【条件 {pos}/{total}】  次の条件を準備しています。しばらくお待ちください。
