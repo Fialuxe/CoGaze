@@ -385,7 +385,10 @@ public class QuestionnaireManager : MonoBehaviourPun
 
         EnsureCanvas();
         SetupVRPointer();                                // controller-laser clicks
-        BuildItemLayout(maxScore: 3, buttonCount: 4);   // scores 0-3
+        // SSQ standard 4-point anchors under each score button — a bare 0-3 left subjects
+        // guessing which number meant which severity.
+        BuildItemLayout(maxScore: 3, buttonCount: 4,
+            buttonSubLabels: new[] { "なし", "わずかに", "中程度", "ひどく" });
         ShowItem(0);
         SetVisible(true);
     }
@@ -679,7 +682,7 @@ public class QuestionnaireManager : MonoBehaviourPun
         }
     }
 
-    private void BuildItemLayout(int maxScore, int buttonCount)
+    private void BuildItemLayout(int maxScore, int buttonCount, string[] buttonSubLabels = null)
     {
         if (_buttonRow != null) { Destroy(_buttonRow); _buttonRow = null; }
         _scoreButtons    = null;
@@ -721,9 +724,11 @@ public class QuestionnaireManager : MonoBehaviourPun
 
             btn.onClick.AddListener(() => OnScoreButtonClicked(score));
 
+            string sub = (buttonSubLabels != null && i < buttonSubLabels.Length) ? buttonSubLabels[i] : null;
             MakeText($"ScoreLabel_{score}", btnGo.transform,
                 Vector2.zero, Vector2.one,
-                score.ToString(), 28, TextAnchor.MiddleCenter, Color.white);
+                sub == null ? score.ToString() : $"{score}\n{sub}",
+                sub == null ? 28 : 19, TextAnchor.MiddleCenter, Color.white);
 
             _scoreButtons[i] = btn;
         }
@@ -738,7 +743,9 @@ public class QuestionnaireManager : MonoBehaviourPun
         // ── Scale hint below buttons (17-25 %) ──
         // Stored so ShowItem can set it PER ITEM: NASA items are high=bad, gaze items are
         // high=good, and a single fixed hint would mislabel one of them (the old UX landmine).
-        string defaultHint = maxScore == 6 ? k_nasaScaleHint : "← なし   0 — 1 — 2 — 3   ひどく →";
+        string defaultHint = maxScore == 6
+            ? k_nasaScaleHint
+            : "0 = なし ／ 1 = わずかに ／ 2 = 中程度 ／ 3 = ひどく";
         _scaleHintText = MakeText("ScaleHint", _canvasGo.transform,
             new Vector2(0.04f, 0.17f), new Vector2(0.96f, 0.25f),
             defaultHint, 13, TextAnchor.MiddleCenter, new Color(0.65f, 0.65f, 0.65f));
@@ -806,9 +813,12 @@ public class QuestionnaireManager : MonoBehaviourPun
                 ? "▼ 下のボタンに指で触れて回答してください (touch a button to answer) ▼"
                 : "";
 
-        // Question text
+        // Question text — SSQ items are bare symptom labels, so wrap them in a full sentence
+        // (subjects otherwise don't know what is being asked or which score means what).
         if (_itemText != null)
-            _itemText.text = isCondPanel ? item.Label : s_ssqLabels[index];
+            _itemText.text = isCondPanel
+                ? item.Label
+                : "いま現在、次の症状はどの程度ありますか？\n\n" + s_ssqLabels[index];
 
         // Reset score buttons
         HighlightScore(-1);

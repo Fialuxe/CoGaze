@@ -122,6 +122,12 @@ public class ExperimentManager2 : MonoBehaviour, IOnEventCallback
 
     private bool _workerPauseStoppedTimer;
 
+    // True once ANY message has actually arrived from the Python OSC process (pong, session ack,
+    // calibration result). Distinct from _firstPongReceived, which OscReadyTimeout also sets as a
+    // proceed-anyway bypass — this flag proves the process is alive and gates per-condition
+    // calibration: never seen → skip immediately instead of blocking on the 90 s timeout.
+    private bool _oscEverResponded;
+
     // -----------------------------------------------------------------------
     // Initialization
     // -----------------------------------------------------------------------
@@ -183,6 +189,7 @@ public class ExperimentManager2 : MonoBehaviour, IOnEventCallback
 
                 // Subscribe before LoadInstructions so we never miss a pong that arrives early
                 _pongForReadyHandler = () => {
+                    _oscEverResponded = true;
                     if (_firstPongReceived) return;
                     _firstPongReceived = true;
                     _oscSession.OnPong -= _pongForReadyHandler;
@@ -426,6 +433,7 @@ public class ExperimentManager2 : MonoBehaviour, IOnEventCallback
 
     private void HandleCalibrationResult(int quality, float errX, float errY)
     {
+        _oscEverResponded = true;
         FileLogger.Log("Experiment", $"[ExperimentManager2] CalibrationResult quality={quality} err=({errX:F3},{errY:F3})");
         FindAnyObjectByType<ExperimentLogger>()?.SetCalibResult(quality, errX, errY);
         _calibrationPending = false;
@@ -580,8 +588,24 @@ public class ExperimentManager2 : MonoBehaviour, IOnEventCallback
                         _oscSession.StartSession(participantId, CurrentConditionType.ToString());
                         _oscSessionActive = true;
 
-                        if (CurrentConditionType == ConditionType.Webcam ||
-                            CurrentConditionType == ConditionType.WebcamFiltered)
+                        if ((CurrentConditionType == ConditionType.Webcam ||
+                             CurrentConditionType == ConditionType.WebcamFiltered)
+                            && !_oscEverResponded)
+                        {
+                            // Spec: Python OSC has never responded (not launched / unreachable) —
+                            // skip calibration for this condition IMMEDIATELY instead of holding
+                            // the operator on the 90 s ACK timeout. _calibrationFailed enables the
+                            // [R] retry path if Python is started mid-run; trials.csv calib_*
+                            // columns stay empty for this condition.
+                            _calibrationFailed = true;
+                            FileLogger.Log("Experiment",
+                                $"[ExperimentManager2] Python OSC never responded — calibration skipped for {CurrentConditionName}.");
+                            // Operator message is emitted AFTER the Transition below — the step's
+                            // own instruction broadcast would otherwise overwrite it (same reason
+                            // calib.running is deferred).
+                        }
+                        else if (CurrentConditionType == ConditionType.Webcam ||
+                                 CurrentConditionType == ConditionType.WebcamFiltered)
                         {
                             _calibrationPending = true;
                             if (_calibTimeoutCo != null) StopCoroutine(_calibTimeoutCo);
@@ -589,6 +613,7 @@ public class ExperimentManager2 : MonoBehaviour, IOnEventCallback
                             string condNameCapture = CurrentConditionName;
                             _pendingCalibAckHandler = (cmd, status) =>
                             {
+                                _oscEverResponded = true;
                                 if (cmd != "session_start") return;
                                 _oscSession.OnAck -= _pendingCalibAckHandler;
                                 _pendingCalibAckHandler = null;
@@ -611,6 +636,14 @@ public class ExperimentManager2 : MonoBehaviour, IOnEventCallback
                 Transition(ExperimentState.Questionnaire);
                 if (IsExpert && _calibrationPending)
                     OnInstructionChanged?.Invoke(MessageBank.Get("calib.running"));
+                else if (IsExpert && _calibrationFailed)
+                {
+                    // Python never responded — calibration was skipped above; surface it now.
+                    OnInstructionChanged?.Invoke(
+                        "⚠ Python 視線プロセス未接続 — キャリブレーションをスキップしました。\n" +
+                        "[Enter] 視線データなしで続行 ／ Python 起動後に [R] で再試行");
+                    BroadcastExpertNotice(ExpertNotice.CalibIssue);
+                }
                 break;
 
             case StepType.Questionnaire:
