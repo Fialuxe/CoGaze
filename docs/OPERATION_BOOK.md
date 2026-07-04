@@ -109,12 +109,17 @@ logs\{参加者ID}\
 ├── voice_local_{起動時刻}_sNN.wav    ← Expertマイク（条件ごとに1本、NASA-TLX時に書き出し）
 ├── voice_remote_{起動時刻}_sNN.wav   ← Worker側音声（受信音声）
 └── P{参加者インデックス}\
-    ├── trials.csv           ← 試行メタ（1試行1行）
-    ├── frames.csv           ← 30Hz 時系列（視線・両者頭部・コントローラ）
-    ├── escalations.csv      ← F2-F4押下イベント
-    ├── identifications.csv  ← 識別課題のグリップ試行ごとの正誤
+    ├── conditions.csv       ← 次元テーブル（condition_index → 名前/トラッキング/可視化。静的・1回だけ書く）
+    ├── sessions.csv         ← アプリ起動ごとに1行（participant, order_index, 再開オフセット）
+    ├── trials.csv           ← 試行の事実テーブル（1試行1行。PK=trial_id, FK=condition_index）
+    ├── frames.csv           ← 30Hz 時系列（FK=trial_id）
+    ├── escalations.csv      ← F2-F4押下イベント（FK=trial_id）
+    ├── identifications.csv  ← 識別課題のグリップごとの正誤（FK=trial_id。正誤の正本）
+    ├── calibrations.csv     ← 視線キャリブ試行ごとの結果（リトライ含む。FK=condition_index）
     └── replay_{trialId}.json ← 試行ごとのリプレイデータ（20個）
 ```
+
+すべて `trial_id` で結合でき、条件属性は `condition_index` → conditions.csv の参照で引く（trials側に重複列は持たない）。
 
 - 実行ログ: `<exeのあるフォルダ>\cogaze_{日時}.log`
 - アンケートPCコピー: `<exeのあるフォルダ>\questionnaire_{参加者ID}.json`（Workerが提出するたびRPCで上書き転送される全量コピー）
@@ -132,23 +137,33 @@ logs\{参加者ID}\
 
 | 列 | 意味 |
 |---|---|
-| trial_id | 試行の一意ID（全ファイル・replay JSONとの結合キー） |
-| participant | 参加者ID |
-| condition_index / gaze_mode / noise_level / condition_name | 条件（例: circle / webcamfiltered） |
-| task_type / step_type / step_index | task（識別）or assembly（組立） |
-| start_ms / end_ms / duration_ms | Unixミリ秒と所要時間 |
-| identified_marker / target_marker / **correct** | Worker選択QR・正解QR・**自動採点(1/0)**。組立行は空欄 |
-| **max_rung** | 到達した発話エスカレーション最高段（1–4） |
-| score | 識別課題スコア |
-| calib_quality / calib_err_x / calib_err_y | 直近の視線キャリブ結果（webcam系条件のみ値が入る） |
+| trial_id | 試行の一意ID（**主キー** — 全イベント/ストリームファイルとreplay JSONの結合キー） |
+| participant | 参加者ID（参加者間で結合するときのキー） |
+| run_pos | 提示順（1–10。順序効果の分析用） |
+| condition_index | 条件（**外部キー** → conditions.csv で名前・トラッキング・可視化を引く） |
+| step_type / step_index | Task（識別）or Assembly（組立）とステップ番号 |
+| start_ms / end_ms | Unixエポックms（UTC）。所要時間 = end − start |
+| attempts | 識別課題のグリップ総数（組立行は空欄） |
+| score | 識別課題の正解グリップ数（60秒間。組立行は空欄）。正答率 = score / attempts |
+| max_rung | 到達した発話エスカレーション最高段（1–4） |
+
+識別課題は「正解のたびにターゲットが切り替わる繰り返し方式」のため、**正誤の正本は identifications.csv**（target_id / gripped_id / correct / score_after をグリップごとに記録）。trials.csv 側は attempts と score の集計値のみを持つ。
+
+**conditions.csv（次元テーブル）**: condition_index, condition_name, tracking (ir/webcam/webcamfiltered/nogaze), gaze_mode (ray/circle/frustum/none)。
+
+**sessions.csv**: session_start_ms, participant, order_index, start_condition_offset — 起動1回につき1行。途中再開（§3.5）もここに記録される。
+
+**calibrations.csv**: t_ms, condition_index, quality (2=PASS/1=MARGINAL/0=FAIL), err_x, err_y — キャリブ試行ごと（リトライも1行ずつ）。Python未接続でスキップした条件は行が無い。
 
 **frames.csv（30Hz）**: trial_id, t_ms, elapsed_s, 視線x/y/blink, Worker頭部姿勢(7), Expert頭部姿勢(7), osc_certainty, Workerコントローラ位置(3)。
 
-**escalations.csv**: trial_id, t_ms, elapsed_s, condition_index, task_type, rung — 何秒時点で段が上がったかの時系列。
+**escalations.csv**: trial_id, t_ms, elapsed_s, rung — 何秒時点で段が上がったかの時系列（条件は trial_id → trials.csv 経由で引く）。
 
-**identifications.csv**: 識別課題中の全グリップ試行（target_id, gripped_id, correct, score_after）— 初正解までの時間・試行回数の分析用。
+**identifications.csv**: 識別課題中の全グリップ（target_id, gripped_id, correct, score_after）— 正答率・初正解までの時間の正本。
 
-**questionnaire JSON**: NASA-TLX（条件ごと6項目）×10 ＋ SSQ。participant_id フィールドで照合。
+**questionnaire JSON**: NASA-TLX（条件ごと）×10 ＋ SSQ。participant_id と condition_index で照合。
+
+> スキーマ移行: 旧ビルドのCSVが残っているフォルダで新ビルドを起動すると、ヘッダ不一致を検出して旧ファイルを `*.old-日時.csv` に自動退避してから新スキーマで書き始める（追記事故は起きない）。
 
 ### 3.3 セッション直後のサニティチェック（あるべき姿）
 
@@ -159,9 +174,9 @@ logs\{参加者ID}\
 | 1 | `logs\{当日のID}\P{当日のインデックス}\` が存在 | フォルダ名が当日の入力値と一致 |
 | 2 | trials.csv の行数 | **20行**（識別10＋組立10）＋ヘッダ。少ない＝中断あり |
 | 3 | trials.csv の participant 列 | 全行が当日のID（P00が混ざっていたら同期失敗） |
-| 4 | 識別(task)行の correct | 全行 0/1 が入っている（空欄＝targets設定漏れ） |
+| 4 | Task行の attempts / score | 値が入っている。attempts=0 は被験者が一度もグリップしていない試行（identifications.csv にも行が無いはず） |
 | 5 | **max_rung の分布** | **全行1なら F2-F4 の押し忘れを疑う**（特にNoGaze条件が1は不自然） |
-| 6 | webcam系条件行の calib_quality | 値が入っている（空欄＝キャリブスキップ、ノートと突合） |
+| 6 | calibrations.csv | webcam系条件（webcam/webcamfiltered の6条件）ぶんの行がある。欠け＝キャリブスキップ、ノートと突合 |
 | 7 | frames.csv | 識別≈1,800行/試行・組立≈5,400行/試行のオーダー |
 | 8 | replay_*.json | 20個 |
 | 9 | WAV | voice_local / voice_remote が条件数ぶんペアで存在 |

@@ -32,7 +32,8 @@ public class ExperimentLogger : MonoBehaviour, IOnEventCallback
     private int                   _trialStepIndex;
     private StepType              _trialStepType;
     private int                   _trialMaxRung = 1;   // highest escalation rung reached this trial (1 = deictic + gaze only)
-    private string                _trialTargetMarker = "";   // identification correct-answer target, snapshotted at trial start
+    private int                   _trialAttempts;      // identification grip attempts this trial (Task steps only)
+    private int                   _trialRunPos = -1;   // 0-based presentation position, snapshotted at trial start
     private Vector3               _trialMeshPos;
     private Quaternion            _trialMeshRot;
     private Vector3               _trialMeshScale;
@@ -63,10 +64,8 @@ public class ExperimentLogger : MonoBehaviour, IOnEventCallback
     // -1.0 means no value has been received yet in this trial.
     private float _latestOscCertainty = -1f;
 
-    // Latest calibration result for the current condition (-1 = not yet received).
-    private int   _lastCalibQuality = -1;
-    private float _lastCalibErrX    = -1f;
-    private float _lastCalibErrY    = -1f;
+    // calibrations.csv — per-attempt calibration events (incl. retries), FK condition_index.
+    private string _calibrationsPath;
 
     // Voice audio offset (legacy voice transport removed — always 0)
     private float             _trialVoiceStartSeconds;
@@ -86,11 +85,49 @@ public class ExperimentLogger : MonoBehaviour, IOnEventCallback
         _latestOscCertainty = certainty;
     }
 
+    // Append a calibration attempt (incl. retries) to calibrations.csv. Keyed by the condition it
+    // calibrated, not by trial — calibration runs between trials at ConditionStart.
     public void SetCalibResult(int quality, float errX, float errY)
     {
-        _lastCalibQuality = quality;
-        _lastCalibErrX    = errX;
-        _lastCalibErrY    = errY;
+        if (string.IsNullOrEmpty(_calibrationsPath)) return;   // before Initialize
+        long nowMs   = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        int  condIdx = _expManager != null ? _expManager.CurrentConditionIndex : -1;
+        try
+        {
+            File.AppendAllText(_calibrationsPath,
+                $"{nowMs},{condIdx},{quality},{errX:F3},{errY:F3}\n", Encoding.UTF8);
+        }
+        catch (Exception ex)
+        {
+            Debug.LogWarning($"[ExperimentLogger] calibrations.csv write error: {ex.Message}");
+        }
+    }
+
+    // Header-versioned CSV create: if an existing file's header differs from the current schema
+    // (file written by an older build), move it aside as *.old-<timestamp>.csv so new rows are
+    // never appended under a stale header; then create the file with the header if missing.
+    private static void EnsureCsvSchema(string path, string header)
+    {
+        try
+        {
+            if (File.Exists(path))
+            {
+                string firstLine;
+                using (var sr = new StreamReader(path, Encoding.UTF8))
+                    firstLine = sr.ReadLine();
+                if (firstLine == header) return;
+                string backup = Path.Combine(
+                    Path.GetDirectoryName(path) ?? "",
+                    $"{Path.GetFileNameWithoutExtension(path)}.old-{DateTime.Now:yyyyMMdd_HHmmss}{Path.GetExtension(path)}");
+                File.Move(path, backup);
+                Debug.LogWarning($"[ExperimentLogger] Schema changed for {Path.GetFileName(path)} — old file moved to {Path.GetFileName(backup)}.");
+            }
+            File.WriteAllText(path, header + "\n", Encoding.UTF8);
+        }
+        catch (Exception ex)
+        {
+            Debug.LogWarning($"[ExperimentLogger] EnsureCsvSchema({Path.GetFileName(path)}) failed: {ex.Message}");
+        }
     }
 
     // -------------------------------------------------------------------------
@@ -118,36 +155,68 @@ public class ExperimentLogger : MonoBehaviour, IOnEventCallback
             return;
         }
 
-        // Write trials CSV header only if the file is new
-        string trialsPath = Path.Combine(_logDir, "trials.csv");
-        if (!File.Exists(trialsPath))
+        // ── Relational CSV layout ────────────────────────────────────────────
+        // conditions.csv   = static dimension table (condition_index → name/tracking/gaze).
+        // sessions.csv     = one row per app run (participant attrs + resume offset live here).
+        // trials.csv       = per-trial facts; PK trial_id, FK condition_index.
+        // identifications / escalations / frames = per-event / stream facts; FK trial_id.
+        // calibrations.csv = per-attempt calibration events; FK condition_index.
+        // Same-row derivables (duration_ms) and condition-name denormalizations are dropped, as
+        // are the legacy single-shot identification columns (identified/target/correct) — the
+        // task is repeated identification, so per-grip ground truth lives in identifications.csv.
+        // EnsureCsvSchema moves any old-schema file aside so rows never append under a stale header.
+
+        // conditions.csv — dimension table, written once
+        string conditionsPath = Path.Combine(_logDir, "conditions.csv");
+        if (!File.Exists(conditionsPath))
         {
             try
             {
-                File.WriteAllText(trialsPath,
-                    "trial_id,participant,condition_index,gaze_mode,noise_level," +
-                    "task_type,condition_name," +
-                    "step_type,step_index,start_ms,end_ms,duration_ms,identified_marker,target_marker,correct,max_rung,score," +
-                    "calib_quality,calib_err_x,calib_err_y\n",
-                    Encoding.UTF8);
+                var sb = new StringBuilder("condition_index,condition_name,tracking,gaze_mode\n");
+                for (int i = 0; i < ExperimentDesign.Conditions.Length; i++)
+                {
+                    var c = ExperimentDesign.Conditions[i];
+                    sb.Append($"{i},{c.name},{c.noise.ToString().ToLowerInvariant()},{c.gaze.ToString().ToLowerInvariant()}\n");
+                }
+                File.WriteAllText(conditionsPath, sb.ToString(), Encoding.UTF8);
             }
             catch (Exception ex)
             {
-                Debug.LogWarning($"[ExperimentLogger] Could not write trials.csv header: {ex.Message}");
+                Debug.LogWarning($"[ExperimentLogger] Could not write conditions.csv: {ex.Message}");
             }
         }
 
+        // sessions.csv — one row per app run (documents resumes via start_condition_offset)
+        string sessionsPath = Path.Combine(_logDir, "sessions.csv");
+        EnsureCsvSchema(sessionsPath, "session_start_ms,participant,order_index,start_condition_offset");
+        try
+        {
+            File.AppendAllText(sessionsPath,
+                $"{DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()},{_participantId},{mgr.participantOrderIndex},{mgr.startConditionOffset}\n",
+                Encoding.UTF8);
+        }
+        catch (Exception ex)
+        {
+            Debug.LogWarning($"[ExperimentLogger] Could not append sessions.csv: {ex.Message}");
+        }
+
+        string trialsPath = Path.Combine(_logDir, "trials.csv");
+        EnsureCsvSchema(trialsPath,
+            "trial_id,participant,run_pos,condition_index,step_type,step_index,start_ms,end_ms,attempts,score,max_rung");
+
+        _calibrationsPath = Path.Combine(_logDir, "calibrations.csv");
+        EnsureCsvSchema(_calibrationsPath, "t_ms,condition_index,quality,err_x,err_y");
+
         // Open escalations CSV — Expert escalation-rung markers, append across restarts.
-        string escalationsPath  = Path.Combine(_logDir, "escalations.csv");
-        bool   escalationsExist = File.Exists(escalationsPath);
+        // condition/task columns were dropped — join via trial_id → trials.csv.
+        string escalationsPath = Path.Combine(_logDir, "escalations.csv");
+        EnsureCsvSchema(escalationsPath, "trial_id,t_ms,elapsed_s,rung");
         try
         {
             _escalationsWriter = new StreamWriter(escalationsPath, append: true, encoding: Encoding.UTF8)
             {
                 AutoFlush = true   // low-frequency operator events — flush immediately so nothing is lost on crash
             };
-            if (!escalationsExist)
-                _escalationsWriter.WriteLine("trial_id,t_ms,elapsed_s,condition_index,task_type,rung");
         }
         catch (Exception ex)
         {
@@ -155,16 +224,14 @@ public class ExperimentLogger : MonoBehaviour, IOnEventCallback
         }
 
         // Open identifications CSV — per-grip-attempt rows for the repeated identification task
-        string idPath  = Path.Combine(_logDir, "identifications.csv");
-        bool   idExists = File.Exists(idPath);
+        string idPath = Path.Combine(_logDir, "identifications.csv");
+        EnsureCsvSchema(idPath, "trial_id,t_ms,elapsed_s,target_id,gripped_id,correct,score_after");
         try
         {
             _identificationsWriter = new StreamWriter(idPath, append: true, encoding: Encoding.UTF8)
             {
                 AutoFlush = true
             };
-            if (!idExists)
-                _identificationsWriter.WriteLine("trial_id,t_ms,elapsed_s,target_id,gripped_id,correct,score_after");
         }
         catch (Exception ex)
         {
@@ -172,20 +239,18 @@ public class ExperimentLogger : MonoBehaviour, IOnEventCallback
         }
 
         // Open frames CSV — append across session restarts
-        string framesPath  = Path.Combine(_logDir, "frames.csv");
-        bool   framesExist = File.Exists(framesPath);
+        string framesPath = Path.Combine(_logDir, "frames.csv");
+        EnsureCsvSchema(framesPath,
+            "trial_id,t_ms,elapsed_s,gaze_x,gaze_y,blink," +
+            "worker_px,worker_py,worker_pz,worker_rx,worker_ry,worker_rz,worker_rw," +
+            "expert_px,expert_py,expert_pz,expert_rx,expert_ry,expert_rz,expert_rw," +
+            "osc_certainty,ctrl_px,ctrl_py,ctrl_pz");
         try
         {
             _framesWriter = new StreamWriter(framesPath, append: true, encoding: Encoding.UTF8)
             {
                 AutoFlush = false
             };
-            if (!framesExist)
-                _framesWriter.WriteLine(
-                    "trial_id,t_ms,elapsed_s,gaze_x,gaze_y,blink," +
-                    "worker_px,worker_py,worker_pz,worker_rx,worker_ry,worker_rz,worker_rw," +
-                    "expert_px,expert_py,expert_pz,expert_rx,expert_ry,expert_rz,expert_rw," +
-                    "osc_certainty,ctrl_px,ctrl_py,ctrl_pz");
         }
         catch (Exception ex)
         {
@@ -221,9 +286,9 @@ public class ExperimentLogger : MonoBehaviour, IOnEventCallback
         _trialStepIndex   = _expManager.CurrentStepIndex;
         _trialStepType    = _expManager.CurrentStepType;
         _trialMaxRung     = 1;   // reset the escalation ladder for the new trial
-        // Snapshot the target NOW: completion advances the step before the end-row is written, so
-        // reading it at trial end would capture the next step's (empty) target.
-        _trialTargetMarker = _expManager.CurrentTargetMarkerId ?? "";
+        _trialAttempts    = 0;
+        // Snapshot NOW: completion advances the step before the end-row is written.
+        _trialRunPos      = _expManager.CurrentConditionRunPosition;
 
         // Auto-populate fields that LogTrialStart() was supposed to set but was never called.
         _trialTaskType = _trialStepType == StepType.Task     ? "task"
@@ -250,6 +315,7 @@ public class ExperimentLogger : MonoBehaviour, IOnEventCallback
             _idAttemptHandler = (targetId, grippedId, correct, scoreAfter) =>
             {
                 if (_currentTrialId == null || _trialStepType != StepType.Task) return;
+                _trialAttempts++;
                 long   nowMs   = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
                 float  elapsed = (nowMs - _trialStartMs) / 1000f;
                 try
@@ -311,25 +377,17 @@ public class ExperimentLogger : MonoBehaviour, IOnEventCallback
         try { _framesWriter?.Flush(); }
         catch (Exception ex) { Debug.LogWarning($"[ExperimentLogger] Flush error: {ex.Message}"); }
 
-        // Append trial row — includes task_type and condition_name
-        string trialsPath   = Path.Combine(_logDir, "trials.csv");
-        // Only the identification (Task) trial selects a marker, and CompletedMarkerId is not cleared at
-        // task end — so writing it on an Assembly row would record a STALE identification marker. Blank it
-        // for non-Task steps so Assembly rows carry no misleading identified_marker.
-        string markerResult = (_trialStepType == StepType.Task) ? (_identTask?.CompletedMarkerId ?? "") : "";
-        // correct: blank when untracked (no target), else 1/0 on exact match of the Worker's selection.
-        string correct = string.IsNullOrEmpty(_trialTargetMarker) ? ""
-                       : (markerResult == _trialTargetMarker ? "1" : "0");
-        string scoreStr = (_trialStepType == StepType.Task && _identTask != null)
-            ? _identTask.Score.ToString() : "";
-        string calibQualStr = _lastCalibQuality >= 0 ? _lastCalibQuality.ToString() : "";
-        string calibErrXStr = _lastCalibErrX   >= 0 ? _lastCalibErrX.ToString("F3") : "";
-        string calibErrYStr = _lastCalibErrY   >= 0 ? _lastCalibErrY.ToString("F3") : "";
-        string row = $"{_currentTrialId},{_participantId},{condIdx},{gazeMode},{noiseLevel}," +
-                     $"{_trialTaskType},{_trialConditionName}," +
-                     $"{_trialStepType},{_trialStepIndex},{_trialStartMs},{endMs},{durationMs}," +
-                     $"{markerResult},{_trialTargetMarker},{correct},{_trialMaxRung},{scoreStr}," +
-                     $"{calibQualStr},{calibErrXStr},{calibErrYStr}\n";
+        // Append trial row. Identification accuracy is summarized only as attempts/score — the
+        // task is repeated identification with dynamic targets, so per-grip ground truth
+        // (target_id, gripped_id, correct) lives in identifications.csv keyed by trial_id.
+        string trialsPath  = Path.Combine(_logDir, "trials.csv");
+        bool   isTask      = _trialStepType == StepType.Task;
+        string runPosStr   = _trialRunPos >= 0 ? (_trialRunPos + 1).ToString() : "";
+        string attemptsStr = isTask ? _trialAttempts.ToString() : "";
+        string scoreStr    = (isTask && _identTask != null) ? _identTask.Score.ToString() : "";
+        string row = $"{_currentTrialId},{_participantId},{runPosStr},{condIdx}," +
+                     $"{_trialStepType},{_trialStepIndex},{_trialStartMs},{endMs}," +
+                     $"{attemptsStr},{scoreStr},{_trialMaxRung}\n";
         try
         {
             File.AppendAllText(trialsPath, row, Encoding.UTF8);
@@ -380,13 +438,12 @@ public class ExperimentLogger : MonoBehaviour, IOnEventCallback
 
         long  nowMs   = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
         float elapsed = (nowMs - _trialStartMs) / 1000f;
-        int   condIdx = _expManager != null ? _expManager.CurrentConditionIndex : -1;
 
         if (_escalationsWriter != null)
         {
             try
             {
-                _escalationsWriter.WriteLine($"{_currentTrialId},{nowMs},{elapsed:F3},{condIdx},{_trialTaskType},{rung}");
+                _escalationsWriter.WriteLine($"{_currentTrialId},{nowMs},{elapsed:F3},{rung}");
             }
             catch (Exception ex)
             {
