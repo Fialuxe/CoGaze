@@ -105,8 +105,15 @@ public class WorkerVideoStream : MonoBehaviour
 
     private void OnStateChanged(ExperimentState state)
     {
+        // Setup is an active-capture state: TriggerOffer starts video during Setup so the Expert
+        // can monitor QR calibration. It MUST stay in this list — a Setup re-broadcast (HMD
+        // doff/resume triggers a resync while the subject dons the headset, i.e. constantly
+        // during setup) re-enters Setup and would otherwise StopCapture, freezing the Expert's
+        // view on the last frame for the rest of Setup. Including it also makes the doff/resume
+        // path self-healing: the resync's Setup broadcast restarts a stopped capture.
         bool active =
-            (state == ExperimentState.TaskRunning   && _expManager.CurrentStepType == StepType.Assembly)
+            state == ExperimentState.Setup
+         || (state == ExperimentState.TaskRunning   && _expManager.CurrentStepType == StepType.Assembly)
          || (state == ExperimentState.Questionnaire && _expManager.CurrentStepType == StepType.Alignment);
         Debug.Log($"[WorkerVideoStream] OnStateChanged state={state} stepType={_expManager.CurrentStepType} active={active}");
         if (active) StartCapture(); else StopCapture();
