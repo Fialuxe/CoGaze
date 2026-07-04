@@ -80,21 +80,25 @@ public static partial class CoGazeStrings
     // ── State labels (HandleStateChanged) ────────────────────────────────
     public const string Worker_Idle          = "準備中...";
     public const string Worker_StateIdle     = "待機中...";
-    public const string Worker_Ready         = "開始を待っています";
+    public const string Worker_Ready         = "準備完了 — 開始までそのままお待ちください";
     public const string Worker_TaskRunning   = "タスク実行中";
     // UX5: the subject has no progression control here, so the verb is passive ("just wait"),
     // not an active "proceed" that would send them hunting for a button that does not exist.
-    public const string Worker_TaskComplete  = "タスク終了\nそのままお待ちください";
+    public const string Worker_TaskComplete  = "タスク終了\n次の案内が出るまでそのままお待ちください";
     public const string Worker_NoiseComplete = "インターバル終了\nそのままお待ちください";
     public const string Worker_Questionnaire = "アンケート記入中";
     public const string Worker_Finished      = "実験終了\nありがとうございました";
 
     // ── Step / progress labels (HandleProgressChanged) ───────────────────
-    public const string Worker_NoiseInProgress      = "インターバル中... 次のタスクをお待ちください";
-    public const string Worker_TaskNoGaze           = "識別課題:\nExpertの口頭指示に従ってQRマーカーを指し示してください";
-    public const string Worker_TaskWithGaze         = "識別課題:\nExpertの視線が示すQRマーカーを指し示してください";
-    public const string Worker_AssemblyNoGaze       = "組み立て課題:\nExpertの口頭指示に従ってSomaキューブを置いてください\n（この条件ではExpertの視線は提示されません）";
-    public const string Worker_AssemblyWithGaze     = "組み立て課題:\nExpertの視線が示す位置にSomaキューブを置いてください";
+    // Concreteness contract (UX18): every task instruction tells the subject
+    // WHAT to do (action + hand + button), HOW completion is confirmed (haptic),
+    // and WHEN the task ends (timer reaches 00:00 → auto-advance) — matching
+    // IdentificationTask (RTouch grip, 20 cm proximity) and the assembly flow.
+    public const string Worker_NoiseInProgress      = "インターバル中... 円の動きに合わせてゆっくり呼吸してください";
+    public const string Worker_TaskNoGaze           = "識別課題:\nExpertが声で示すQRに右コントローラーを近づけ、\nグリップボタン（中指）を押してください";
+    public const string Worker_TaskWithGaze         = "識別課題:\nExpertの視線が示すQRに右コントローラーを近づけ、\nグリップボタン（中指）を押してください";
+    public const string Worker_AssemblyNoGaze       = "組み立て課題: Expertが声で示すグリッド位置にSomaキューブを\n組み立てて置いてください。タイマー終了まで続けてください\n（この条件では視線マーカーは表示されません）";
+    public const string Worker_AssemblyWithGaze     = "組み立て課題: Expertの視線が示すグリッド位置にSomaキューブを\n組み立てて置いてください。タイマー終了まで続けてください";
     public const string Worker_QuestionnaireStep    = "アンケートに回答してください";
     public const string Worker_ConditionNextLabel   = "次の条件";
     public const string Worker_ConditionStartSuffix = " を開始します..";
@@ -104,14 +108,16 @@ public static partial class CoGazeStrings
     public static string Worker_ScoreFormat(int score) => $"正解数: {score}";
 
     // ── QR identification task ────────────────────────────────────────────
-    // Answer = bring the controller near the target QR and press the GRIP (matches the briefing video).
+    // Answer = bring the RIGHT controller within 20 cm of the target QR and press the grip
+    // (middle-finger) button — matches IdentificationTask (RTouch, k_proximityThreshold = 0.20 m).
+    // A correct grip returns a vibration + green flash; the task repeats until the timer ends.
     // Worker_QRFound is shown for the whole task now (IdentificationTask fires the "found" state at
     // task start), so it must be self-contained; Worker_QRSearching is no longer shown at runtime.
-    public const string Worker_QRFound    = "識別課題: Expertが示す対象のQRにコントローラーを近づけて\nグリップボタンを押してください";
+    public const string Worker_QRFound    = "識別課題: Expertの視線が示すQRに右コントローラーを近づけて\nグリップボタン（中指）を押してください ※QRから20cm以内で反応\n正解すると振動します。タイマー終了まで繰り返してください";
     public const string Worker_QRSearching = "識別課題: 対象のQRを探してください";
     // NoGaze (control) variant: no gaze indicator is shown, so direct by voice and tell the subject
     // explicitly that gaze is absent this condition (so a missing indicator doesn't read as a fault).
-    public const string Worker_QRFoundNoGaze = "識別課題: 担当者の音声指示で示されたQRにコントローラーを近づけて\nグリップボタンを押してください\n（この条件ではExpertの視線は提示されません）";
+    public const string Worker_QRFoundNoGaze = "識別課題: Expertが声で示すQRに右コントローラーを近づけて\nグリップボタン（中指）を押してください ※QRから20cm以内で反応\n正解すると振動します（この条件では視線マーカーは表示されません）";
 
     // ── Breathing guide ───────────────────────────────────────────────────
     public const string Worker_BreathIn            = "ゆっくり 吸って";
@@ -122,7 +128,11 @@ public static partial class CoGazeStrings
     public const string Worker_AlertExclamation = "!";
 
     // ── Rest break (auto-inserted every few conditions; operator resumes with Enter) ──────
-    public const string Rest_Worker = "休憩中です\n準備ができたら担当者にお知らせください";
+    // Resume is operator-driven (Expert presses Enter), so tell the subject the concrete
+    // signal to give (speak up) rather than implying an in-HMD control exists.
+    // Protocol: the subject removes the headset during breaks — say so explicitly, and the
+    // put-back-on step must come BEFORE the speak-up step (they can't read this text later).
+    public const string Rest_Worker = "休憩中です — ヘッドセットを外して休憩してください\n再開するときはヘッドセットを着け直してから、\n声で担当者にお知らせください";
     public const string Rest_Expert = "休憩中 — 再開するには Enter を押してください";
 
     // ── Expert setup readiness, shown on the Worker during Setup ──────────

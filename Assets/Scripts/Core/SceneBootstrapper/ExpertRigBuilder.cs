@@ -91,6 +91,14 @@ internal static class ExpertRigBuilder
 
         if (recorder != null)
         {
+            // Native (WASAPI) capture, NOT Unity Microphone. VoiceRecorder opens the same device via
+            // Unity's Microphone API, and Unity mic capture is a per-device singleton: whichever side
+            // calls Microphone.Start last steals the device and freezes the other side's AudioClip.
+            // PV2's MicWrapper then keeps re-reading its frozen 1-second clip against the still-
+            // advancing device position — the Worker hears the last captured second repeated forever
+            // at irregular intervals. Photon native capture bypasses the Unity singleton entirely
+            // (same fix the Worker already uses for the Android mic-contention issue).
+            recorder.MicrophoneType = Recorder.MicType.Photon;
             var dsp = recorder.gameObject.GetComponent<WebRtcAudioDsp>()
                       ?? recorder.gameObject.AddComponent<WebRtcAudioDsp>();
             dsp.AEC = false; dsp.NoiseSuppression = true; dsp.AGC = true;

@@ -122,3 +122,6 @@ questionnaire_*.json
 /.codegraph/
 /.claude/worktrees/
 **/Backup~/
+
+# CoGaze: Windows standalone (Expert PC) build output
+/windows_build/
