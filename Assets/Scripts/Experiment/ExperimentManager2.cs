@@ -34,6 +34,11 @@ public class ExperimentManager2 : MonoBehaviour, IOnEventCallback
     public int participantNumber = 0;
     [Range(0, 23), SerializeField] public int participantOrderIndex = 0;  // 0-23 (÷6 = group order, %6 = gaze-mode order)
     [SerializeField] public string participantId = "P00";
+    // Resume support: skip the first N conditions of this participant's order (0 = full run).
+    // MUST match on both sides — the Worker reads _steps[CurrentStepIndex] from the Expert's
+    // broadcast index, so a mismatched step list shows wrong instructions. Synced via the
+    // "startConditionOffset" room property (see SceneBootstrapper2).
+    [Range(0, 9)] public int startConditionOffset = 0;
 
     // -----------------------------------------------------------------------
     // Public properties
@@ -1297,6 +1302,21 @@ public class ExperimentManager2 : MonoBehaviour, IOnEventCallback
             $"→ [{string.Join(", ", _conditionOrder)}]");
     }
 
+    // Re-expand the step list after a late startConditionOffset sync (Worker joined before the
+    // Expert published it). Safe only before the run starts — step indices travel in the Expert's
+    // state broadcasts, so both sides must build the same list.
+    public void RebuildStepsForOffset()
+    {
+        if (!_templateLoaded) return;   // LoadInstructions → ExpandTemplate will use the new value
+        if (CurrentState != ExperimentState.Setup &&
+            CurrentState != ExperimentState.Idle &&
+            CurrentState != ExperimentState.Tutorial) return;
+        ExpandTemplate();
+        TotalSteps = _steps.Count;
+        FileLogger.Log("Experiment",
+            $"[ExperimentManager] Steps rebuilt for startConditionOffset={startConditionOffset} ({_steps.Count} steps).");
+    }
+
     // Expand template into 10 flat conditions (no blocking, no Launch steps).
     private void ExpandTemplate()
     {
@@ -1311,11 +1331,19 @@ public class ExperimentManager2 : MonoBehaviour, IOnEventCallback
 
         const int restEveryNConditions = 3; // insert a break every 3 conditions (≈ every 3-4 sessions)
 
-        for (int c = 0; c < total; c++)
+        // Resume: start at presentation position startC (0 = full run). Condition indices and the
+        // pos/total labels stay ABSOLUTE (e.g. "条件 4/10"), so logs and displays match the original
+        // run and the same rest cadence (before absolute positions 4/7/10) is kept.
+        int startC = Mathf.Clamp(startConditionOffset, 0, total - 1);
+        if (startC > 0)
+            FileLogger.Log("Experiment",
+                $"[ExperimentManager] RESUME: skipping first {startC} conditions — starting at position {startC + 1}/{total}.");
+
+        for (int c = startC; c < total; c++)
         {
-            // Operator-gated rest break BETWEEN conditions (not before the first). Modeled on the
-            // Alignment gate: no timer, Enter resumes. Worker sees the rest instruction text.
-            if (c > 0 && c % restEveryNConditions == 0)
+            // Operator-gated rest break BETWEEN conditions (not before the first executed one).
+            // Modeled on the Alignment gate: no timer, Enter resumes. Worker sees the rest text.
+            if (c > startC && c % restEveryNConditions == 0)
             {
                 _steps.Add(new ExperimentStep
                 {

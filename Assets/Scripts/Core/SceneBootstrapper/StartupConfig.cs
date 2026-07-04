@@ -7,6 +7,10 @@ public class StartupConfig
 {
     public string participantId         = "P00";
     public int    participantOrderIndex = 0;
+    // Resume support: number of already-completed conditions to skip (0 = normal full run).
+    // Set per-boot in StartupUI; deliberately never restored into the UI so a stale value can't
+    // silently skip conditions for the next participant.
+    public int    startConditionOffset  = 0;
     public string pythonHost            = "127.0.0.1";
     public string microphoneDevice      = "";   // "" = use first available
     public bool   offlineMode           = false; // skip Photon, for local testing

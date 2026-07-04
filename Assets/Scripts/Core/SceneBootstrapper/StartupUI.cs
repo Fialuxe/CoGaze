@@ -10,6 +10,7 @@ public class StartupUI : MonoBehaviour
 
     private string   _participantId;
     private int      _orderIndex;
+    private int      _startOffset;   // resume: completed conditions to skip (always boots at 0)
     private string   _pythonHost;
     private string[] _micDevices;
     private int      _micIndex;
@@ -60,6 +61,7 @@ public class StartupUI : MonoBehaviour
         _config          = config;
         _participantId   = config.participantId;
         _orderIndex      = Mathf.Clamp(config.participantOrderIndex, 0, 23);
+        _startOffset     = 0;   // NEVER restored from config — a stale resume offset silently skips conditions
         _pythonHost      = config.pythonHost;
         _offlineMode     = config.offlineMode;
         _pythonScriptDir = config.pythonScriptDir;
@@ -74,7 +76,8 @@ public class StartupUI : MonoBehaviour
         // Panel height: base layout + 28px per mic device + 40px offline toggle + ~70px mic-test meter
         // + ~230px for the startup self-check section (header + up to ~7 rows + condition preview).
         // + ~120px for Python script dir field + status/launch row.
-        _panelH = 310f + _micDevices.Length * 28f + 40f + 70f + 230f + 120f;
+        // +70px for the resume-offset slider row.
+        _panelH = 310f + _micDevices.Length * 28f + 40f + 70f + 230f + 120f + 70f;
     }
 
     private void Start()
@@ -181,6 +184,27 @@ public class StartupUI : MonoBehaviour
         y += 24f;
         _orderIndex = Mathf.RoundToInt(GUI.HorizontalSlider(new Rect(x, y + 6f, w - 60f, 18f), _orderIndex, 0f, 23f));
         GUI.Label(new Rect(x + w - 52f, y, 52f, 30f), $"  {_orderIndex} / 23", _labelStyle);
+        y += 40f;
+
+        // ── Resume offset (crash recovery) ────────────────────
+        // 0 = normal full run. N = skip the first N conditions of THIS participant's order
+        // (use when a run died after N completed conditions; data appends to the same CSVs).
+        GUI.Label(new Rect(x, y, w, 22f),
+            _startOffset == 0
+                ? "再開位置: 0（最初から — 通常はこのまま）"
+                : $"再開位置: 完了済み {_startOffset} 条件をスキップ → 条件 {_startOffset + 1}/10 から開始",
+            _labelStyle);
+        y += 24f;
+        _startOffset = Mathf.RoundToInt(GUI.HorizontalSlider(new Rect(x, y + 6f, w - 60f, 18f), _startOffset, 0f, 9f));
+        GUI.Label(new Rect(x + w - 52f, y, 52f, 30f), $"  {_startOffset} / 9", _labelStyle);
+        if (_startOffset > 0)
+        {
+            var pv = GUI.color; GUI.color = new Color(1f, 0.75f, 0.3f);
+            GUI.Label(new Rect(x, y + 22f, w, 18f),
+                "▲ 途中再開モード — 同じ参加者ID・インデックスで再開してください", _hintStyle);
+            GUI.color = pv;
+            y += 18f;
+        }
         y += 40f;
 
         // ── Python host ───────────────────────────────────────
@@ -319,6 +343,7 @@ public class StartupUI : MonoBehaviour
     {
         _config.participantId         = _participantId.Trim();
         _config.participantOrderIndex = _orderIndex;
+        _config.startConditionOffset  = _startOffset;
         _config.pythonHost            = string.IsNullOrWhiteSpace(_pythonHost) ? "127.0.0.1" : _pythonHost.Trim();
         _config.microphoneDevice      = _micDevices[_micIndex];
         _config.offlineMode           = _offlineMode;

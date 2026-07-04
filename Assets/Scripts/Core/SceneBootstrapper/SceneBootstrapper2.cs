@@ -40,6 +40,7 @@ public class SceneBootstrapper2 : MonoBehaviourPunCallbacks, IOnEventCallback
     private bool               _setupDone;
     private bool               _offlineMode;
     private string             _selectedMic      = "";
+    private int                _startConditionOffset;   // resume: completed conditions to skip (Expert-authoritative)
     private WorkerVideoStream  _videoStream;      // Worker side — for WebRTC signaling
     private ExpertVideoDisplay _videoDisplay;     // Expert side — for WebRTC signaling
     private VoiceRecorder      _voiceRecorder;
@@ -117,6 +118,7 @@ public class SceneBootstrapper2 : MonoBehaviourPunCallbacks, IOnEventCallback
         // Apply config
         participantId         = config.participantId;
         participantOrderIndex = config.participantOrderIndex;
+        _startConditionOffset = config.startConditionOffset;
         _selectedMic          = config.microphoneDevice;
         _offlineMode          = config.offlineMode;
         config.Save();
@@ -297,11 +299,17 @@ public class SceneBootstrapper2 : MonoBehaviourPunCallbacks, IOnEventCallback
                 FileLogger.Log("Setup", $"[SceneBootstrapper2] Worker read participantOrderIndex={roomOi} from room properties at join.");
                 ApplyWorkerParticipantOrderIndex(roomOi);
             }
+            if (roomProps.TryGetValue("startConditionOffset", out object soObj) && soObj is int roomSo)
+            {
+                FileLogger.Log("Setup", $"[SceneBootstrapper2] Worker read startConditionOffset={roomSo} from room properties at join.");
+                ApplyWorkerStartConditionOffset(roomSo);
+            }
         }
 
         expMgr.participantOrderIndex = participantOrderIndex;
         expMgr.participantNumber     = participantOrderIndex;  // was unset → BuildConditionOrder logged "P0"
         expMgr.participantId         = participantId;
+        expMgr.startConditionOffset  = _startConditionOffset;  // before Initialize → ExpandTemplate
 
         GameObject playerObj;
         if (_offlineMode)
@@ -475,6 +483,11 @@ public class SceneBootstrapper2 : MonoBehaviourPunCallbacks, IOnEventCallback
             playerObj, expMgr, micDevice,
             participantId, participantOrderIndex, requiredTaskQRCount,
             RaiseSignal, _offlineMode);
+        // Publish the resume offset with the other identity props (always, even 0, so the Worker's
+        // value is deterministic regardless of what a previous session left behind).
+        if (!_offlineMode)
+            PhotonNetwork.CurrentRoom?.SetCustomProperties(
+                new Hashtable { ["startConditionOffset"] = _startConditionOffset });
         _videoDisplay  = r.VideoDisplay;
         _voiceRecorder = r.VoiceRecorder;
         StartSpeakerSearch(true);
@@ -504,6 +517,11 @@ public class SceneBootstrapper2 : MonoBehaviourPunCallbacks, IOnEventCallback
             FileLogger.Log("Setup", $"[SceneBootstrapper2] Worker received participantOrderIndex={oi} from room properties.");
             ApplyWorkerParticipantOrderIndex(oi);
         }
+        if (changedProps.TryGetValue("startConditionOffset", out object soObj) && soObj is int so)
+        {
+            FileLogger.Log("Setup", $"[SceneBootstrapper2] Worker received startConditionOffset={so} from room properties.");
+            ApplyWorkerStartConditionOffset(so);
+        }
     }
 
     // Worker: adopt the Expert-synced participantId into this bootstrapper, ExperimentManager2,
@@ -522,6 +540,21 @@ public class SceneBootstrapper2 : MonoBehaviourPunCallbacks, IOnEventCallback
         {
             cfg.participantId = id;
             cfg.Save();
+        }
+    }
+
+    // Worker: adopt the Expert's resume offset. Both sides must build the SAME step list — step
+    // indices travel in the Expert's state broadcasts and the Worker reads its instruction text
+    // from _steps[index] — so rebuild if the template was already expanded (worker-first join).
+    // Session-scoped by design: never persisted to the on-device config.
+    private void ApplyWorkerStartConditionOffset(int off)
+    {
+        _startConditionOffset = off;
+        var expMgr = FindAnyObjectByType<ExperimentManager2>();
+        if (expMgr != null && expMgr.startConditionOffset != off)
+        {
+            expMgr.startConditionOffset = off;
+            expMgr.RebuildStepsForOffset();
         }
     }
 
