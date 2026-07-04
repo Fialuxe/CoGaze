@@ -111,6 +111,13 @@ public class ExperimentManager2 : MonoBehaviour, IOnEventCallback
     private const byte k_syncRequest   = 0xFF;
     private const byte k_countdownTick = 0xFE;
     private const byte k_workerPaused  = 0xFD;
+    private const byte k_expertNotice  = 0xFC;
+
+    // Expert-activity notice codes sent via k_expertNotice. The webcam calibration runs entirely
+    // on the Expert PC (calib.* messages fire only local OnInstructionChanged there), so without
+    // an explicit broadcast the Worker waits ~1 minute on a generic "preparing" text with no clue
+    // what is happening.
+    private enum ExpertNotice : byte { CalibRunning = 0, CalibDone = 1, CalibIssue = 2 }
 
     private bool _workerPauseStoppedTimer;
 
@@ -167,7 +174,11 @@ public class ExperimentManager2 : MonoBehaviour, IOnEventCallback
             {
                 FileLogger.Log("Experiment", "[ExperimentManager] OscSessionManager found — Python OSC enabled.");
                 _oscSession.OnCalibrationResult += HandleCalibrationResult;
-                _oscSession.OnCalibrationRetrying += _ => _webcamCalibUI?.StartCalibration();
+                _oscSession.OnCalibrationRetrying += _ =>
+                {
+                    _webcamCalibUI?.StartCalibration();
+                    BroadcastExpertNotice(ExpertNotice.CalibRunning);
+                };
 
                 // Subscribe before LoadInstructions so we never miss a pong that arrives early
                 _pongForReadyHandler = () => {
@@ -298,6 +309,7 @@ public class ExperimentManager2 : MonoBehaviour, IOnEventCallback
             _calibTimeoutCo = StartCoroutine(CalibrationTimeout());
             OnInstructionChanged?.Invoke(MessageBank.Get("calib.retrying"));
             _webcamCalibUI?.StartCalibration();
+            BroadcastExpertNotice(ExpertNotice.CalibRunning);
         }
 
         // Hold-to-confirm: fire once when Del has been held continuously for k_delHoldSeconds.
@@ -414,11 +426,13 @@ public class ExperimentManager2 : MonoBehaviour, IOnEventCallback
                 ? MessageBank.Get("calib.pass")
                 : MessageBank.Format("calib.marginal", ("errX", errX.ToString("F3")), ("errY", errY.ToString("F3")));
             OnInstructionChanged?.Invoke(msg);
+            BroadcastExpertNotice(ExpertNotice.CalibDone);
         }
         else // FAIL or aborted (quality == 0)
         {
             _calibrationFailed = true;
             OnInstructionChanged?.Invoke(MessageBank.Get("calib.fail"));
+            BroadcastExpertNotice(ExpertNotice.CalibIssue);
         }
     }
 
@@ -571,6 +585,7 @@ public class ExperimentManager2 : MonoBehaviour, IOnEventCallback
                                 {
                                     FileLogger.Log("Experiment", $"[ExperimentManager2] StartCalibration for {condNameCapture} (after session ACK)");
                                     _webcamCalibUI?.StartCalibration();
+                                    BroadcastExpertNotice(ExpertNotice.CalibRunning);
                                 }
                                 else
                                 {
@@ -660,6 +675,7 @@ public class ExperimentManager2 : MonoBehaviour, IOnEventCallback
         FileLogger.Log("Experiment", $"[ExperimentManager2] Calibration timed out after {CalibTimeoutSeconds:F0}s (no session_start ACK or result).");
         OnInstructionChanged?.Invoke(
             "キャリブレーションが応答しません (タイムアウト)。\nPython プロセスの状態を確認してください。\n[R] で再試行 / [Enter] でスキップ");
+        BroadcastExpertNotice(ExpertNotice.CalibIssue);
     }
 
     // -----------------------------------------------------------------------
@@ -859,6 +875,14 @@ public class ExperimentManager2 : MonoBehaviour, IOnEventCallback
 
     public void BroadcastCurrentState() => BroadcastState(CurrentState);
 
+    private void BroadcastExpertNotice(ExpertNotice notice)
+    {
+        if (!IsExpert) return;
+        object[] data = { k_expertNotice, (byte)notice };
+        var opts = new RaiseEventOptions { Receivers = ReceiverGroup.Others };
+        PhotonNetwork.RaiseEvent(k_photonEvent, data, opts, SendOptions.SendReliable);
+    }
+
     public void SendSyncRequest()
     {
         if (!PhotonNetwork.InRoom) return; // Quest復帰直後など、まだルームにいない場合は無視
@@ -960,6 +984,11 @@ public class ExperimentManager2 : MonoBehaviour, IOnEventCallback
                         FileLogger.Log("Experiment", "[ExperimentManager2] Worker resumed — timer restarted.");
                     }
                     BroadcastState(CurrentState);
+                    // Re-send the calibration notice too: BroadcastState makes the resuming Worker
+                    // show the generic ConditionStart text, which would silently replace the
+                    // "calibration in progress" message mid-calibration.
+                    if (_calibrationPending)
+                        BroadcastExpertNotice(ExpertNotice.CalibRunning);
                 }
                 return;
             }
@@ -975,6 +1004,28 @@ public class ExperimentManager2 : MonoBehaviour, IOnEventCallback
                         StopTimer();
                     }
                     OnInstructionChanged?.Invoke("⚠ Worker の HMD が外されました。装着後、自動で再開します。");
+                }
+                return;
+            }
+
+            // Expert-activity notice (e.g. webcam calibration progress) — show on the Worker HUD
+            // so the subject knows what the Expert is doing during otherwise-silent waits.
+            if (first == k_expertNotice)
+            {
+                if (!IsExpert && data.Length > 1)
+                {
+                    switch ((ExpertNotice)Convert.ToByte(data[1]))
+                    {
+                        case ExpertNotice.CalibRunning:
+                            OnInstructionChanged?.Invoke(CoGazeStrings.Worker_ExpertCalibrating);
+                            break;
+                        case ExpertNotice.CalibDone:
+                            OnInstructionChanged?.Invoke(CoGazeStrings.Worker_ExpertCalibDone);
+                            break;
+                        case ExpertNotice.CalibIssue:
+                            OnInstructionChanged?.Invoke(CoGazeStrings.Worker_ExpertCalibIssue);
+                            break;
+                    }
                 }
                 return;
             }

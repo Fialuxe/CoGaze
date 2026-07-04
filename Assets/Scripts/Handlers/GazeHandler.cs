@@ -13,8 +13,14 @@ public class GazeHandler : MonoBehaviourPun, IPunObservable
     {
         get
         {
+            // ローカル（Expert）読み出しも OnPhotonSerializeView の送信値と同じゲートを通す。
+            // 素通しにすると、Python視線ストリーム未受信時に Worker は blink=-1（灰色フォール
+            // バック）を見るのに Expert は初期値 blink=0（通常色・画面中央）を見る、という
+            // 両者の表示不一致が起きる。
             if (photonView.IsMine && _gazeInput != null)
-                return _gazeInput.GazeData;
+                return _gazeInput.IsAvailable
+                    ? _gazeInput.GazeData
+                    : new Vector3(0.5f, 0.5f, -1f);  // OnPhotonSerializeView と同じ番兵
             return _receivedGazeData;
         }
     }
